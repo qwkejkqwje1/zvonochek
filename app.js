@@ -283,8 +283,8 @@ async function onSignal(m) {
   switch (m.type) {
     case 'hello': case 'hi':
       if (!acceptPeer(m)) return;
-      if (m.type === 'hello') S.sig.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName() });
-      if ((m.ver || 0) !== APP_VERSION && !S.verWarned) {
+      if (m.type === 'hello') S.sig.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION });
+      if ((m.ver || 0) !== APP_VERSION && !S.verWarned && (m.type === 'hello' || m.ver)) {
         S.verWarned = true;
         const old = (m.ver || 0) < APP_VERSION;
         const t = old ? 'У собеседника старая версия ZVONochek — пусть обновит страницу (Ctrl+F5 или переоткроет ссылку)'
