@@ -16,6 +16,15 @@ export const CONFIG = {
     'wss://test.mosquitto.org:8081/mqtt',
   ],
 
+  // Способ №3: публичные Nostr-реле (WSS, порт 443). Бесплатно, без регистрации.
+  NOSTR_RELAYS: [
+    'wss://relay.damus.io',
+    'wss://nos.lol',
+    'wss://relay.primal.net',
+    'wss://nostr.mom',
+    'wss://offchain.pub',
+  ],
+
   // Публичные STUN-серверы
   STUN: [
     'stun:stun.l.google.com:19302',

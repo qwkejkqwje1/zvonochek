@@ -1,6 +1,6 @@
-import { CONFIG } from './config.js?v=6';
-import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=6';
-import { Signaling } from './signaling.js?v=6';
+import { CONFIG } from './config.js?v=7';
+import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=7';
+import { Signaling } from './signaling.js?v=7';
 
 const $ = (s, r = document) => r.querySelector(s);
 const randHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -233,11 +233,11 @@ async function join() {
   if (S.dev.spk) $('#remote').setSinkId?.(S.dev.spk).catch(() => {});
   S.sig = new Signaling({
     topic: S.room.topic, key: S.room.key, selfId, inst,
-    brokers: CONFIG.MQTT_BROKERS, workerUrl: CONFIG.WORKER_URL,
+    brokers: CONFIG.MQTT_BROKERS, workerUrl: CONFIG.WORKER_URL, relays: CONFIG.NOSTR_RELAYS,
     onMessage: onSignal, onStatus: (st) => { S.sigStatus = st; updateStatus(); },
   });
   S.sig.onTransportUp = () => { hello(); if (!S.peer) progress(25, 'Сеть на связи, ждём собеседника'); };
-  log(`Вход в комнату. Способы сигнала: MQTT (${CONFIG.MQTT_BROKERS.length} брокера)${CONFIG.WORKER_URL ? ' + Worker' : ''}; TURN: ${S.hasTurn ? 'есть' : 'нет'} (${S.turnInfo || '—'})`);
+  log(`Вход в комнату. Способы сигнала: MQTT (${CONFIG.MQTT_BROKERS.length}), ${CONFIG.WORKER_URL ? 'Worker, ' : ''}Nostr (${CONFIG.NOSTR_RELAYS.length}); TURN: ${S.hasTurn ? 'есть' : 'нет'} (${S.turnInfo || '—'})`);
   progress(10, 'Подключение к сети…');
   S.sig.start();
   S.joinedAt = Date.now();
@@ -264,7 +264,7 @@ function hello() { S.sig?.send({ type: 'hello', name: myName() }); }
 //  • ICE restart при обрыве, затем полный перезапуск попытки.
 const stats = (() => { try { return JSON.parse(localStorage.zvStats) || { tries: 0, ok: 0 }; } catch { return { tries: 0, ok: 0 }; } })();
 const saveStats = () => { localStorage.zvStats = JSON.stringify(stats); };
-const viaName = (v) => ({ mqtt: 'MQTT', worker: 'Worker' }[v] || v);
+const viaName = (v) => ({ mqtt: 'MQTT', worker: 'Worker', nostr: 'Nostr' }[v] || v);
 const to = () => ({ to: S.peer.id, toInst: S.peer.inst, gen: S.gen });
 
 async function onSignal(m) {
@@ -318,6 +318,7 @@ function createPC() {
   const pc = (S.pc = new RTCPeerConnection(pcConfig()));
   S.makingOffer = false; S.ignoreOffer = false; S.pendingCands = [];
   S.cands = { local: {}, remote: {} }; S.route = ''; S.method = '';
+  S.qLevel = 0; S.qBad = 0; S.qGood = 0; S.qHinted = false;
   log(`Попытка №${S.gen + 1}: STUN ${CONFIG.STUN.length}, TURN ${S.hasTurn ? 'есть' : 'нет'}${S.relayOnly && S.hasTurn ? ', только TURN' : ''}`);
   S.remote = new MediaStream(); $('#remote').srcObject = S.remote;
   S.ctrl = pc.createDataChannel('ctrl', { negotiated: true, id: 0 });
@@ -445,6 +446,7 @@ function onPcState(pc) {
     if (!S.countedOk) { S.countedOk = true; stats.ok++; saveStats(); }
     showSafety();
     startStats(true);
+    applyQuality();
   } else if (s === 'disconnected') {
     progress(80, 'Связь прервалась, восстанавливаем…');
     S.restartTimer = setTimeout(() => S.pc === pc && pc.connectionState !== 'connected' && restartIce(), 2500);
@@ -493,7 +495,7 @@ function progress(pct, step) {
 }
 function progressDetail() {
   const sg = S.sigStatus;
-  const ways = [`MQTT ${sg.mqttUp}/${sg.mqttTotal}`, CONFIG.WORKER_URL ? `Worker ${sg.worker === 'up' ? '✓' : '✗'}` : null].filter(Boolean).join(' · ');
+  const ways = [`MQTT ${sg.mqttUp}/${sg.mqttTotal}`, CONFIG.WORKER_URL ? `Worker ${sg.worker === 'up' ? '✓' : '✗'}` : null, `Nostr ${sg.nostrUp || 0}/${sg.nostrTotal || 0}`].filter(Boolean).join(' · ');
   $('#connMethod').textContent =
     `Сигнал: ${ways}\nМои маршруты: ${candText(S.cands?.local || {})}\nМаршруты собеседника: ${candText(S.cands?.remote || {})}` +
     (S.peer ? `\nПопытка №${S.gen + 1}` : '') + (S.method ? `\nСпособ: ${S.method}` : '');
@@ -533,7 +535,7 @@ function updateStatus() {
   const st = $('#status'); if (!st) return;
   const s = S.pc?.connectionState;
   const sg = S.sigStatus;
-  const sigUp = sg.mqttUp > 0 || sg.worker === 'up';
+  const sigUp = sg.mqttUp > 0 || sg.worker === 'up' || sg.nostrUp > 0;
   let text;
   if (!sigUp) text = '⏳ Подключение к сети…';
   else if (!S.peer) text = '🟢 Ожидаем собеседника';
@@ -551,6 +553,7 @@ function transportText() {
   const sg = S.sigStatus;
   return `Способ 1 — MQTT-брокеры: ${sg.mqttUp}/${sg.mqttTotal} на связи\n` +
     `Способ 2 — Cloudflare Worker: ${CONFIG.WORKER_URL ? ({ up: 'на связи ✓', down: 'нет связи ✗', connecting: 'подключение…' }[sg.worker]) : 'не настроен'}\n` +
+    `Способ 3 — Nostr-реле: ${sg.nostrUp || 0}/${sg.nostrTotal || 0} на связи\n` +
     `TURN-ретранслятор: ${S.hasTurn ? 'есть ✓' : 'нет (только P2P)'} (${S.turnInfo || '—'})\n` +
     `Маршрут звонка: ${S.method || '—'}`;
 }
@@ -565,11 +568,12 @@ function startStats(now) {
   const tick = async () => {
     const pc = S.pc; if (!pc) return;
     const r = await pc.getStats().catch(() => null); if (!r) return;
-    let pairId, pair, lost = 0, recv = 0, bytes = 0;
+    let pairId, pair, lost = 0, recv = 0, bytes = 0, outLoss = 0;
     r.forEach((x) => { if (x.type === 'transport' && x.selectedCandidatePairId) pairId = x.selectedCandidatePairId; });
     r.forEach((x) => {
       if (x.type === 'candidate-pair' && (x.id === pairId || (!pairId && (x.selected || (x.nominated && x.state === 'succeeded'))))) pair = x;
       if (x.type === 'inbound-rtp') { lost += x.packetsLost || 0; recv += x.packetsReceived || 0; bytes += x.bytesReceived || 0; }
+      if (x.type === 'remote-inbound-rtp' && x.kind === 'video' && typeof x.fractionLost === 'number') outLoss = Math.max(outLoss, x.fractionLost * 100);
     });
     const now = Date.now(), p = S.prevStats; S.prevStats = { lost, recv, bytes, now };
     if (!pair) return;
@@ -584,14 +588,42 @@ function startStats(now) {
     let loss = 0, kbps = 0;
     if (p) { const dl = lost - p.lost, dr = recv - p.recv; loss = dl + dr > 0 ? (100 * dl) / (dl + dr) : 0; kbps = ((bytes - p.bytes) * 8) / (now - p.now); }
     const lvl = rtt < 200 && loss < 2 ? 'good' : rtt < 450 && loss < 7 ? 'mid' : 'bad';
+    adaptQuality(outLoss, rtt);
     const q = $('#quality');
     q.className = 'pill ' + lvl;
-    q.textContent = `${{ good: '📶', mid: '📶', bad: '⚠️' }[lvl]} ${relay ? 'TURN' : 'P2P'} · ${rtt} мс · ${loss.toFixed(1)}% · ${(kbps / 1000).toFixed(1)} Мбит/с`;
+    q.textContent = `${{ good: '📶', mid: '📶', bad: '⚠️' }[lvl]}${S.qLevel ? ' 🔻' : ''} ${relay ? 'TURN' : 'P2P'} · ${rtt} мс · ${loss.toFixed(1)}% · ${(kbps / 1000).toFixed(1)} Мбит/с`;
     q.title = `Качество: ${{ good: 'хорошее', mid: 'среднее', bad: 'плохое' }[lvl]}. Маршрут: ${S.route}`;
     updateStatus();
   };
   S.statsTimer = setInterval(tick, 2000);
   if (now) setTimeout(tick, 300);
+}
+
+// Автоподстройка качества: при потерях снижаем битрейт/разрешение видео, звук — в приоритете.
+const QLEVELS = [
+  { maxBitrate: 1500000, scale: 1, fps: 30 },
+  { maxBitrate: 600000, scale: 1.5, fps: 24 },
+  { maxBitrate: 300000, scale: 2, fps: 15 },
+  { maxBitrate: 120000, scale: 4, fps: 10 },
+];
+async function applyQuality() {
+  if (!S.pc) return;
+  const L = QLEVELS[S.qLevel || 0];
+  for (const snd of S.pc.getSenders()) {
+    if (!snd.track) continue;
+    const p = snd.getParameters();
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+    if (snd.track.kind === 'audio') { p.encodings[0].priority = 'high'; p.encodings[0].networkPriority = 'high'; }
+    else { p.encodings[0].maxBitrate = L.maxBitrate; p.encodings[0].scaleResolutionDownBy = L.scale; p.encodings[0].maxFramerate = L.fps; }
+    try { await snd.setParameters(p); } catch {}
+  }
+}
+function adaptQuality(outLoss, rtt) {
+  S.qLevel ??= 0; S.qBad ??= 0; S.qGood ??= 0;
+  if (outLoss > 6 || rtt > 700) { S.qBad++; S.qGood = 0; } else if (outLoss < 2 && rtt < 350) { S.qGood++; S.qBad = 0; }
+  if (S.qBad >= 2 && S.qLevel < QLEVELS.length - 1) { S.qLevel++; S.qBad = 0; log(`Связь хуже — снижаю качество видео (уровень ${S.qLevel})`); applyQuality(); }
+  if (S.qGood >= 8 && S.qLevel > 0) { S.qLevel--; S.qGood = 0; log(`Связь лучше — повышаю качество видео (уровень ${S.qLevel})`); applyQuality(); }
+  if (S.qLevel === QLEVELS.length - 1 && S.qBad >= 3 && !S.qHinted) { S.qHinted = true; toast('Очень слабая связь — выключите камеру, чтобы звук не прерывался', 7000); }
 }
 
 async function showSafety() {
