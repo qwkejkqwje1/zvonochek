@@ -1,6 +1,6 @@
-import { CONFIG } from './config.js?v=7';
-import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=7';
-import { Signaling } from './signaling.js?v=7';
+import { CONFIG } from './config.js?v=8';
+import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=8';
+import { Signaling } from './signaling.js?v=8';
 
 const $ = (s, r = document) => r.querySelector(s);
 const randHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, '0')).join('');

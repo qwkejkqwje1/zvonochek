@@ -51,5 +51,11 @@ export const CONFIG = {
       username: 'b0cc17f06cf20504ab5cd581',
       credential: 'YSV26ACRA6JxZ8TQ',
     },
+    // Запасной TURN: ExpressTURN (бесплатный тариф)
+    {
+      urls: ['turn:free.expressturn.com:3478', 'turn:free.expressturn.com:3478?transport=tcp'],
+      username: '000000002107165853',
+      credential: '3T1HHXm3M1UWIyZ3pOzBv5EwRbI=',
+    },
   ],
 };
