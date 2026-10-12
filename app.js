@@ -1,6 +1,6 @@
-import { CONFIG } from './config.js';
-import { newSecret, deriveRoom, safetyCode } from './crypto.js';
-import { Signaling } from './signaling.js';
+import { CONFIG } from './config.js?v=5';
+import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=5';
+import { Signaling } from './signaling.js?v=5';
 
 const $ = (s, r = document) => r.querySelector(s);
 const randHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -240,7 +240,15 @@ async function join() {
   log(`Вход в комнату. Способы сигнала: MQTT (${CONFIG.MQTT_BROKERS.length} брокера)${CONFIG.WORKER_URL ? ' + Worker' : ''}; TURN: ${S.hasTurn ? 'есть' : 'нет'} (${S.turnInfo || '—'})`);
   progress(10, 'Подключение к сети…');
   S.sig.start();
-  S.helloTimer = setInterval(() => { if (!S.pc || S.pc.connectionState !== 'connected') hello(); }, 8000);
+  S.joinedAt = Date.now();
+  S.helloTimer = setInterval(() => {
+    if (!S.pc || S.pc.connectionState !== 'connected') hello();
+    if (!S.peer && !S.waitHinted && Date.now() - S.joinedAt > 25000) {
+      S.waitHinted = true;
+      log('Собеседник пока не найден. Если он уже по этой ссылке — пусть обновит страницу (Ctrl+F5)');
+      $('#waitText').textContent = 'Собеседник пока не найден. Если он уже в звонке — попросите его обновить страницу';
+    }
+  }, 6000);
   try { S.wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
   updateStatus();
   $('#btnJoin').disabled = false;
@@ -276,7 +284,7 @@ async function onSignal(m) {
       if (typeof m.gen === 'number' && m.gen < S.gen) return; // устаревшая попытка
       if (m.type === 'desc') await onDesc(m.desc, m.via); else await onCand(m.cand);
       break;
-    case 'bye': S.dead.add(m.inst); if (S.peer?.id === m.from && S.peer.inst === m.inst) peerLeft(); break;
+    case 'bye': if (S.peer?.id === m.from && S.peer.inst === m.inst) peerLeft(); break; // не «хороним» навсегда: на телефоне вкладка может вернуться
     case 'full': if (!S.peer) { toast('В комнате уже двое — звонок 1:1', 6000); log('Комната занята'); } break;
   }
 }
@@ -532,7 +540,7 @@ function updateStatus() {
   else if (s === 'connected') text = `🟢 ${S.peer.name}`;
   else text = `🔄 ${S.pct}% · ${S.step}`;
   st.textContent = text;
-  $('#waitText').textContent = !S.peer ? 'Ожидаем собеседника… Отправьте ему ссылку 🔗' : s === 'connected' ? (S.peer.name + (S.peer.cam === false ? ' — камера выключена' : '')) : `Соединяемся с ${S.peer.name}…`;
+  $('#waitText').textContent = !S.peer ? (S.waitHinted ? 'Собеседник пока не найден. Если он уже в звонке — попросите его обновить страницу' : 'Ожидаем собеседника… Отправьте ему ссылку 🔗') : s === 'connected' ? (S.peer.name + (S.peer.cam === false ? ' — камера выключена' : '')) : `Соединяемся с ${S.peer.name}…`;
   $('#conn').classList.toggle('hidden', s === 'connected');
   progressDetail();
   $('#timer').classList.toggle('hidden', !S.callStart);

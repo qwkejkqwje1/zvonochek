@@ -3,7 +3,7 @@
 //   2) Cloudflare Worker (WebSocket), если задан WORKER_URL
 // Каждое сообщение зашифровано AES-256-GCM и отправляется во все каналы,
 // получатель удаляет дубли. Брокеры и Worker видят только шифротекст.
-import { seal, open } from './crypto.js';
+import { seal, open } from './crypto.js?v=5';
 
 const rid = () => crypto.getRandomValues(new Uint32Array(2)).join('-');
 
@@ -107,7 +107,7 @@ export class Signaling {
     if (!m || m.from === this.selfId) return;
     if (m.to && m.to !== this.selfId) return;
     if (m.toInst && m.toInst !== this.inst) return;
-    if (Math.abs(Date.now() - m.ts) > 10 * 60 * 1000) return; // защита от повторов старых сообщений
+    if (Math.abs(Date.now() - m.ts) > 12 * 3600 * 1000) return; // старые сообщения (часы на телефонах бывают неточными)
     if (this.seen.has(m.mid)) return;
     this.seen.set(m.mid, Date.now());
     if (this.seen.size > 2000) for (const [k, t] of this.seen) if (Date.now() - t > 300000) this.seen.delete(k);
