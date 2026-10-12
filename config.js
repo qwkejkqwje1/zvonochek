@@ -4,7 +4,7 @@ export const CONFIG = {
 
   // Способ №2: адрес Cloudflare Worker (запасной сигналинг + TURN).
   // Пусто = работает только способ №1 (публичные MQTT-брокеры).
-  WORKER_URL: '',
+  WORKER_URL: 'https://zvonochek.zerewgwe.workers.dev',
 
   // Способ №1: публичные MQTT-брокеры (WSS). Подключаемся ко всем сразу —
   // если один недоступен, работают остальные.

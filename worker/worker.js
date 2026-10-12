@@ -13,23 +13,39 @@ export default {
 
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: { ...cors, 'access-control-allow-methods': 'GET', 'access-control-max-age': '86400' } });
     if (url.pathname === '/' || url.pathname === '/health')
-      return json({ ok: true, app: 'ZVONochek', turn: !!(env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', turn: !!((env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) || (env.METERED_DOMAIN && env.METERED_API_KEY) || (env.TURN_URLS && env.TURN_USERNAME)) }, 200, cors);
     if (!originOk) return json({ error: 'origin not allowed' }, 403, cors);
 
     if (url.pathname === '/turn') {
-      if (!env.TURN_KEY_ID || !env.TURN_KEY_API_TOKEN) return json({ iceServers: [] }, 200, cors);
-      const ttl = 6 * 3600; // ключи живут 6 часов
-      const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ ttl }),
-      });
-      if (!r.ok) return json({ iceServers: [], error: 'turn ' + r.status }, 502, cors);
-      const data = await r.json();
-      let list = [].concat(data.iceServers || []);
+      const list = [];
+      // 1) Cloudflare TURN (нужна привязанная карта)
+      if (env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) {
+        try {
+          const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ ttl: 6 * 3600 }),
+          });
+          if (r.ok) list.push(...[].concat((await r.json()).iceServers || []));
+        } catch {}
+      }
+      // 2) Metered.ca (бесплатный тариф без карты): METERED_DOMAIN = "имя.metered.live"
+      if (env.METERED_DOMAIN && env.METERED_API_KEY) {
+        try {
+          const r = await fetch(`https://${env.METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${encodeURIComponent(env.METERED_API_KEY)}`);
+          if (r.ok) list.push(...[].concat(await r.json()));
+        } catch {}
+      }
+      // 3) Любой свой TURN (например, coturn на VPS) со статическим логином
+      if (env.TURN_URLS && env.TURN_USERNAME && env.TURN_CREDENTIAL) {
+        list.push({ urls: env.TURN_URLS.split(',').map((u) => u.trim()), username: env.TURN_USERNAME, credential: env.TURN_CREDENTIAL });
+      }
       // Браузеры плохо работают с портом 53 — убираем такие адреса
-      list = list.map((s) => ({ ...s, urls: [].concat(s.urls).filter((u) => !/:53(\?|$)/.test(u)) })).filter((s) => s.urls.length);
-      return json({ iceServers: list }, 200, cors);
+      const clean = list
+        .filter((s) => s && s.urls)
+        .map((s) => ({ ...s, urls: [].concat(s.urls).filter((u) => !/:53(\?|$)/.test(u)) }))
+        .filter((s) => s.urls.length);
+      return json({ iceServers: clean }, 200, cors);
     }
 
     const m = url.pathname.match(/^\/room\/([a-f0-9]{32,64})$/);

@@ -1,14 +1,12 @@
 # Cloudflare Worker для ZVONochek
 
-Деплоится автоматически через GitHub Actions (`.github/workflows/deploy-worker.yml`).
+Деплой: Cloudflare → Workers & Pages → zvonochek → Settings → Build → **Root directory: `worker`**.
 
-Нужны 4 секрета в репозитории (Settings → Secrets and variables → Actions):
-- `CLOUDFLARE_API_TOKEN` — API-токен Cloudflare (шаблон «Edit Cloudflare Workers»)
-- `CLOUDFLARE_ACCOUNT_ID` — ID аккаунта Cloudflare
-- `TURN_KEY_ID` — ID TURN-ключа (Cloudflare → Realtime → TURN Server)
-- `TURN_KEY_API_TOKEN` — API-токен этого TURN-ключа
+Без TURN Worker тоже работает: даёт запасной сигналинг (способ №2).
 
-Затем откройте Actions → Deploy Worker → Run workflow.
-Адрес Worker будет вида `https://zvonochek.<поддомен>.workers.dev`. Его нужно вписать в `WORKER_URL` в `config.js`.
+TURN можно подключить любым из способов. Значения добавляются в Settings → Variables and Secrets как **Secret**:
+- **Metered.ca** (бесплатно, без карты): `METERED_DOMAIN` (например `zvonochek.metered.live`), `METERED_API_KEY`
+- **Свой coturn или другой TURN**: `TURN_URLS` (через запятую), `TURN_USERNAME`, `TURN_CREDENTIAL`
+- **Cloudflare TURN** (нужна карта): `TURN_KEY_ID`, `TURN_KEY_API_TOKEN`
 
-Проверка: откройте `https://zvonochek.<поддомен>.workers.dev/health`. Должно быть `{"ok":true,...,"turn":true}`.
+Проверка: `https://zvonochek.zerewgwe.workers.dev/health` → `{"ok":true,...,"turn":true}`
