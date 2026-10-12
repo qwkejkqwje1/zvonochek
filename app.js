@@ -1,6 +1,6 @@
-import { CONFIG } from './config.js?v=8';
-import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=8';
-import { Signaling } from './signaling.js?v=8';
+import { CONFIG } from './config.js?v=9';
+import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=9';
+import { Signaling } from './signaling.js?v=9';
 
 const $ = (s, r = document) => r.querySelector(s);
 const randHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -340,6 +340,9 @@ function createPC() {
     $('#remote').play().catch((e) => { if (e.name === 'NotAllowedError') $('#unmuteHint').classList.remove('hidden'); });
   };
   pc.onnegotiationneeded = async () => {
+    // Первый offer делает только одна сторона (impolite). Иначе оба шлют offer одновременно,
+    // и в новых Chrome/Edge откат offer ломает канал данных: «Failed to start SCTP transport».
+    if (S.polite && !pc.currentRemoteDescription) { log('Жду запрос (offer) от собеседника'); return; }
     try { S.makingOffer = true; await pc.setLocalDescription(); }
     catch (e) { log('Ошибка offer: ' + e.message); return; }
     finally { S.makingOffer = false; }
@@ -424,7 +427,10 @@ async function onDesc(desc, via) {
     else clearTimeout(S.resendTimer);
     progress(65, 'Ключи согласованы, ищем маршрут…');
     progressDetail();
-  } catch (e) { log('Ошибка SDP: ' + e.message); }
+  } catch (e) {
+    log('Ошибка SDP: ' + e.message);
+    if (S.pc === pc && !S.polite) armWatchdog(pc, 1500); // соединение сломано — быстро начинаем заново
+  }
 }
 async function onCand(c) {
   if (!c) return;
