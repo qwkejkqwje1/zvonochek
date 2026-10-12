@@ -17,6 +17,7 @@ const S = {
   ctrl: null, fileCh: null, sendQueue: [], sending: false, incoming: null,
   restartTimer: null, statsTimer: null, helloTimer: null, callStart: 0, prevStats: null,
   sigStatus: { mqttUp: 0, mqttTotal: 0, worker: 'off' }, unread: 0, wakeLock: null, joined: false, dead: new Set(),
+  gen: 0, watchdog: null, resendTimer: null, log: [], cands: { local: {}, remote: {} }, via: {}, pct: 0, step: '', method: '', countedOk: false,
 };
 
 // ---------- утилиты UI ----------
@@ -196,18 +197,25 @@ $('#btnQr').onclick = () => { const q = $('#qr'); q.classList.toggle('hidden'); 
 $('#btnJoin').onclick = join;
 
 // ---------- вход в звонок ----------
+async function fetchJson(url, ms = 5000) {
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);
+  try { const r = await fetch(url, { signal: ctl.signal }); return r.ok ? await r.json() : null; } finally { clearTimeout(t); }
+}
+const isTurn = (s) => [].concat(s?.urls || []).some((u) => /^turns?:/.test(u));
 async function loadIce() {
   const servers = [{ urls: CONFIG.STUN }, ...CONFIG.EXTRA_ICE_SERVERS];
-  S.hasTurn = CONFIG.EXTRA_ICE_SERVERS.some((s) => String(s.urls).includes('turn'));
-  if (CONFIG.WORKER_URL) {
-    try {
-      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 5000);
-      const r = await fetch(CONFIG.WORKER_URL.replace(/\/$/, '') + '/turn', { signal: ctl.signal });
-      clearTimeout(t);
-      const j = await r.json();
-      if (Array.isArray(j.iceServers) && j.iceServers.length) { servers.push(...j.iceServers); S.hasTurn = true; }
-    } catch (e) { console.warn('TURN недоступен', e); }
-  }
+  const info = [];
+  const jobs = [];
+  if (CONFIG.WORKER_URL) jobs.push(fetchJson(CONFIG.WORKER_URL.replace(/\/$/, '') + '/turn')
+    .then((j) => { const l = (j?.iceServers || []).filter(isTurn); servers.push(...l); info.push(l.length ? 'Worker ✓' : 'Worker: TURN не настроен'); })
+    .catch(() => info.push('Worker недоступен')));
+  const M = CONFIG.METERED;
+  if (M?.domain && M?.apiKey) jobs.push(fetchJson(`https://${M.domain}/api/v1/turn/credentials?apiKey=${encodeURIComponent(M.apiKey)}`)
+    .then((j) => { const l = [].concat(j || []).filter(isTurn).map((s) => ({ ...s, urls: [].concat(s.urls).filter((u) => !/:53(\?|$)/.test(u)) })); servers.push(...l); info.push(l.length ? 'Metered ✓' : 'Metered: пусто'); })
+    .catch(() => info.push('Metered недоступен')));
+  await Promise.all(jobs);
+  S.hasTurn = servers.some(isTurn);
+  S.turnInfo = info.join(', ') || 'не настроен';
   return servers;
 }
 const pcConfig = () => ({ iceServers: S.ice, iceTransportPolicy: S.relayOnly && S.hasTurn ? 'relay' : 'all', bundlePolicy: 'max-bundle' });
@@ -228,7 +236,9 @@ async function join() {
     brokers: CONFIG.MQTT_BROKERS, workerUrl: CONFIG.WORKER_URL,
     onMessage: onSignal, onStatus: (st) => { S.sigStatus = st; updateStatus(); },
   });
-  S.sig.onTransportUp = () => hello();
+  S.sig.onTransportUp = () => { hello(); if (!S.peer) progress(25, 'Сеть на связи, ждём собеседника'); };
+  log(`Вход в комнату. Способы сигнала: MQTT (${CONFIG.MQTT_BROKERS.length} брокера)${CONFIG.WORKER_URL ? ' + Worker' : ''}; TURN: ${S.hasTurn ? 'есть' : 'нет'} (${S.turnInfo || '—'})`);
+  progress(10, 'Подключение к сети…');
   S.sig.start();
   S.helloTimer = setInterval(() => { if (!S.pc || S.pc.connectionState !== 'connected') hello(); }, 8000);
   try { S.wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
@@ -239,28 +249,43 @@ const myName = () => localStorage.zvName || 'Гость';
 function hello() { S.sig?.send({ type: 'hello', name: myName() }); }
 
 // ---------- обработка сигналинга ----------
+// Надёжность:
+//  • поколения попыток (gen): если за 14–20 с не соединились — обе стороны создают соединение заново;
+//  • SDP отправляется вместе с уже найденными маршрутами (ждём сбор ICE до 2,5 с) + trickle;
+//  • offer повторяется, если ответ потерялся;
+//  • ICE restart при обрыве, затем полный перезапуск попытки.
+const stats = (() => { try { return JSON.parse(localStorage.zvStats) || { tries: 0, ok: 0 }; } catch { return { tries: 0, ok: 0 }; } })();
+const saveStats = () => { localStorage.zvStats = JSON.stringify(stats); };
+const viaName = (v) => ({ mqtt: 'MQTT', worker: 'Worker' }[v] || v);
+const to = () => ({ to: S.peer.id, toInst: S.peer.inst, gen: S.gen });
+
 async function onSignal(m) {
   if (S.dead.has(m.inst)) return;
+  S.via[m.via] = (S.via[m.via] || 0) + 1;
   switch (m.type) {
     case 'hello': case 'hi':
       if (!acceptPeer(m)) return;
       if (m.type === 'hello') S.sig.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName() });
-      if (S.pc?.connectionState === 'failed') restartIce();
       break;
-    case 'desc': if (acceptPeer(m)) await onDesc(m.desc); break;
-    case 'cand': if (acceptPeer(m)) await onCand(m.cand); break;
+    case 'reset':
+      if (acceptPeer(m) && m.gen > S.gen) { log(`Собеседник начал попытку №${m.gen + 1}`); newAttempt(m.gen); }
+      break;
+    case 'desc': case 'cand':
+      if (!acceptPeer(m)) return;
+      if (typeof m.gen === 'number' && m.gen > S.gen) { log(`Собеседник перешёл к попытке №${m.gen + 1}`); newAttempt(m.gen); }
+      if (typeof m.gen === 'number' && m.gen < S.gen) return; // устаревшая попытка
+      if (m.type === 'desc') await onDesc(m.desc, m.via); else await onCand(m.cand);
+      break;
     case 'bye': S.dead.add(m.inst); if (S.peer?.id === m.from && S.peer.inst === m.inst) peerLeft(); break;
-    case 'full': if (!S.peer) { toast('В комнате уже двое — звонок 1:1', 6000); } break;
+    case 'full': if (!S.peer) { toast('В комнате уже двое — звонок 1:1', 6000); log('Комната занята'); } break;
   }
 }
 
 function acceptPeer(m) {
   const p = S.peer;
-  if (p && p.id === m.from && p.inst === m.inst) { p.seen = Date.now(); if (m.name) setPeerName(m.name); return true; }
-  if (p && p.id === m.from) { // собеседник перезагрузил страницу
-    S.dead.add(p.inst); resetPC(); setPeer(m); return true;
-  }
-  if (p) { // кто-то третий
+  if (p && p.id === m.from && p.inst === m.inst) { p.seen = Date.now(); if (m.name && m.name !== p.name) setPeerName(m.name); return true; }
+  if (p && p.id === m.from) { log('Собеседник перезагрузил страницу'); S.dead.add(p.inst); resetPC(); setPeer(m); return true; }
+  if (p) {
     const alive = S.pc?.connectionState === 'connected' || Date.now() - p.seen < 30000;
     if (alive) { S.sig.send({ type: 'full', to: m.from, toInst: m.inst }); return false; }
     resetPC();
@@ -271,14 +296,21 @@ function acceptPeer(m) {
 function setPeer(m) {
   S.peer = { id: m.from, inst: m.inst, name: m.name || 'Собеседник', seen: Date.now() };
   S.polite = selfId < m.from;
+  S.gen = 0; S.countedOk = false;
+  stats.tries++; saveStats();
   setPeerName(S.peer.name);
+  log(`Собеседник найден: ${S.peer.name} (сигнал пришёл через ${viaName(m.via)})`);
+  progress(40, 'Собеседник найден');
   createPC();
 }
 function setPeerName(n) { S.peer.name = n; $('#peerAvatar').textContent = (n[0] || '?').toUpperCase(); updateStatus(); }
+function newAttempt(gen) { resetPC(); S.gen = gen; createPC(); }
 
 function createPC() {
   const pc = (S.pc = new RTCPeerConnection(pcConfig()));
   S.makingOffer = false; S.ignoreOffer = false; S.pendingCands = [];
+  S.cands = { local: {}, remote: {} }; S.route = ''; S.method = '';
+  log(`Попытка №${S.gen + 1}: STUN ${CONFIG.STUN.length}, TURN ${S.hasTurn ? 'есть' : 'нет'}${S.relayOnly && S.hasTurn ? ', только TURN' : ''}`);
   S.remote = new MediaStream(); $('#remote').srcObject = S.remote;
   S.ctrl = pc.createDataChannel('ctrl', { negotiated: true, id: 0 });
   S.fileCh = pc.createDataChannel('file', { negotiated: true, id: 1 });
@@ -299,60 +331,129 @@ function createPC() {
     $('#remote').play().catch((e) => { if (e.name === 'NotAllowedError') $('#unmuteHint').classList.remove('hidden'); });
   };
   pc.onnegotiationneeded = async () => {
-    try {
-      S.makingOffer = true;
-      await pc.setLocalDescription();
-      S.sig.send({ type: 'desc', to: S.peer.id, toInst: S.peer.inst, desc: pc.localDescription.toJSON() });
-    } catch (e) { console.warn(e); } finally { S.makingOffer = false; }
+    try { S.makingOffer = true; await pc.setLocalDescription(); }
+    catch (e) { log('Ошибка offer: ' + e.message); return; }
+    finally { S.makingOffer = false; }
+    sendDesc(pc);
   };
-  pc.onicecandidate = ({ candidate }) => { if (candidate) S.sig.send({ type: 'cand', to: S.peer.id, toInst: S.peer.inst, cand: candidate.toJSON() }); };
+  pc.onicecandidate = ({ candidate }) => {
+    if (pc !== S.pc) return;
+    if (!candidate) { log(`Сбор маршрутов завершён: ${candText(S.cands.local)}`); return; }
+    S.cands.local[candidate.type] = (S.cands.local[candidate.type] || 0) + 1;
+    S.sig.send({ type: 'cand', ...to(), cand: candidate.toJSON() });
+    progressDetail();
+  };
+  pc.oniceconnectionstatechange = () => {
+    if (pc !== S.pc) return;
+    const s = pc.iceConnectionState;
+    if (s === 'checking') progress(75, 'Проверка маршрутов…');
+    log('ICE: ' + s);
+  };
   pc.onconnectionstatechange = () => onPcState(pc);
+  armWatchdog(pc, S.polite ? 20000 : 14000);
   updateStatus();
 }
 
-async function onDesc(desc) {
+function armWatchdog(pc, ms) {
+  clearTimeout(S.watchdog);
+  S.watchdog = setTimeout(() => {
+    if (pc !== S.pc || pc.connectionState === 'connected') return;
+    if (!pc._extended && ['checking', 'connected'].includes(pc.iceConnectionState)) {
+      pc._extended = true; log('Маршрут почти найден — жду ещё 8 с'); armWatchdog(pc, 8000); return;
+    }
+    const g = S.gen + 1;
+    log(`Не соединились за ${ms / 1000} с — начинаю попытку №${g + 1}`);
+    hintIfNeeded();
+    newAttempt(g);
+    S.sig.send({ type: 'reset', ...to() });
+  }, ms);
+}
+
+function waitGathering(pc, ms) {
+  return new Promise((res) => {
+    if (pc.iceGatheringState === 'complete') return res();
+    const done = () => { clearTimeout(t); pc.removeEventListener('icegatheringstatechange', chk); res(); };
+    const chk = () => pc.iceGatheringState === 'complete' && done();
+    const t = setTimeout(done, ms);
+    pc.addEventListener('icegatheringstatechange', chk);
+  });
+}
+const sdpCands = (sdp) => (sdp.match(/^a=candidate:.*$/gm) || []);
+
+async function sendDesc(pc) {
+  await waitGathering(pc, 2500);
+  if (pc !== S.pc || !pc.localDescription) return;
+  const desc = pc.localDescription.toJSON();
+  S.sig.send({ type: 'desc', ...to(), desc });
+  log(`Отправлен ${desc.type === 'offer' ? 'запрос (offer)' : 'ответ (answer)'} с ${sdpCands(desc.sdp).length} маршрутами`);
+  progress(55, 'Обмен ключами шифрования…');
+  scheduleResend(pc, desc, 1);
+}
+function scheduleResend(pc, desc, n) {
+  clearTimeout(S.resendTimer);
+  if (n > 3) return;
+  S.resendTimer = setTimeout(() => {
+    if (pc !== S.pc || pc.connectionState === 'connected' || pc.localDescription?.sdp !== desc.sdp) return;
+    if (desc.type === 'offer' && pc.signalingState !== 'have-local-offer') return;
+    log(`Нет соединения — повторяю ${desc.type} (${n})`);
+    S.sig.send({ type: 'desc', ...to(), desc });
+    scheduleResend(pc, desc, n + 1);
+  }, desc.type === 'offer' ? 4000 : 3000);
+}
+
+async function onDesc(desc, via) {
   const pc = S.pc;
   const collision = desc.type === 'offer' && (S.makingOffer || pc.signalingState !== 'stable');
   S.ignoreOffer = !S.polite && collision;
-  if (S.ignoreOffer) return;
+  if (S.ignoreOffer) { log('Встречный offer — уступает собеседник'); return; }
   try {
     await pc.setRemoteDescription(desc);
+    for (const line of sdpCands(desc.sdp)) { const t = / typ (\w+)/.exec(line)?.[1]; if (t) S.cands.remote[t] = (S.cands.remote[t] || 0) + 1; }
+    log(`Получен ${desc.type === 'offer' ? 'запрос (offer)' : 'ответ (answer)'} через ${viaName(via)}`);
     for (const c of S.pendingCands.splice(0)) await pc.addIceCandidate(c).catch(() => {});
-    if (desc.type === 'offer') {
-      await pc.setLocalDescription();
-      S.sig.send({ type: 'desc', to: S.peer.id, toInst: S.peer.inst, desc: pc.localDescription.toJSON() });
-    }
-  } catch (e) { console.warn('desc', e); }
+    if (desc.type === 'offer') { await pc.setLocalDescription(); sendDesc(pc); }
+    else clearTimeout(S.resendTimer);
+    progress(65, 'Ключи согласованы, ищем маршрут…');
+    progressDetail();
+  } catch (e) { log('Ошибка SDP: ' + e.message); }
 }
 async function onCand(c) {
+  if (!c) return;
+  const t = / typ (\w+)/.exec(c.candidate || '')?.[1];
+  if (t) S.cands.remote[t] = (S.cands.remote[t] || 0) + 1;
   if (!S.pc.remoteDescription) { S.pendingCands.push(c); return; }
   try { await S.pc.addIceCandidate(c); } catch (e) { if (!S.ignoreOffer) console.warn('cand', e); }
+  progressDetail();
 }
 
 function onPcState(pc) {
   if (pc !== S.pc) return;
   const s = pc.connectionState;
+  log('Соединение: ' + s);
   clearTimeout(S.restartTimer);
   if (s === 'connected') {
+    clearTimeout(S.watchdog);
     if (!S.callStart) { S.callStart = Date.now(); beep(); }
+    if (!S.countedOk) { S.countedOk = true; stats.ok++; saveStats(); }
     showSafety();
-    startStats();
+    startStats(true);
   } else if (s === 'disconnected') {
-    S.restartTimer = setTimeout(() => S.pc === pc && pc.connectionState !== 'connected' && restartIce(), 3000);
-  } else if (s === 'failed') restartIce();
+    progress(80, 'Связь прервалась, восстанавливаем…');
+    S.restartTimer = setTimeout(() => S.pc === pc && pc.connectionState !== 'connected' && restartIce(), 2500);
+  } else if (s === 'failed') { progress(80, 'Перезапуск маршрутов…'); restartIce(); }
   updateStatus();
 }
 function restartIce() {
   if (!S.pc) return;
-  clearTimeout(S.restartTimer);
+  log('ICE restart');
   try { S.pc.restartIce(); } catch {}
-  const pc = S.pc;
-  S.restartTimer = setTimeout(() => S.pc === pc && pc.connectionState !== 'connected' && restartIce(), 10000);
+  armWatchdog(S.pc, S.polite ? 18000 : 12000); // не помог restart — полный перезапуск попытки
 }
 window.addEventListener('online', () => S.pc && restartIce());
 
 function resetPC() {
-  clearTimeout(S.restartTimer); clearInterval(S.statsTimer); S.statsTimer = null;
+  clearTimeout(S.restartTimer); clearTimeout(S.watchdog); clearTimeout(S.resendTimer);
+  clearInterval(S.statsTimer); S.statsTimer = null;
   try { S.pc?.close(); } catch {}
   S.pc = null; S.ctrl = null; S.fileCh = null; S.callStart = 0; S.prevStats = null;
   S.remote.getTracks().forEach((t) => S.remote.removeTrack(t));
@@ -362,9 +463,57 @@ function resetPC() {
 function peerLeft() {
   const n = S.peer?.name || 'Собеседник';
   resetPC(); S.peer = null;
-  sysMsg(`${n} вышел из звонка`); toast(`${n} вышел из звонка`);
+  sysMsg(`${n} вышел из звонка`); toast(`${n} вышел из звонка`); log(`${n} вышел`);
+  progress(25, 'Ожидаем собеседника');
   updateStatus();
 }
+
+// ---------- прогресс и диагностика ----------
+const CT = { host: 'локальных', srflx: 'внешних (STUN)', prflx: 'внешних', relay: 'через TURN' };
+const candText = (o) => Object.keys(o).length ? Object.entries(o).map(([k, v]) => `${CT[k] || k} ${v}`).join(', ') : 'нет';
+function log(t) {
+  const line = new Date().toLocaleTimeString('ru-RU') + '  ' + t;
+  S.log.push(line); if (S.log.length > 300) S.log.shift();
+  const el = $('#diagLog'); if (el) { el.textContent = S.log.join('\n'); el.scrollTop = 1e9; }
+}
+function progress(pct, step) {
+  if (S.pc?.connectionState === 'connected' && pct < 100) return;
+  S.pct = pct; S.step = step;
+  $('#connPct').textContent = pct + '%'; $('#connStep').textContent = step;
+  $('#connBar').style.width = pct + '%';
+  updateStatus();
+}
+function progressDetail() {
+  const sg = S.sigStatus;
+  const ways = [`MQTT ${sg.mqttUp}/${sg.mqttTotal}`, CONFIG.WORKER_URL ? `Worker ${sg.worker === 'up' ? '✓' : '✗'}` : null].filter(Boolean).join(' · ');
+  $('#connMethod').textContent =
+    `Сигнал: ${ways}\nМои маршруты: ${candText(S.cands?.local || {})}\nМаршруты собеседника: ${candText(S.cands?.remote || {})}` +
+    (S.peer ? `\nПопытка №${S.gen + 1}` : '') + (S.method ? `\nСпособ: ${S.method}` : '');
+}
+function hintIfNeeded() {
+  const l = S.cands.local, r = S.cands.remote;
+  let h = '';
+  if (!l.srflx && !l.relay) h = 'Ваша сеть не пускает к STUN/TURN-серверам (возможно, блокируется UDP).';
+  else if (!S.hasTurn) h = 'Сети не дают соединиться напрямую. Нужен TURN-ретранслятор.';
+  else if (!r.relay && !l.relay) h = 'TURN-сервер недоступен из сети.';
+  if (h) { log('Подсказка: ' + h); toast(h, 6000); }
+}
+function diagText() {
+  const pct = stats.tries ? Math.round((100 * stats.ok) / stats.tries) : 0;
+  return `ZVONochek — диагностика\nБраузер: ${navigator.userAgent}\n` +
+    `Успешных соединений на этом устройстве: ${stats.ok} из ${stats.tries} (${pct}%)\n` +
+    transportText() + `\nМои маршруты: ${candText(S.cands?.local || {})}\nМаршруты собеседника: ${candText(S.cands?.remote || {})}\n` +
+    `Сигналы получены: ${Object.entries(S.via).map(([k, v]) => `${viaName(k)} ${v}`).join(', ') || '—'}\n\nЖурнал:\n` + S.log.join('\n');
+}
+function openDiag() {
+  const b = openModal('#tplDiag');
+  const pct = stats.tries ? Math.round((100 * stats.ok) / stats.tries) : 0;
+  $('#diagStats', b).textContent = `Успешных соединений на этом устройстве: ${stats.ok} из ${stats.tries} (${pct}%)\n` + transportText() +
+    `\nМои маршруты: ${candText(S.cands?.local || {})}\nМаршруты собеседника: ${candText(S.cands?.remote || {})}`;
+  $('#diagLog', b).textContent = S.log.join('\n');
+  $('#diagCopy', b).onclick = async () => { try { await navigator.clipboard.writeText(diagText()); toast('Диагностика скопирована'); } catch { toast('Не удалось скопировать'); } };
+}
+$('#btnDiag').onclick = openDiag;
 
 // ---------- статус, качество, безопасность ----------
 function updateRemoteView() {
@@ -381,10 +530,11 @@ function updateStatus() {
   if (!sigUp) text = '⏳ Подключение к сети…';
   else if (!S.peer) text = '🟢 Ожидаем собеседника';
   else if (s === 'connected') text = `🟢 ${S.peer.name}`;
-  else if (s === 'disconnected' || s === 'failed') text = '🟠 Переподключение…';
-  else text = `🔄 Соединяемся с ${S.peer.name}…`;
+  else text = `🔄 ${S.pct}% · ${S.step}`;
   st.textContent = text;
-  $('#waitText').textContent = !S.peer ? 'Ожидаем собеседника… Отправьте ему ссылку 🔗' : s === 'connected' ? (S.peer.name + (S.peer.cam === false ? ' — камера выключена' : '')) : 'Соединяемся…';
+  $('#waitText').textContent = !S.peer ? 'Ожидаем собеседника… Отправьте ему ссылку 🔗' : s === 'connected' ? (S.peer.name + (S.peer.cam === false ? ' — камера выключена' : '')) : `Соединяемся с ${S.peer.name}…`;
+  $('#conn').classList.toggle('hidden', s === 'connected');
+  progressDetail();
   $('#timer').classList.toggle('hidden', !S.callStart);
   const tr = $('#sTransports');
   if (tr) tr.textContent = transportText();
@@ -393,8 +543,8 @@ function transportText() {
   const sg = S.sigStatus;
   return `Способ 1 — MQTT-брокеры: ${sg.mqttUp}/${sg.mqttTotal} на связи\n` +
     `Способ 2 — Cloudflare Worker: ${CONFIG.WORKER_URL ? ({ up: 'на связи ✓', down: 'нет связи ✗', connecting: 'подключение…' }[sg.worker]) : 'не настроен'}\n` +
-    `TURN-ретранслятор: ${S.hasTurn ? 'есть ✓' : 'нет (только P2P)'}\n` +
-    `Маршрут звонка: ${S.route || '—'}`;
+    `TURN-ретранслятор: ${S.hasTurn ? 'есть ✓' : 'нет (только P2P)'} (${S.turnInfo || '—'})\n` +
+    `Маршрут звонка: ${S.method || '—'}`;
 }
 setInterval(() => {
   if (!S.callStart) return;
@@ -402,9 +552,9 @@ setInterval(() => {
   $('#timer').textContent = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
 }, 1000);
 
-function startStats() {
+function startStats(now) {
   if (S.statsTimer) return;
-  S.statsTimer = setInterval(async () => {
+  const tick = async () => {
     const pc = S.pc; if (!pc) return;
     const r = await pc.getStats().catch(() => null); if (!r) return;
     let pairId, pair, lost = 0, recv = 0, bytes = 0;
@@ -417,7 +567,11 @@ function startStats() {
     if (!pair) return;
     const lc = r.get(pair.localCandidateId), rc = r.get(pair.remoteCandidateId);
     const relay = lc?.candidateType === 'relay' || rc?.candidateType === 'relay';
-    S.route = relay ? 'через TURN (ретранслятор)' : lc?.candidateType === 'host' && rc?.candidateType === 'host' ? 'напрямую (локальная сеть)' : 'напрямую P2P';
+    const route = relay ? 'через TURN (ретранслятор)' : lc?.candidateType === 'host' && rc?.candidateType === 'host' ? 'напрямую (локальная сеть)' : 'напрямую P2P (через STUN)';
+    const proto = (lc?.protocol || '').toUpperCase() + (lc?.relayProtocol ? '/' + lc.relayProtocol.toUpperCase() : '');
+    const method = `${route}, ${proto}`;
+    if (method !== S.method) { S.method = method; log('Способ соединения: ' + method); }
+    progress(100, 'Соединено: ' + route);
     const rtt = Math.round((pair.currentRoundTripTime || 0) * 1000);
     let loss = 0, kbps = 0;
     if (p) { const dl = lost - p.lost, dr = recv - p.recv; loss = dl + dr > 0 ? (100 * dl) / (dl + dr) : 0; kbps = ((bytes - p.bytes) * 8) / (now - p.now); }
@@ -427,7 +581,9 @@ function startStats() {
     q.textContent = `${{ good: '📶', mid: '📶', bad: '⚠️' }[lvl]} ${relay ? 'TURN' : 'P2P'} · ${rtt} мс · ${loss.toFixed(1)}% · ${(kbps / 1000).toFixed(1)} Мбит/с`;
     q.title = `Качество: ${{ good: 'хорошее', mid: 'среднее', bad: 'плохое' }[lvl]}. Маршрут: ${S.route}`;
     updateStatus();
-  }, 2000);
+  };
+  S.statsTimer = setInterval(tick, 2000);
+  if (now) setTimeout(tick, 300);
 }
 
 async function showSafety() {
@@ -539,6 +695,7 @@ $('#cSettings').onclick = async () => {
     S.relayOnly = r.checked; localStorage.zvRelay = r.checked ? '1' : '0';
     if (S.pc) { S.pc.setConfiguration(pcConfig()); restartIce(); }
   };
+  $('#sDiag', b).onclick = openDiag;
   updateStatus();
 };
 $('#unmuteHint').onclick = () => { $('#remote').play().catch(() => {}); $('#unmuteHint').classList.add('hidden'); };
@@ -548,7 +705,7 @@ function hangup() {
   try { S.sig?.send({ type: 'bye' }); } catch {}
   setTimeout(() => {
     resetPC(); S.sig?.close(); S.sig = null; S.peer = null; S.joined = false;
-    clearInterval(S.helloTimer);
+    clearInterval(S.helloTimer); S.log = []; S.via = {};
     if (S.screenTrack) { S.screenTrack.onended = null; S.screenTrack.stop(); S.screenTrack = null; }
     stopLocal();
     try { S.wakeLock?.release(); } catch {}

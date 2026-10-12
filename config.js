@@ -21,6 +21,10 @@ export const CONFIG = {
     'stun:stun.cloudflare.com:3478',
   ],
 
+  // TURN от Metered.ca: домен приложения и ключ учётных данных (credential apiKey).
+  // Этот ключ по документации Metered безопасен для фронтенда (не путать с secretKey!).
+  METERED: { domain: '', apiKey: '' },
+
   // Свои ICE/TURN-серверы (например, свой coturn), если появятся
   EXTRA_ICE_SERVERS: [],
 };

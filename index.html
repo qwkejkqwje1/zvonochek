@@ -64,7 +64,16 @@
 <section id="call" class="screen hidden">
   <div class="stage">
     <video id="remote" autoplay playsinline></video>
-    <div id="remoteOff" class="video-off"><div class="avatar" id="peerAvatar">?</div><div id="waitText">Ожидаем собеседника…</div></div>
+    <div id="remoteOff" class="video-off">
+      <div class="avatar" id="peerAvatar">?</div>
+      <div id="waitText">Ожидаем собеседника…</div>
+      <div id="conn" class="conn">
+        <div class="conn-top"><b id="connPct">0%</b><span id="connStep">Подготовка…</span></div>
+        <div class="bar"><i id="connBar"></i></div>
+        <div id="connMethod" class="conn-method"></div>
+        <button id="btnDiag" class="btn small">🩺 Диагностика</button>
+      </div>
+    </div>
     <video id="local" autoplay playsinline muted></video>
     <button id="unmuteHint" class="btn primary hidden">🔊 Нажмите, чтобы включить звук</button>
   </div>
@@ -119,6 +128,7 @@
   <label class="check"><input type="checkbox" id="sRelay"> Скрыть мой IP от собеседника (только через TURN)</label>
   <h4>Способы связи</h4>
   <div id="sTransports" class="mono"></div>
+  <button id="sDiag" class="btn">🩺 Диагностика</button>
 </template>
 
 <template id="tplSafety">
@@ -126,6 +136,14 @@
   <p>Сравните код с собеседником голосом. Если он <b>совпадает</b>, звонок зашифрован напрямую между вами и никто не стоит посередине.</p>
   <div id="safetyEmoji" class="safety-emoji"></div>
   <div id="safetyDigits" class="safety-digits"></div>
+</template>
+
+<template id="tplDiag">
+  <h3>🩺 Диагностика соединения</h3>
+  <div id="diagStats" class="mono"></div>
+  <h4>Журнал</h4>
+  <pre id="diagLog" class="mono diaglog"></pre>
+  <button id="diagCopy" class="btn primary">Скопировать для разработчика</button>
 </template>
 
 <template id="tplInvite">
