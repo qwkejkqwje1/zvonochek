@@ -30,9 +30,11 @@ export class Signaling {
     this.onStatus?.({ mqttUp: up, mqttTotal: this.clients.length, worker: this.wsState });
   }
 
-  _mqtt(url) {
+  _mqtt(b) {
     if (typeof mqtt === 'undefined') return;
+    const url = typeof b === 'string' ? b : b.url;
     const c = mqtt.connect(url, {
+      ...(b.username ? { username: b.username, password: b.password } : {}),
       clientId: 'zv_' + Math.random().toString(16).slice(2, 12),
       clean: true, keepalive: 30, connectTimeout: 8000, reconnectPeriod: 4000, protocolVersion: 4,
     });
@@ -46,34 +48,57 @@ export class Signaling {
     this.clients.push(c);
   }
 
+  // WebSocket к Worker. Некоторые провайдеры «замораживают» соединения с Cloudflare
+  // после ~16 КБ данных, поэтому: (1) следим за pong и переподключаемся при зависании;
+  // (2) заранее открываем новое соединение после ~9 КБ трафика (старое закрываем позже).
   _ws(attempt) {
     if (this.closed) return;
     const base = this.workerUrl.replace(/^http/, 'ws').replace(/\/$/, '');
     let ws;
     try { ws = new WebSocket(`${base}/room/${this.topic}`); } catch { return; }
-    this.ws = ws;
-    this.wsState = 'connecting'; this._status();
-    let ping;
+    ws._bytes = 0; ws._pongAt = Date.now();
+    if (!this.ws || this.ws.readyState !== 1) { this.wsState = 'connecting'; this._status(); }
     ws.onopen = () => {
-      attempt = 0;
+      const old = this.ws;
+      this.ws = ws; this.wsAttempt = 0;
       this.wsState = 'up'; this._status();
-      ping = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25000);
-      this.onTransportUp();
+      if (old && old !== ws) { old._replaced = true; setTimeout(() => { try { old.close(); } catch {} }, 2000); }
+      ws._ping = setInterval(() => {
+        if (ws.readyState !== 1) return;
+        if (Date.now() - ws._pongAt > 20000) { try { ws.close(); } catch {} return; } // зависло
+        ws.send('ping'); ws._bytes += 4;
+      }, 7000);
+      if (!old) this.onTransportUp();
     };
-    ws.onmessage = (e) => { if (e.data !== 'pong') this._recv(e.data, 'worker'); };
+    ws.onmessage = (e) => {
+      ws._pongAt = Date.now();
+      if (e.data === 'pong') return;
+      ws._bytes += e.data.length;
+      this._recv(e.data, 'worker');
+      this._budget(ws);
+    };
     ws.onclose = () => {
-      clearInterval(ping);
+      clearInterval(ws._ping);
+      if (ws._replaced || this.closed) return;
+      if (this.ws && this.ws !== ws) { this.ws._renewing = false; return; } // не удалось обновить — живём на старом
+      this.ws = null;
       this.wsState = 'down'; this._status();
-      if (!this.closed) setTimeout(() => this._ws(attempt + 1), Math.min(30000, 1000 * 2 ** attempt));
+      const n = (this.wsAttempt = (this.wsAttempt || 0) + 1);
+      setTimeout(() => this._ws(n), Math.min(15000, 500 * 2 ** n));
     };
     ws.onerror = () => {};
+  }
+
+  _budget(ws) {
+    if (ws === this.ws && ws._bytes > 9000 && !ws._renewing) { ws._renewing = true; this._ws(0); }
   }
 
   async send(msg) {
     const full = { ...msg, from: this.selfId, inst: this.inst, mid: rid(), ts: Date.now() };
     const data = await seal(this.key, full, this.topic);
     for (const c of this.clients) if (c.connected) c.publish(this.mqttTopic, data, { qos: 0 });
-    if (this.ws && this.ws.readyState === 1) this.ws.send(data);
+    const ws = this.ws;
+    if (ws && ws.readyState === 1) { ws.send(data); ws._bytes += data.length; this._budget(ws); }
   }
 
   async _recv(raw, via) {

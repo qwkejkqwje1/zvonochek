@@ -8,7 +8,9 @@ export const CONFIG = {
 
   // Способ №1: публичные MQTT-брокеры (WSS). Подключаемся ко всем сразу —
   // если один недоступен, работают остальные.
+  // Брокер на порту 443 идёт первым: во многих сетях нестандартные порты закрыты.
   MQTT_BROKERS: [
+    { url: 'wss://public.cloud.shiftr.io', username: 'public', password: 'public' },
     'wss://broker.emqx.io:8084/mqtt',
     'wss://broker.hivemq.com:8884/mqtt',
     'wss://test.mosquitto.org:8081/mqtt',

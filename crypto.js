@@ -41,19 +41,27 @@ export async function deriveRoom(secret) {
   return { topic: hex(topicBits), key };
 }
 
+async function pipe(bytes, stream) {
+  return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
+}
+const canZip = typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
+
+// Сообщения сжимаются (deflate) и шифруются: z2 = сжато, z1 = без сжатия
 export async function seal(key, obj, aad) {
+  let pt = te.encode(JSON.stringify(obj)), tag = 'z1';
+  if (canZip && pt.length > 300) { try { pt = await pipe(pt, new CompressionStream('deflate-raw')); tag = 'z2'; } catch {} }
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, additionalData: te.encode(aad) }, key, te.encode(JSON.stringify(obj)));
-  return 'z1.' + b64u.enc(iv) + '.' + b64u.enc(ct);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: te.encode(aad + tag) }, key, pt);
+  return tag + '.' + b64u.enc(iv) + '.' + b64u.enc(ct);
 }
 
 export async function open(key, str, aad) {
   const p = String(str).split('.');
-  if (p.length !== 3 || p[0] !== 'z1') return null;
+  if (p.length !== 3 || (p[0] !== 'z1' && p[0] !== 'z2')) return null;
   try {
-    const pt = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: b64u.dec(p[1]), additionalData: te.encode(aad) }, key, b64u.dec(p[2]));
+    let pt = new Uint8Array(await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: b64u.dec(p[1]), additionalData: te.encode(aad + p[0]) }, key, b64u.dec(p[2])));
+    if (p[0] === 'z2') pt = await pipe(pt, new DecompressionStream('deflate-raw'));
     return JSON.parse(td.decode(pt));
   } catch {
     return null; // чужое / подделанное сообщение — молча игнорируем
