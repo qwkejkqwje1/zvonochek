@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="theme-color" content="#0f1222">
+<title>ZVONochek — звонки по ссылке</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Главная -->
+<section id="home" class="screen">
+  <div class="hero">
+    <div class="logo">📞 <b>ZVON</b>ochek</div>
+    <p class="sub">Аудио- и видеозвонки по ссылке. Без регистрации и установки.</p>
+    <button id="btnCreate" class="btn primary big">Создать звонок</button>
+    <ul class="features">
+      <li>🔒 Сквозное шифрование: голос и видео идут напрямую (DTLS-SRTP)</li>
+      <li>🗝️ Ключ комнаты живёт только в ссылке и не уходит на серверы</li>
+      <li>💬 Чат и передача файлов прямо в звонке</li>
+      <li>🛡️ Код безопасности для проверки собеседника</li>
+    </ul>
+    <p id="homeMsg" class="msg"></p>
+  </div>
+</section>
+
+<!-- Подготовка к звонку -->
+<section id="prejoin" class="screen hidden">
+  <div class="prejoin">
+    <div class="preview">
+      <video id="preview" autoplay playsinline muted></video>
+      <div id="previewOff" class="video-off hidden">Камера выключена</div>
+      <div class="preview-ctrls">
+        <button id="pMic" class="round" title="Микрофон">🎙️</button>
+        <button id="pCam" class="round" title="Камера">📷</button>
+      </div>
+    </div>
+    <div class="side">
+      <div class="logo small">📞 <b>ZVON</b>ochek</div>
+      <label>Ваше имя<input id="name" maxlength="40" placeholder="Например, Аня"></label>
+      <label>Микрофон<select id="pMicSel"></select></label>
+      <label>Камера<select id="pCamSel"></select></label>
+      <div class="invite">
+        <div class="invite-title">Ссылка для собеседника</div>
+        <div class="linkrow"><input id="link" readonly><button id="btnCopy" class="btn">Копировать</button></div>
+        <div class="row">
+          <button id="btnShare" class="btn hidden">Поделиться</button>
+          <button id="btnQr" class="btn">QR-код</button>
+        </div>
+        <div id="qr" class="qr hidden"></div>
+      </div>
+      <button id="btnJoin" class="btn primary big">Войти в звонок</button>
+      <p id="preMsg" class="msg"></p>
+    </div>
+  </div>
+</section>
+
+<!-- Звонок -->
+<section id="call" class="screen hidden">
+  <div class="stage">
+    <video id="remote" autoplay playsinline></video>
+    <div id="remoteOff" class="video-off"><div class="avatar" id="peerAvatar">?</div><div id="waitText">Ожидаем собеседника…</div></div>
+    <video id="local" autoplay playsinline muted></video>
+    <button id="unmuteHint" class="btn primary hidden">🔊 Нажмите, чтобы включить звук</button>
+  </div>
+
+  <header class="topbar">
+    <div class="tb-left">
+      <span id="status" class="pill">Подключение…</span>
+      <span id="timer" class="pill hidden">00:00</span>
+    </div>
+    <div class="tb-right">
+      <span id="quality" class="pill hidden" title="Качество связи"></span>
+      <button id="safety" class="pill hidden" title="Код безопасности"></button>
+    </div>
+  </header>
+
+  <nav class="controls">
+    <button id="cMic" class="round" title="Микрофон">🎙️</button>
+    <button id="cCam" class="round" title="Камера">📷</button>
+    <button id="cScreen" class="round" title="Показать экран">🖥️</button>
+    <button id="cChat" class="round" title="Чат">💬<span id="unread" class="badge hidden">0</span></button>
+    <button id="cInvite" class="round" title="Пригласить">🔗</button>
+    <button id="cSettings" class="round" title="Настройки">⚙️</button>
+    <button id="cHang" class="round red" title="Завершить">📵</button>
+  </nav>
+
+  <aside id="chat" class="panel hidden">
+    <div class="panel-head">Чат <button class="x" data-close="chat">✕</button></div>
+    <div id="msgs" class="msgs"></div>
+    <form id="chatForm" class="chatform">
+      <label class="attach" title="Отправить файл">📎<input id="fileInput" type="file" multiple hidden></label>
+      <input id="chatInput" autocomplete="off" placeholder="Сообщение…">
+      <button class="btn primary">➤</button>
+    </form>
+  </aside>
+</section>
+
+<!-- Модальные окна -->
+<div id="modal" class="modal hidden">
+  <div class="card">
+    <button class="x" data-close="modal">✕</button>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<template id="tplSettings">
+  <h3>Настройки</h3>
+  <label>Микрофон<select id="sMic"></select></label>
+  <label>Камера<select id="sCam"></select></label>
+  <label id="sSpkWrap">Динамик<select id="sSpk"></select></label>
+  <label class="check"><input type="checkbox" id="sRelay"> Скрыть мой IP от собеседника (только через TURN)</label>
+  <h4>Способы связи</h4>
+  <div id="sTransports" class="mono"></div>
+</template>
+
+<template id="tplSafety">
+  <h3>🛡️ Код безопасности</h3>
+  <p>Сравните код с собеседником голосом. Если он <b>совпадает</b>, звонок зашифрован напрямую между вами и никто не стоит посередине.</p>
+  <div id="safetyEmoji" class="safety-emoji"></div>
+  <div id="safetyDigits" class="safety-digits"></div>
+</template>
+
+<template id="tplInvite">
+  <h3>Пригласить собеседника</h3>
+  <p>Отправьте ссылку. В ней ключ шифрования, поэтому делитесь ей только с тем, кому звоните.</p>
+  <div class="linkrow"><input id="iLink" readonly><button id="iCopy" class="btn">Копировать</button></div>
+  <div id="iQr" class="qr"></div>
+</template>
+
+<script src="vendor/mqtt.min.js"></script>
+<script src="vendor/qrcode.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
