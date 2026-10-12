@@ -1,8 +1,18 @@
-import { CONFIG } from './config.js?v=9';
-import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=9';
-import { Signaling } from './signaling.js?v=9';
+import { CONFIG } from './config.js?v=10';
+import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=10';
+import { Signaling } from './signaling.js?v=10';
 
+export const APP_VERSION = 10;
 const $ = (s, r = document) => r.querySelector(s);
+
+// Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
+fetch('version.json?t=' + Date.now(), { cache: 'no-store' }).then((r) => r.json()).then(async (j) => {
+  if (j.v > APP_VERSION && sessionStorage.zvUpd !== String(j.v)) {
+    sessionStorage.zvUpd = String(j.v);
+    await fetch(location.pathname, { cache: 'reload' }).catch(() => {});
+    location.reload();
+  }
+}).catch(() => {});
 const randHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, '0')).join('');
 const selfId = sessionStorage.zvId || (sessionStorage.zvId = randHex(8));
 const inst = randHex(6); // меняется при каждой перезагрузке страницы
@@ -254,7 +264,7 @@ async function join() {
   $('#btnJoin').disabled = false;
 }
 const myName = () => localStorage.zvName || 'Гость';
-function hello() { S.sig?.send({ type: 'hello', name: myName() }); }
+function hello() { S.sig?.send({ type: 'hello', name: myName(), ver: APP_VERSION }); }
 
 // ---------- обработка сигналинга ----------
 // Надёжность:
@@ -274,6 +284,13 @@ async function onSignal(m) {
     case 'hello': case 'hi':
       if (!acceptPeer(m)) return;
       if (m.type === 'hello') S.sig.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName() });
+      if ((m.ver || 0) !== APP_VERSION && !S.verWarned) {
+        S.verWarned = true;
+        const old = (m.ver || 0) < APP_VERSION;
+        const t = old ? 'У собеседника старая версия ZVONochek — пусть обновит страницу (Ctrl+F5 или переоткроет ссылку)'
+                      : 'У вас старая версия ZVONochek — обновите страницу (Ctrl+F5)';
+        log(`Версии разные: у меня ${APP_VERSION}, у собеседника ${m.ver || 'старая'}`); toast(t, 10000); sysMsg(t);
+      }
       break;
     case 'reset':
       if (acceptPeer(m) && m.gen > S.gen) { log(`Собеседник начал попытку №${m.gen + 1}`); newAttempt(m.gen); }
@@ -465,7 +482,7 @@ function restartIce() {
   try { S.pc.restartIce(); } catch {}
   armWatchdog(S.pc, S.polite ? 18000 : 12000); // не помог restart — полный перезапуск попытки
 }
-window.addEventListener('online', () => S.pc && restartIce());
+window.addEventListener('online', () => S.pc && S.callStart && restartIce());
 
 function resetPC() {
   clearTimeout(S.restartTimer); clearTimeout(S.watchdog); clearTimeout(S.resendTimer);
@@ -764,7 +781,7 @@ window.addEventListener('pagehide', () => { if (S.joined) S.sig?.send({ type: 'b
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'visible' && S.joined) {
     try { S.wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
-    if (S.pc && S.pc.connectionState !== 'connected') restartIce();
+    if (S.pc && S.callStart && S.pc.connectionState !== 'connected') restartIce();
   }
 });
 
