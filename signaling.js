@@ -3,7 +3,7 @@
 //   2) Cloudflare Worker (WebSocket), если задан WORKER_URL
 // Каждое сообщение зашифровано AES-256-GCM и отправляется во все каналы,
 // получатель удаляет дубли. Брокеры и Worker видят только шифротекст.
-import { seal, open } from './crypto.js?v=5';
+import { seal, open } from './crypto.js?v=6';
 
 const rid = () => crypto.getRandomValues(new Uint32Array(2)).join('-');
 

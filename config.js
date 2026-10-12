@@ -28,5 +28,19 @@ export const CONFIG = {
   METERED: { domain: '', apiKey: '' },
 
   // Свои ICE/TURN-серверы (например, свой coturn), если появятся
-  EXTRA_ICE_SERVERS: [],
+  // TURN Metered (статические учётные данные). Видны в публичном коде, поэтому
+  // лучше перенести их в секреты Worker: TURN_URLS / TURN_USERNAME / TURN_CREDENTIAL.
+  EXTRA_ICE_SERVERS: [
+    { urls: 'stun:stun.relay.metered.ca:80' },
+    {
+      urls: [
+        'turn:global.relay.metered.ca:80',
+        'turn:global.relay.metered.ca:80?transport=tcp',
+        'turn:global.relay.metered.ca:443',
+        'turns:global.relay.metered.ca:443?transport=tcp',
+      ],
+      username: 'b0cc17f06cf20504ab5cd581',
+      credential: 'YSV26ACRA6JxZ8TQ',
+    },
+  ],
 };

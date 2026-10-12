@@ -1,6 +1,6 @@
-import { CONFIG } from './config.js?v=5';
-import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=5';
-import { Signaling } from './signaling.js?v=5';
+import { CONFIG } from './config.js?v=6';
+import { newSecret, deriveRoom, safetyCode } from './crypto.js?v=6';
+import { Signaling } from './signaling.js?v=6';
 
 const $ = (s, r = document) => r.querySelector(s);
 const randHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -204,7 +204,7 @@ async function fetchJson(url, ms = 5000) {
 const isTurn = (s) => [].concat(s?.urls || []).some((u) => /^turns?:/.test(u));
 async function loadIce() {
   const servers = [{ urls: CONFIG.STUN }, ...CONFIG.EXTRA_ICE_SERVERS];
-  const info = [];
+  const info = CONFIG.EXTRA_ICE_SERVERS.some(isTurn) ? ['Metered ✓'] : [];
   const jobs = [];
   if (CONFIG.WORKER_URL) jobs.push(fetchJson(CONFIG.WORKER_URL.replace(/\/$/, '') + '/turn')
     .then((j) => { const l = (j?.iceServers || []).filter(isTurn); servers.push(...l); info.push(l.length ? 'Worker ✓' : 'Worker: TURN не настроен'); })
