@@ -1,10 +1,11 @@
-// Два независимых канала сигналинга, работающих одновременно:
-//   1) публичные MQTT-брокеры (без своего сервера)
-//   2) Cloudflare Worker (WebSocket), если задан WORKER_URL
-// Каждое сообщение зашифровано AES-256-GCM и отправляется во все каналы,
-// получатель удаляет дубли. Брокеры и Worker видят только шифротекст.
-import { seal, open } from './crypto.js?v=10';
-import { schnorr, utils } from './vendor/secp256k1.js?v=10';
+// Четыре независимых транспорта сигналинга и аварийного аудио-моста, работающих параллельно:
+//   1) Публичные MQTT-брокеры поверх WSS (включая порт 443)
+//   2) Cloudflare Worker WebSocket (с ротацией окна каждые 9 КБ против зависаний ТСПУ)
+//   3) Cloudflare Worker HTTP-поллинг + POST (работает даже при полной блокировке WebSocket)
+//   4) Публичные Nostr-реле поверх WSS (порт 443, подписанные эфемерные события)
+// Каждое сообщение сжимается и шифруется AES-256-GCM; дубли отсекаются по mid.
+import { seal, open } from './crypto.js?v=11';
+import { schnorr, utils } from './vendor/secp256k1.js?v=11';
 
 const hexs = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 const NOSTR_KIND = 29333; // эфемерные события: реле их не хранят, только пересылают
@@ -12,8 +13,18 @@ const NOSTR_KIND = 29333; // эфемерные события: реле их н
 const rid = () => crypto.getRandomValues(new Uint32Array(2)).join('-');
 
 export class Signaling {
-  constructor({ topic, key, selfId, inst, brokers, workerUrl, relays, onMessage, onStatus }) {
-    Object.assign(this, { topic, key, selfId, inst, brokers, workerUrl, onMessage, onStatus });
+  constructor({ topic, key, selfId, inst, brokers, workerUrl, relays, onMessage, onStatus, onPeerJoined }) {
+    Object.assign(this, {
+      topic,
+      key,
+      selfId,
+      inst,
+      brokers: brokers || [],
+      workerUrl: (workerUrl || '').replace(/\/$/, ''),
+      onMessage,
+      onStatus,
+      onPeerJoined,
+    });
     this.relays = relays || [];
     this.nostr = new Map(); // url -> текущий сокет
     this.nsk = utils.randomSecretKey();
@@ -22,15 +33,24 @@ export class Signaling {
     this.mqttTopic = `zvonochek/v1/${topic}`;
     this.clients = [];
     this.ws = null;
-    this.wsState = workerUrl ? 'connecting' : 'off';
+    this.wsState = this.workerUrl ? 'connecting' : 'off';
+    this.httpState = 'off';
+    this.pollTimer = null;
+    this.lastPollTs = Date.now() - 35_000;
     this.seen = new Map();
     this.closed = false;
     this.onTransportUp = () => {};
   }
 
   start() {
-    this.brokers.forEach((url) => this._mqtt(url));
-    if (this.workerUrl) this._ws(0);
+    this.brokers.forEach((b) => this._mqtt(b));
+    if (this.workerUrl) {
+      this._ws(0, false);
+      // Если через 1.8 с WebSocket к воркеру не поднялся — автоматически включаем резервный HTTP-поллинг
+      setTimeout(() => {
+        if (!this.closed && this.wsState !== 'up') this._startPoll();
+      }, 1800);
+    }
     this.relays.forEach((u) => this._nostr(u, 0));
     this._status();
   }
@@ -38,146 +58,367 @@ export class Signaling {
   _status() {
     const up = this.clients.filter((c) => c.connected).length;
     const nUp = [...this.nostr.values()].filter((w) => w && w.readyState === 1).length;
-    this.onStatus?.({ mqttUp: up, mqttTotal: this.clients.length, worker: this.wsState, nostrUp: nUp, nostrTotal: this.relays.length });
+    this.onStatus?.({
+      mqttUp: up,
+      mqttTotal: this.clients.length,
+      worker: this.wsState,
+      workerHttp: this.httpState,
+      nostrUp: nUp,
+      nostrTotal: this.relays.length,
+    });
   }
 
+  // 1) MQTT поверх WSS
   _mqtt(b) {
     if (typeof mqtt === 'undefined') return;
     const url = typeof b === 'string' ? b : b.url;
-    const c = mqtt.connect(url, {
-      ...(b.username ? { username: b.username, password: b.password } : {}),
-      clientId: 'zv_' + Math.random().toString(16).slice(2, 12),
-      clean: true, keepalive: 30, connectTimeout: 8000, reconnectPeriod: 4000, protocolVersion: 4,
-    });
-    c.on('connect', () => {
-      c.subscribe(this.mqttTopic, { qos: 0 });
-      this._status();
-      this.onTransportUp();
-    });
-    c.on('message', (_t, payload) => this._recv(payload.toString(), 'mqtt'));
-    ['close', 'offline', 'error', 'reconnect'].forEach((e) => c.on(e, () => this._status()));
-    this.clients.push(c);
+    try {
+      const c = mqtt.connect(url, {
+        ...(b.username ? { username: b.username, password: b.password } : {}),
+        clientId: 'zv_' + Math.random().toString(16).slice(2, 12),
+        clean: true,
+        keepalive: 30,
+        connectTimeout: 7000,
+        reconnectPeriod: 3500,
+        protocolVersion: 4,
+      });
+      c.on('connect', () => {
+        if (this.closed) return;
+        c.subscribe(this.mqttTopic, { qos: 0 });
+        this._status();
+        this.onTransportUp();
+      });
+      c.on('message', (_t, payload) => this._recv(payload.toString(), 'mqtt'));
+      ['close', 'offline', 'error', 'reconnect'].forEach((e) => c.on(e, () => this._status()));
+      this.clients.push(c);
+    } catch {}
   }
 
-  // WebSocket к Worker. Некоторые провайдеры «замораживают» соединения с Cloudflare
-  // после ~16 КБ данных, поэтому: (1) следим за pong и переподключаемся при зависании;
-  // (2) заранее открываем новое соединение после ~9 КБ трафика (старое закрываем позже).
-  _ws(attempt) {
-    if (this.closed) return;
-    const base = this.workerUrl.replace(/^http/, 'ws').replace(/\/$/, '');
+  // 2) WebSocket к Cloudflare Worker с защитой от ТСПУ-зависания после ~16 КБ (ротация каждые 9 КБ)
+  _ws(attempt, isRenew = false) {
+    if (this.closed || !this.workerUrl) return;
+    const base = this.workerUrl.replace(/^http/, 'ws');
+    const qs = `?peer=${encodeURIComponent(this.selfId)}${isRenew ? '&renew=1' : ''}`;
     let ws;
-    try { ws = new WebSocket(`${base}/room/${this.topic}`); } catch { return; }
-    ws._bytes = 0; ws._pongAt = Date.now();
-    if (!this.ws || this.ws.readyState !== 1) { this.wsState = 'connecting'; this._status(); }
+    try {
+      ws = new WebSocket(`${base}/room/${this.topic}${qs}`);
+    } catch {
+      this._startPoll();
+      return;
+    }
+    ws._bytes = 0;
+    ws._pongAt = Date.now();
+    if (!this.ws || this.ws.readyState !== 1) {
+      this.wsState = 'connecting';
+      this._status();
+    }
     ws.onopen = () => {
+      if (this.closed) {
+        try { ws.close(); } catch {}
+        return;
+      }
       const old = this.ws;
-      this.ws = ws; this.wsAttempt = 0;
-      this.wsState = 'up'; this._status();
-      if (old && old !== ws) { old._replaced = true; setTimeout(() => { try { old.close(); } catch {} }, 2000); }
+      this.ws = ws;
+      this.wsAttempt = 0;
+      this.wsState = 'up';
+      this._stopPoll();
+      this._status();
+      if (old && old !== ws) {
+        old._replaced = true;
+        setTimeout(() => {
+          try { old.close(); } catch {}
+        }, 2000);
+      }
       ws._ping = setInterval(() => {
         if (ws.readyState !== 1) return;
-        if (Date.now() - ws._pongAt > 20000) { try { ws.close(); } catch {} return; } // зависло
-        ws.send('ping'); ws._bytes += 4;
-      }, 7000);
+        if (Date.now() - ws._pongAt > 18000) {
+          try { ws.close(); } catch {}
+          return;
+        }
+        ws.send('ping');
+        ws._bytes += 4;
+      }, 6500);
       if (!old) this.onTransportUp();
     };
     ws.onmessage = (e) => {
       ws._pongAt = Date.now();
       if (e.data === 'pong') return;
-      ws._bytes += e.data.length;
+      if (typeof e.data === 'string' && e.data.startsWith('{')) {
+        try {
+          const sys = JSON.parse(e.data);
+          if (sys.type === 'sys:peer_joined') {
+            this.onPeerJoined?.();
+            return;
+          }
+        } catch {}
+      }
+      ws._bytes += (e.data && e.data.length) || 0;
       this._recv(e.data, 'worker');
       this._budget(ws);
     };
     ws.onclose = () => {
       clearInterval(ws._ping);
       if (ws._replaced || this.closed) return;
-      if (this.ws && this.ws !== ws) { this.ws._renewing = false; return; } // не удалось обновить — живём на старом
+      if (this.ws && this.ws !== ws) {
+        this.ws._renewing = false;
+        return;
+      }
       this.ws = null;
-      this.wsState = 'down'; this._status();
+      this.wsState = 'down';
+      this._startPoll(); // Мгновенно подхватываем связь через HTTP-поллинг
+      this._status();
       const n = (this.wsAttempt = (this.wsAttempt || 0) + 1);
-      setTimeout(() => this._ws(n), Math.min(15000, 500 * 2 ** n));
+      setTimeout(() => this._ws(n, false), Math.min(12000, 500 * 2 ** Math.min(n, 5)));
     };
     ws.onerror = () => {};
   }
 
   _budget(ws) {
-    if (ws === this.ws && ws._bytes > 9000 && !ws._renewing) { ws._renewing = true; this._ws(0); }
+    if (ws === this.ws && ws._bytes > 9000 && !ws._renewing) {
+      ws._renewing = true;
+      this._ws(0, true);
+    }
   }
 
-  // Способ №3: публичные Nostr-реле (WSS на 443). Сообщение = подписанное эфемерное событие.
+  // 3) Резервный HTTP-поллинг + POST через Cloudflare Worker (когда WebSocket режется провайдером)
+  _startPoll() {
+    if (this.closed || !this.workerUrl || this.pollTimer) return;
+    this.httpState = 'polling';
+    this._status();
+
+    const poll = async () => {
+      if (this.closed || this.wsState === 'up') {
+        this._stopPoll();
+        return;
+      }
+      try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 4500);
+        const url = `${this.workerUrl}/room/${this.topic}?peer=${encodeURIComponent(this.selfId)}&since=${this.lastPollTs}`;
+        const r = await fetch(url, { cache: 'no-store', signal: ctl.signal });
+        clearTimeout(t);
+        if (r.ok) {
+          const j = await r.json();
+          if (this.httpState !== 'up') {
+            this.httpState = 'up';
+            this._status();
+            this.onTransportUp();
+          }
+          if (Array.isArray(j.messages)) {
+            for (const item of j.messages) {
+              if (item.ts > this.lastPollTs) this.lastPollTs = item.ts;
+              if (item.data) this._recv(item.data, 'worker-http');
+            }
+          }
+        }
+      } catch {
+        if (this.httpState === 'up') {
+          this.httpState = 'polling';
+          this._status();
+        }
+      }
+      if (!this.closed && this.wsState !== 'up') {
+        this.pollTimer = setTimeout(poll, 1100);
+      }
+    };
+    poll();
+  }
+
+  _stopPoll() {
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
+    this.httpState = 'off';
+  }
+
+  _httpPost(data) {
+    if (!this.workerUrl || this.closed) return;
+    fetch(`${this.workerUrl}/room/${this.topic}?peer=${encodeURIComponent(this.selfId)}`, {
+      method: 'POST',
+      body: data,
+      keepalive: data.length < 32000,
+    }).catch(() => {});
+  }
+
+  // 4) Публичные Nostr-реле (WSS на порту 443)
   _nostr(url, attempt) {
     if (this.closed) return;
     let ws;
-    try { ws = new WebSocket(url); } catch { return; }
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      return;
+    }
     ws._bytes = 0;
     ws.onopen = () => {
+      if (this.closed) {
+        try { ws.close(); } catch {}
+        return;
+      }
       const old = this.nostr.get(url);
       this.nostr.set(url, ws);
       ws._attempt = 0;
-      ws.send(JSON.stringify(['REQ', 'zv', { kinds: [NOSTR_KIND], '#t': [this.ntag], since: Math.floor(Date.now() / 1000) - 60 }]));
-      if (old && old !== ws) { old._replaced = true; setTimeout(() => { try { old.close(); } catch {} }, 2000); }
+      ws.send(
+        JSON.stringify([
+          'REQ',
+          'zv',
+          { kinds: [NOSTR_KIND], '#t': [this.ntag], since: Math.floor(Date.now() / 1000) - 60 },
+        ])
+      );
+      if (old && old !== ws) {
+        old._replaced = true;
+        setTimeout(() => {
+          try { old.close(); } catch {}
+        }, 2000);
+      }
       this._status();
       if (!old) this.onTransportUp();
     };
     ws.onmessage = (e) => {
-      ws._bytes += e.data.length;
-      let d; try { d = JSON.parse(e.data); } catch { return; }
-      if (d[0] === 'EVENT' && d[2]?.kind === NOSTR_KIND && d[2].pubkey !== this.npk) this._recv(String(d[2].content || ''), 'nostr');
+      ws._bytes += (e.data && e.data.length) || 0;
+      let d;
+      try {
+        d = JSON.parse(e.data);
+      } catch {
+        return;
+      }
+      if (d[0] === 'EVENT' && d[2]?.kind === NOSTR_KIND && d[2].pubkey !== this.npk) {
+        this._recv(String(d[2].content || ''), 'nostr');
+      }
       this._nbudget(url, ws);
     };
     ws.onclose = () => {
       if (ws._replaced || this.closed) return;
       const cur = this.nostr.get(url);
-      if (cur && cur !== ws) { cur._renewing = false; return; }
-      this.nostr.delete(url); this._status();
-      setTimeout(() => this._nostr(url, attempt + 1), Math.min(30000, 1000 * 2 ** attempt));
+      if (cur && cur !== ws) {
+        cur._renewing = false;
+        return;
+      }
+      this.nostr.delete(url);
+      this._status();
+      setTimeout(() => this._nostr(url, attempt + 1), Math.min(25000, 900 * 2 ** Math.min(attempt, 5)));
     };
     ws.onerror = () => {};
   }
+
   _nbudget(url, ws) {
-    if (this.nostr.get(url) === ws && ws._bytes > 9000 && !ws._renewing) { ws._renewing = true; this._nostr(url, 0); }
+    if (this.nostr.get(url) === ws && ws._bytes > 9000 && !ws._renewing) {
+      ws._renewing = true;
+      this._nostr(url, 0);
+    }
   }
+
   async _nostrEvent(content) {
-    const e = { pubkey: this.npk, created_at: Math.floor(Date.now() / 1000), kind: NOSTR_KIND, tags: [['t', this.ntag]], content };
-    const id = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([0, e.pubkey, e.created_at, e.kind, e.tags, e.content])))) ;
+    const e = {
+      pubkey: this.npk,
+      created_at: Math.floor(Date.now() / 1000),
+      kind: NOSTR_KIND,
+      tags: [['t', this.ntag]],
+      content,
+    };
+    const id = new Uint8Array(
+      await crypto.subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(JSON.stringify([0, e.pubkey, e.created_at, e.kind, e.tags, e.content]))
+      )
+    );
     e.id = hexs(id);
     e.sig = hexs(await schnorr.signAsync(id, this.nsk));
     return JSON.stringify(['EVENT', e]);
   }
 
+  // Веерная отправка во все активные каналы одновременно
   async send(msg) {
+    if (this.closed) return;
     const full = { ...msg, from: this.selfId, inst: this.inst, mid: rid(), ts: Date.now() };
+    this.seen.set(full.mid, full.ts);
     const data = await seal(this.key, full, this.topic);
-    for (const c of this.clients) if (c.connected) c.publish(this.mqttTopic, data, { qos: 0 });
+
+    // А) MQTT-брокеры
+    for (const c of this.clients) {
+      if (c.connected) {
+        try {
+          c.publish(this.mqttTopic, data, { qos: 0 });
+        } catch {}
+      }
+    }
+
+    // Б) Cloudflare Worker WebSocket (или HTTP POST фоллбэк, плюс дублирование критических пакетов рукопожатия)
     const ws = this.ws;
-    if (ws && ws.readyState === 1) { ws.send(data); ws._bytes += data.length; this._budget(ws); }
+    const isCritical = msg.type === 'hello' || msg.type === 'hi' || msg.type === 'desc' || msg.type === 'bye';
+    if (ws && ws.readyState === 1) {
+      try {
+        ws.send(data);
+        ws._bytes += data.length;
+        this._budget(ws);
+      } catch {
+        this._httpPost(data);
+      }
+      // Критические пакеты рукопожатия также кладем в HTTP-буфер воркера, если сокет близок к лимиту ротации
+      if (isCritical && ws._bytes > 7500) {
+        this._httpPost(data);
+      }
+    } else if (this.workerUrl) {
+      this._httpPost(data);
+    }
+
+    // В) Nostr-реле (для голосовых чанков отправляем максимум в 2 быстрых реле, чтобы не забивать эфир)
     const nopen = [...this.nostr.entries()].filter(([, w]) => w.readyState === 1);
     if (nopen.length) {
       try {
+        const targets = msg.type === 'voice' ? nopen.slice(0, 2) : nopen;
         const ev = await this._nostrEvent(data);
-        for (const [url, w] of nopen) { w.send(ev); w._bytes += ev.length; this._nbudget(url, w); }
-      } catch (e) { console.warn('nostr', e); }
+        for (const [url, w] of targets) {
+          w.send(ev);
+          w._bytes += ev.length;
+          this._nbudget(url, w);
+        }
+      } catch (e) {
+        console.warn('nostr', e);
+      }
     }
   }
 
+  // Мгновенный сигнал выхода при закрытии вкладки на смартфоне/ПК
+  async sendByeBeacon() {
+    if (!this.workerUrl || !navigator.sendBeacon) return;
+    try {
+      const full = { type: 'bye', from: this.selfId, inst: this.inst, mid: rid(), ts: Date.now() };
+      const data = await seal(this.key, full, this.topic);
+      navigator.sendBeacon(
+        `${this.workerUrl}/room/${this.topic}?peer=${encodeURIComponent(this.selfId)}`,
+        data
+      );
+    } catch {}
+  }
+
   async _recv(raw, via) {
-    if (raw.length > 200000) return;
+    if (!raw || typeof raw !== 'string' || raw.length > 220000) return;
     const m = await open(this.key, raw, this.topic);
     if (!m || m.from === this.selfId) return;
     if (m.to && m.to !== this.selfId) return;
     if (m.toInst && m.toInst !== this.inst) return;
-    if (Math.abs(Date.now() - m.ts) > 12 * 3600 * 1000) return; // старые сообщения (часы на телефонах бывают неточными)
+    if (Math.abs(Date.now() - m.ts) > 12 * 3600 * 1000) return;
     if (this.seen.has(m.mid)) return;
     this.seen.set(m.mid, Date.now());
-    if (this.seen.size > 2000) for (const [k, t] of this.seen) if (Date.now() - t > 300000) this.seen.delete(k);
+    if (this.seen.size > 2500) {
+      const now = Date.now();
+      for (const [k, t] of this.seen) if (now - t > 300000) this.seen.delete(k);
+    }
     m.via = via;
     this.onMessage(m);
   }
 
   close() {
     this.closed = true;
-    this.clients.forEach((c) => { try { c.end(true); } catch {} });
+    this._stopPoll();
+    this.clients.forEach((c) => {
+      try { c.end(true); } catch {}
+    });
     try { this.ws?.close(); } catch {}
-    for (const w of this.nostr.values()) { try { w.close(); } catch {} }
+    for (const w of this.nostr.values()) {
+      try { w.close(); } catch {}
+    }
   }
 }

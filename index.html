@@ -4,113 +4,253 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
-<meta name="theme-color" content="#0f1222">
-<title>ZVONochek — звонки по ссылке</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="theme-color" content="#0b0d13">
+<title>ZVONochek — защищённые портативные звонки</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=10">
+<link rel="stylesheet" href="style.css?v=11">
 </head>
 <body>
 
-<!-- Главная -->
+<!-- Главный экран -->
 <section id="home" class="screen">
-  <div class="hero">
+  <div class="hero-card">
+    <div class="hero-badge">E2EE • MULTI-MESH • ANTI-BLOCK v11</div>
     <div class="logo">📞 <b>ZVON</b>ochek</div>
-    <p class="sub">Аудио- и видеозвонки по ссылке. Без регистрации и установки.</p>
-    <button id="btnCreate" class="btn primary big">Создать звонок</button>
-    <ul class="features">
-      <li>🔒 Сквозное шифрование: голос и видео идут напрямую (DTLS-SRTP)</li>
-      <li>🗝️ Ключ комнаты живёт только в ссылке и не уходит на серверы</li>
-      <li>💬 Чат и передача файлов прямо в звонке</li>
-      <li>🛡️ Код безопасности для проверки собеседника</li>
-    </ul>
+    <p class="sub">Ультимативные портативные звонки по ссылке. Пробивают блокировки и работают даже без TURN-сервера.</p>
+
+    <button id="btnCreate" class="btn primary big glow-btn">⚡ Создать защищённый звонок</button>
+
+    <div class="join-box">
+      <input id="homeLinkInput" placeholder="Или вставьте ссылку / ключ комнаты #k=…" autocomplete="off">
+      <button id="btnOpenLink" class="btn">Войти</button>
+    </div>
+
+    <div class="features-grid">
+      <div class="feat-item">
+        <span class="feat-icon">🛡️</span>
+        <div>
+          <b>Мост без TURN и UDP</b>
+          <span>Если WebRTC заблокирован — голос идёт через зашифрованный сигнал (WSS/HTTPS)</span>
+        </div>
+      </div>
+      <div class="feat-item">
+        <span class="feat-icon">📡</span>
+        <div>
+          <b>4 канала сигналинга</b>
+          <span>Гонка MQTT + Worker WS + HTTP-поллинг + Nostr (порт 443) без потерь</span>
+        </div>
+      </div>
+      <div class="feat-item">
+        <span class="feat-icon">🎛️</span>
+        <div>
+          <b>Звук как в Discord</b>
+          <span>Громкость 0–200%, фильтр шума, порог голоса (VAD), компрессор и рация PTT</span>
+        </div>
+      </div>
+      <div class="feat-item">
+        <span class="feat-icon">🔒</span>
+        <div>
+          <b>Сквозное шифрование</b>
+          <span>Ключ AES-256-GCM живёт только в ссылке, сверка по 5 эмодзи</span>
+        </div>
+      </div>
+    </div>
+
     <p id="homeMsg" class="msg"></p>
   </div>
 </section>
 
-<!-- Подготовка к звонку -->
+<!-- Подготовка к звонку (Лобби) -->
 <section id="prejoin" class="screen hidden">
   <div class="prejoin">
-    <div class="preview">
-      <video id="preview" autoplay playsinline muted></video>
-      <div id="previewOff" class="video-off hidden">Камера выключена</div>
-      <div class="preview-ctrls">
-        <button id="pMic" class="round" title="Микрофон">🎙️</button>
-        <button id="pCam" class="round" title="Камера">📷</button>
+    <div class="preview-col">
+      <div class="preview" id="previewBox">
+        <video id="preview" autoplay playsinline muted></video>
+        <div id="previewOff" class="video-off hidden">
+          <div class="avatar-ring" id="preAvatarRing">
+            <div class="avatar" id="preAvatar">🎙️</div>
+          </div>
+          <span>Камера выключена (Аудио-режим)</span>
+        </div>
+        <div class="preview-hud">
+          <span class="hud-tag" id="preInputModeTag">🎙️ Активация по голосу</span>
+          <span class="hud-tag" id="preCodecTag">Opus 24 kbps + FEC</span>
+        </div>
+        <div class="preview-ctrls">
+          <button id="pMic" class="round" title="Микрофон">🎙️</button>
+          <button id="pCam" class="round" title="Камера">📷</button>
+          <button id="pTestMic" class="btn small pill-btn" title="Услышать свой голос">🔊 Проверить микрофон</button>
+          <button id="pOpenSettings" class="round" title="Настройки звука и связи">⚙️</button>
+        </div>
+      </div>
+
+      <!-- Живой индикатор уровня микрофона как в Discord -->
+      <div class="meter-card">
+        <div class="meter-head">
+          <span>Чувствительность микрофона (VAD)</span>
+          <span id="pDbVal" class="mono">-∞ дБ</span>
+        </div>
+        <div class="vad-bar-wrap">
+          <div id="pVadBar" class="vad-bar"></div>
+          <div id="pVadGateMark" class="vad-gate-mark" title="Порог срабатывания микрофона"></div>
+        </div>
+        <div class="Quick-sliders">
+          <label class="slider-lbl">
+            <span>🎙️ Усиление микрофона: <b id="pMicVolTxt">100%</b></span>
+            <input type="range" id="pMicVol" min="0" max="200" value="100">
+          </label>
+          <label class="slider-lbl">
+            <span>🔊 Громкость собеседника: <b id="pPeerVolTxt">100%</b></span>
+            <input type="range" id="pPeerVol" min="0" max="200" value="100">
+          </label>
+        </div>
       </div>
     </div>
+
     <div class="side">
-      <div class="logo small">📞 <b>ZVON</b>ochek</div>
-      <label>Ваше имя<input id="name" maxlength="40" placeholder="Например, Аня"></label>
-      <label>Микрофон<select id="pMicSel"></select></label>
-      <label>Камера<select id="pCamSel"></select></label>
+      <div class="side-header">
+        <div class="logo small">📞 <b>ZVON</b>ochek</div>
+        <span class="ver-badge">v11</span>
+      </div>
+
+      <label>Ваше имя в звонке
+        <input id="name" maxlength="40" placeholder="Например, Алекс">
+      </label>
+
+      <div class="dev-grid">
+        <label>Микрофон<select id="pMicSel"></select></label>
+        <label>Камера<select id="pCamSel"></select></label>
+      </div>
+
       <div class="invite">
-        <div class="invite-title">Ссылка для собеседника</div>
-        <div class="linkrow"><input id="link" readonly><button id="btnCopy" class="btn">Копировать</button></div>
+        <div class="invite-title">🔑 Зашифрованная ссылка для собеседника</div>
+        <div class="linkrow">
+          <input id="link" readonly>
+          <button id="btnCopy" class="btn">Копировать</button>
+        </div>
         <div class="row">
-          <button id="btnShare" class="btn hidden">Поделиться</button>
-          <button id="btnQr" class="btn">QR-код</button>
+          <button id="btnShare" class="btn hidden">📤 Поделиться</button>
+          <button id="btnQr" class="btn">📱 QR-код</button>
         </div>
         <div id="qr" class="qr hidden"></div>
       </div>
-      <button id="btnJoin" class="btn primary big">Войти в звонок</button>
+
+      <button id="btnJoin" class="btn primary big glow-btn">🚀 Войти в звонок</button>
       <p id="preMsg" class="msg"></p>
     </div>
   </div>
 </section>
 
-<!-- Звонок -->
+<!-- Экран активного звонка -->
 <section id="call" class="screen hidden">
   <div class="stage">
     <video id="remote" autoplay playsinline></video>
+    <audio id="remoteAudioOut" autoplay playsinline class="hidden"></audio>
+
     <div id="remoteOff" class="video-off">
-      <div class="avatar" id="peerAvatar">?</div>
-      <div id="waitText">Ожидаем собеседника…</div>
+      <div class="avatar-ring" id="peerAvatarRing">
+        <div class="avatar" id="peerAvatar">?</div>
+      </div>
+      <div id="peerNameTitle" class="peer-title">Ожидаем собеседника…</div>
+      <div id="waitText" class="wait-sub">Отправьте ссылку собеседнику 🔗</div>
+
+      <!-- Осциллограф / индикатор голоса -->
+      <div id="voiceWave" class="voice-wave hidden">
+        <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      </div>
+
+      <!-- Карточка прогресса рукопожатия и пробития связи -->
       <div id="conn" class="conn">
-        <div class="conn-top"><b id="connPct">0%</b><span id="connStep">Подготовка…</span></div>
+        <div class="conn-top">
+          <b id="connPct">0%</b>
+          <span id="connStep">Подготовка каналов…</span>
+        </div>
         <div class="bar"><i id="connBar"></i></div>
         <div id="connMethod" class="conn-method"></div>
-        <button id="btnDiag" class="btn small">🩺 Диагностика</button>
+        <div class="conn-actions">
+          <button id="btnForceBridge" class="btn small accent-outline" title="Включить передачу голоса через сигнал без ожидания WebRTC/TURN">🛡️ Включить мост без TURN</button>
+          <button id="btnDiag" class="btn small">🩺 Диагностика</button>
+        </div>
       </div>
     </div>
+
     <video id="local" autoplay playsinline muted></video>
     <button id="unmuteHint" class="btn primary hidden">🔊 Нажмите, чтобы включить звук</button>
   </div>
 
+  <!-- Верхний тактический статус-бар (HUD) -->
   <header class="topbar">
     <div class="tb-left">
-      <span id="status" class="pill">Подключение…</span>
-      <span id="timer" class="pill hidden">00:00</span>
+      <span id="status" class="pill">⏳ Подключение…</span>
+      <span id="timer" class="pill mono-pill hidden">00:00</span>
+      <span id="bridgeBadge" class="pill bridge-pill hidden" title="Голос передаётся через зашифрованный канал сигналинга (без TURN/UDP)">🛡️ Мост (Без TURN)</span>
     </div>
     <div class="tb-right">
-      <span id="quality" class="pill hidden" title="Качество связи"></span>
-      <button id="safety" class="pill hidden" title="Код безопасности"></button>
+      <button id="btnQuickAudio" class="pill" title="Быстрая настройка громкости (0–200%)">🔊 <span id="quickVolLabel">100%</span></button>
+      <span id="quality" class="pill hidden" title="Качество и маршрут связи"></span>
+      <button id="safety" class="pill hidden" title="Код безопасности E2EE"></button>
     </div>
   </header>
 
+  <!-- Всплывающий микшер громкости прямо в звонке (как в Discord) -->
+  <div id="quickAudioPop" class="quick-audio-pop hidden">
+    <div class="qa-head">
+      <b>🎛️ Аудио-микшер звонка</b>
+      <button class="x" data-close="quickAudioPop">✕</button>
+    </div>
+    <label class="slider-lbl">
+      <span>🔊 Громкость собеседника: <b id="qaPeerVolTxt">100%</b></span>
+      <input type="range" id="qaPeerVol" min="0" max="200" value="100">
+    </label>
+    <label class="slider-lbl">
+      <span>🎙️ Усиление моего микрофона: <b id="qaMicVolTxt">100%</b></span>
+      <input type="range" id="qaMicVol" min="0" max="200" value="100">
+    </label>
+    <div class="qa-meter-row">
+      <span>Уровень микрофона:</span>
+      <div class="vad-bar-wrap small">
+        <div id="qaVadBar" class="vad-bar"></div>
+        <div id="qaVadGateMark" class="vad-gate-mark"></div>
+      </div>
+    </div>
+    <div class="qa-toggles">
+      <label class="check"><input type="checkbox" id="qaBoost"> Выравнивание тихого голоса (Compressor)</label>
+      <label class="check"><input type="checkbox" id="qaBridgeMode"> 🛡️ Принудительный мост без TURN (Анти-блок)</label>
+    </div>
+    <button id="qaMoreSettings" class="btn small full-w">⚙️ Все настройки звука и устройств…</button>
+  </div>
+
+  <!-- Нижняя панель управления (Thumb-Zone / Discord Dock) -->
   <nav class="controls">
-    <button id="cMic" class="round" title="Микрофон">🎙️</button>
+    <button id="cMic" class="round" title="Микрофон (Вкл/Выкл)">🎙️</button>
+    <button id="cDeaf" class="round" title="Оглушить звук (Deafen — выкл. звук и микрофон)">🎧</button>
+    <button id="cPtt" class="ptt-btn hidden" title="Удерживайте для передачи голоса (или клавиша Пробел)">📻 Держите для речи</button>
     <button id="cCam" class="round" title="Камера">📷</button>
-    <button id="cScreen" class="round" title="Показать экран">🖥️</button>
-    <button id="cChat" class="round" title="Чат">💬<span id="unread" class="badge hidden">0</span></button>
-    <button id="cInvite" class="round" title="Пригласить">🔗</button>
-    <button id="cSettings" class="round" title="Настройки">⚙️</button>
-    <button id="cHang" class="round red" title="Завершить">📵</button>
+    <button id="cScreen" class="round" title="Демонстрация экрана">🖥️</button>
+    <button id="cChat" class="round" title="Чат и передача файлов">💬<span id="unread" class="badge hidden">0</span></button>
+    <button id="cInvite" class="round" title="Ссылка и QR-код">🔗</button>
+    <button id="cSettings" class="round" title="Настройки голоса и связи">⚙️</button>
+    <button id="cHang" class="round red" title="Завершить звонок">📵</button>
   </nav>
 
+  <!-- Боковая панель чата и передачи файлов -->
   <aside id="chat" class="panel hidden">
-    <div class="panel-head">Чат <button class="x" data-close="chat">✕</button></div>
+    <div class="panel-head">
+      <span>💬 Зашифрованный чат и файлы</span>
+      <button class="x" data-close="chat">✕</button>
+    </div>
     <div id="msgs" class="msgs"></div>
     <form id="chatForm" class="chatform">
-      <label class="attach" title="Отправить файл">📎<input id="fileInput" type="file" multiple hidden></label>
-      <input id="chatInput" autocomplete="off" placeholder="Сообщение…">
+      <label class="attach" title="Отправить файл (напрямую P2P)">📎<input id="fileInput" type="file" multiple hidden></label>
+      <input id="chatInput" autocomplete="off" placeholder="Написать сообщение…">
       <button class="btn primary">➤</button>
     </form>
   </aside>
 </section>
 
-<!-- Модальные окна -->
+<!-- Модальное окно -->
 <div id="modal" class="modal hidden">
   <div class="card">
     <button class="x" data-close="modal">✕</button>
@@ -120,41 +260,108 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<!-- Шаблон: Настройки голоса, видео и связи (Discord-стиль) -->
 <template id="tplSettings">
-  <h3>Настройки</h3>
-  <label>Микрофон<select id="sMic"></select></label>
-  <label>Камера<select id="sCam"></select></label>
-  <label id="sSpkWrap">Динамик<select id="sSpk"></select></label>
-  <label class="check"><input type="checkbox" id="sRelay"> Скрыть мой IP от собеседника (только через TURN)</label>
-  <h4>Способы связи</h4>
-  <div id="sTransports" class="mono"></div>
-  <button id="sDiag" class="btn">🩺 Диагностика</button>
+  <h3>🎛️ Настройки голоса и связи</h3>
+
+  <div class="settings-sec">
+    <h4>1. Устройства и громкость (0–200%)</h4>
+    <label>Микрофон<select id="sMic"></select></label>
+    <label class="slider-lbl">
+      <span>Усиление микрофона: <b id="sMicVolTxt">100%</b></span>
+      <input type="range" id="sMicVol" min="0" max="200" value="100">
+    </label>
+
+    <label id="sSpkWrap">Устройство вывода (Динамик / Наушники)<select id="sSpk"></select></label>
+    <label class="slider-lbl">
+      <span>Громкость собеседника (Audio Boost): <b id="sPeerVolTxt">100%</b></span>
+      <input type="range" id="sPeerVol" min="0" max="200" value="100">
+    </label>
+
+    <label>Камера<select id="sCam"></select></label>
+  </div>
+
+  <div class="settings-sec">
+    <h4>2. Режим ввода и чувствительность (как в Discord)</h4>
+    <div class="seg-row">
+      <label class="seg-opt"><input type="radio" name="sInputMode" id="sModeVad" value="vad"> 🎙️ По голосу (VAD)</label>
+      <label class="seg-opt"><input type="radio" name="sInputMode" id="sModePtt" value="ptt"> 📻 Рация (Нажми и говори)</label>
+    </div>
+
+    <div id="sVadControls">
+      <label class="slider-lbl">
+        <span>Порог активации голосом (отсечение шума): <b id="sVadGateTxt">-45 дБ</b></span>
+        <input type="range" id="sVadGate" min="-75" max="-15" value="-45">
+      </label>
+    </div>
+
+    <div class="mic-test-row">
+      <div class="vad-bar-wrap">
+        <div id="sVadBar" class="vad-bar"></div>
+        <div id="sVadGateMark" class="vad-gate-mark"></div>
+      </div>
+      <button id="sTestMic" class="btn small">🔊 Проверить</button>
+    </div>
+  </div>
+
+  <div class="settings-sec">
+    <h4>3. Обработка звука и кодек Opus</h4>
+    <label class="check"><input type="checkbox" id="sNoise"> Шумоподавление + фильтр гула (Noise Suppression)</label>
+    <label class="check"><input type="checkbox" id="sEcho"> Эхоподавление (Echo Cancellation)</label>
+    <label class="check"><input type="checkbox" id="sAgc"> Авторегулировка уровня (Auto Gain Control)</label>
+    <label class="check"><input type="checkbox" id="sComp"> Выравнивание тихого голоса собеседника (Compressor)</label>
+
+    <label>Профиль битрейта Opus (FEC + DTX)
+      <select id="sBitrate">
+        <option value="12">📡 Экстрим 12 Кбит/с (для глушилок и слабой сети)</option>
+        <option value="24">🟢 Стандарт 24 Кбит/с (оптимально + защита от потерь)</option>
+        <option value="48">🎧 Высокое качество 48 Кбит/с (чистый голос)</option>
+        <option value="64">💎 Студия HD 64 Кбит/с (максимальная детализация)</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="settings-sec">
+    <h4>4. Обход блокировок и маршрут сети</h4>
+    <label>Режим соединения
+      <select id="sNetMode">
+        <option value="auto">⚡ Авто (P2P + Авто-мост через сигнал без TURN при блокировках)</option>
+        <option value="bridge">🛡️ Только Мост через Сигналинг (работает вообще без TURN и без UDP)</option>
+        <option value="relay">🕵️ Скрыть мой IP (только через TURN-ретранслятор)</option>
+      </select>
+    </label>
+    <div id="sTransports" class="mono status-box"></div>
+    <button id="sDiag" class="btn full-w">🩺 Открыть журнал диагностики</button>
+  </div>
 </template>
 
+<!-- Шаблон: Код безопасности -->
 <template id="tplSafety">
-  <h3>🛡️ Код безопасности</h3>
-  <p>Сравните код с собеседником голосом. Если он <b>совпадает</b>, звонок зашифрован напрямую между вами и никто не стоит посередине.</p>
+  <h3>🛡️ Криптографический код сверки</h3>
+  <p>Сравните эти 5 символов с собеседником голосом. Если они <b>совпадают</b>, соединение защищено сквозным шифрованием и никто не перехватывает звонок.</p>
   <div id="safetyEmoji" class="safety-emoji"></div>
   <div id="safetyDigits" class="safety-digits"></div>
 </template>
 
+<!-- Шаблон: Диагностика -->
 <template id="tplDiag">
   <h3>🩺 Диагностика соединения</h3>
-  <div id="diagStats" class="mono"></div>
-  <h4>Журнал</h4>
+  <div id="diagStats" class="mono status-box"></div>
+  <h4>Журнал событий</h4>
   <pre id="diagLog" class="mono diaglog"></pre>
-  <button id="diagCopy" class="btn primary">Скопировать для разработчика</button>
+  <button id="diagCopy" class="btn primary full-w">📋 Скопировать отчёт</button>
 </template>
 
+<!-- Шаблон: Пригласить -->
 <template id="tplInvite">
-  <h3>Пригласить собеседника</h3>
-  <p>Отправьте ссылку. В ней ключ шифрования, поэтому делитесь ей только с тем, кому звоните.</p>
+  <h3>🔗 Пригласить собеседника</h3>
+  <p>Отправьте эту ссылку собеседнику. Секретный ключ шифрования находится после символа <code>#</code> и никогда не передаётся на сервер.</p>
   <div class="linkrow"><input id="iLink" readonly><button id="iCopy" class="btn">Копировать</button></div>
   <div id="iQr" class="qr"></div>
 </template>
 
 <script src="vendor/mqtt.min.js"></script>
 <script src="vendor/qrcode.js"></script>
-<script type="module" src="app.js?v=10"></script>
+<script type="module" src="app.js?v=11"></script>
 </body>
 </html>
