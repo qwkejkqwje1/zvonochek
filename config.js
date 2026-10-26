@@ -1,4 +1,4 @@
-// ZVONochek v13 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
+// ZVONochek v14 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
 export const CONFIG = {
   APP_NAME: 'ZVONochek',
 
@@ -14,6 +14,7 @@ export const CONFIG = {
     'wss://broker.emqx.io:8084/mqtt',
     'wss://broker.hivemq.com:8884/mqtt',
     'wss://test.mosquitto.org:8081/mqtt',
+    'wss://mqtt.eclipseprojects.io/mqtt',
   ],
 
   // Способ №3: публичные Nostr-реле (WSS, порт 443). Бесплатно и устойчиво к блокировкам.
@@ -24,42 +25,36 @@ export const CONFIG = {
     'wss://nostr.mom',
     'wss://offchain.pub',
     'wss://relay.snort.social',
+    'wss://relay.nostr.band',
+    'wss://nostr-pub.wellorder.net',
+    'wss://relay.nostr.info',
   ],
 
-  // Расширенный пул STUN-серверов (включая порты 443 и 80 для пробития NAT при блокировке порта 3478)
+  // Расширенный пул бесплатных STUN-серверов разных операторов и портов
+  // (443/80 помогают там, где провайдер режет классический 3478).
+  // STUN бесплатен и почти ничего не стоит операторам — в отличие от TURN
+  // он не пропускает через себя медиа, поэтому пул можно держать широким.
   STUN: [
     'stun:stun.cloudflare.com:3478',
     'stun:stun.l.google.com:19302',
     'stun:stun1.l.google.com:19302',
+    'stun:stun2.l.google.com:19302',
+    'stun:stun3.l.google.com:19302',
     'stun:stun4.l.google.com:19302',
     'stun:stun.nextcloud.com:443',
     'stun:stun.relay.metered.ca:80',
+    'stun:stunserver.org:3478',
+    'stun:global.stun.twilio.com:3478',
   ],
 
   // TURN от Metered.ca (если используется динамический API-ключ на клиенте)
   METERED: { domain: '', apiKey: '' },
 
-  // Запасные ICE/TURN-серверы (с приоритетом порта 443 и TCP/TLS для обхода DPI)
-  EXTRA_ICE_SERVERS: [
-    { urls: 'stun:stun.relay.metered.ca:80' },
-    {
-      urls: [
-        'turns:global.relay.metered.ca:443?transport=tcp',
-        'turn:global.relay.metered.ca:443',
-        'turn:global.relay.metered.ca:80?transport=tcp',
-        'turn:global.relay.metered.ca:80',
-      ],
-      username: 'b0cc17f06cf20504ab5cd581',
-      credential: 'YSV26ACRA6JxZ8TQ',
-    },
-    // Запасной TURN: ExpressTURN
-    {
-      urls: [
-        'turn:free.expressturn.com:3478?transport=tcp',
-        'turn:free.expressturn.com:3478',
-      ],
-      username: '000000002107165853',
-      credential: '3T1HHXm3M1UWIyZ3pOzBv5EwRbI=',
-    },
-  ],
+  // v14: СТАТИЧЕСКИХ TURN-КРЕДОВ В КЛИЕНТЕ БОЛЬШЕ НЕТ.
+  // Раньше здесь лежали логин/пароль Metered и ExpressTURN в открытом виде:
+  // их видел любой, кто открыл исходники, и мог жечь чужую квоту.
+  // Теперь TURN только эфемерный и только из собственного Worker (/turn,
+  // короткоживущие креды), и запрашивается ЛЕНИВО — лишь когда прямое
+  // соединение и мост не справились. Нет Worker-TURN — проект честно
+  // работает без TURN: direct P2P + голосовой мост через сигналинг.
 };

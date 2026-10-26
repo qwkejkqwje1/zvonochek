@@ -1574,7 +1574,7 @@ button.pill:hover {
 }
 .seg-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 8px;
   margin: 8px 0;
 }
@@ -2036,4 +2036,28 @@ label.disabled select {
   #local { bottom: calc(142px + env(safe-area-inset-bottom)); }
   .controls .round { height: 46px; }
   .controls .lbl { display: none; }
+}
+
+/* ---------- v14: версия разработки ---------- */
+.home-ver {
+  margin-top: 14px;
+  font: 500 11.5px var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--faint);
+  text-transform: uppercase;
+}
+.home-ver b { color: var(--accent-2); }
+.ver-tag {
+  font: 700 10.5px var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--accent-2);
+  border: 1px solid rgba(34, 211, 238, 0.4);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+.conn-ver {
+  margin-top: 8px;
+  font: 500 11px var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--faint);
 }

@@ -1,8 +1,13 @@
-import { CONFIG } from './config.js?v=13';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=13';
-import { Signaling } from './signaling.js?v=13';
+import { CONFIG } from './config.js?v=14';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=14';
+import { Signaling } from './signaling.js?v=14';
 
-export const APP_VERSION = 13;
+export const APP_VERSION = 14;
+export const APP_BUILD = '2026-10-27';
+// Версия разработки пишется из одного места: главная (бейдж и подпись),
+// экран подготовки, карточка подключения в начале звонка.
+for (const el of document.querySelectorAll('[data-ver]')) el.textContent = 'v' + APP_VERSION;
+for (const el of document.querySelectorAll('[data-build]')) el.textContent = APP_BUILD;
 const $ = (s, r = document) => r.querySelector(s);
 const setUse = (sel, name) => {
   const el = typeof sel === 'string' ? $(sel) : sel;
@@ -12,7 +17,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=13').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=14').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -44,7 +49,13 @@ try {
     localStorage.zvComp = '0';
     localStorage.zvOpusTune = '0';
     if (!localStorage.zvBitrate) localStorage.zvBitrate = '48';
-    localStorage.zvSettingsV = '13';
+  }
+  if (Number(localStorage.zvSettingsV || 0) < 14) {
+    // v14: по просьбе владельца убираем VAD-гейт из пути звука по умолчанию.
+    // Режим ввода становится «открытый микрофон»: гейт больше не режет голос,
+    // VAD/PTT остаются только как ручные опции в настройках.
+    localStorage.zvInputMode = 'open';
+    localStorage.zvSettingsV = '14';
   }
 } catch {}
 
@@ -79,7 +90,7 @@ const S = {
   audio: {
     micVol: Number(localStorage.zvMicVol ?? 100),
     peerVol: Number(localStorage.zvPeerVol ?? 100),
-    inputMode: localStorage.zvInputMode || 'vad', // 'vad' | 'ptt'
+    inputMode: localStorage.zvInputMode || 'open', // 'open' | 'vad' | 'ptt'
     vadGate: Number(localStorage.zvVadGate ?? -45), // -75 .. -15 dB
     // v13: обработка звука и ручная настройка Opus по умолчанию ВЫКЛЮЧЕНЫ.
     // Раньше noise/echo/agc/comp были включены «из коробки» ( !== '0' ), а Opus
@@ -460,7 +471,11 @@ function syncAudioParams() {
   setBtnIcon('#btnQuickAudio', S.deafened ? 'i-volume-x' : 'i-volume');
   if ($('#preInputModeText')) {
     $('#preInputModeText').textContent =
-      S.audio.inputMode === 'ptt' ? 'Рация (нажми и говори)' : `По голосу (${S.audio.vadGate} дБ)`;
+      S.audio.inputMode === 'ptt'
+        ? 'Рация (нажми и говори)'
+        : S.audio.inputMode === 'vad'
+        ? `По голосу (${S.audio.vadGate} дБ)`
+        : 'Открытый микрофон';
   }
   setUse('#preInputModeTag use', S.audio.inputMode === 'ptt' ? 'i-radio' : 'i-mic');
   if ($('#preCodecTag')) {
@@ -506,6 +521,11 @@ function startMeterLoop() {
       let pass = false;
       if (!S.micOn || S.deafened) {
         pass = false;
+      } else if (S.audio.inputMode === 'open') {
+        // Открытый микрофон (дефолт v14): гейта на пути звука нет вообще.
+        // isSpeaking считаем по энергии только для индикации и моста.
+        pass = true;
+        S.isSpeaking = db > -55;
       } else if (S.audio.inputMode === 'ptt') {
         pass = S.pttPressed;
       } else {
@@ -520,7 +540,7 @@ function startMeterLoop() {
         }
         pass = now < S.vadHoldUntil;
       }
-      S.isSpeaking = pass;
+      if (S.audio.inputMode !== 'open') S.isSpeaking = pass;
       if (S.gateGainNode && S.audioCtx) {
         S.gateGainNode.gain.setTargetAtTime(pass ? 1 : 0, S.audioCtx.currentTime, 0.07);
       }
@@ -943,15 +963,29 @@ async function fetchJson(url, ms = 4000) {
 const isTurn = (s) => [].concat(s?.urls || []).some((u) => /^turns?:/.test(u));
 
 async function loadIce() {
-  const servers = [{ urls: CONFIG.STUN }, ...CONFIG.EXTRA_ICE_SERVERS];
-  const info = CONFIG.EXTRA_ICE_SERVERS.some(isTurn) ? ['Встроенный TURN: есть'] : [];
+  // v14 — лестница маршрутов и экономия TURN:
+  // старт всегда только с бесплатным STUN (direct). TURN здесь НЕ запрашиваем.
+  const servers = [{ urls: CONFIG.STUN }];
+  S.stunOnlyIce = servers;
+  S.turnLoaded = false;
+  S.hasTurn = false;
+  S.turnInfo = 'ленивый режим: TURN не запрашивался (экономия квоты)';
+  return servers;
+}
+
+// Эфемерные TURN-серверы: только из собственного Worker (/turn) или из
+// динамического Metered API, если он когда-нибудь будет настроен в config.
+// Никаких статических логинов/паролей в клиенте (их убрали в v14).
+async function fetchTurnServers() {
+  const out = [];
+  const info = [];
   const jobs = [];
   if (CONFIG.WORKER_URL) {
     jobs.push(
       fetchJson(CONFIG.WORKER_URL.replace(/\/$/, '') + '/turn')
         .then((j) => {
           const l = (j?.iceServers || []).filter(isTurn);
-          servers.push(...l);
+          out.push(...l);
           info.push(l.length ? 'Worker TURN: есть' : 'Worker: без TURN (только сигнал)');
         })
         .catch(() => info.push('Worker: офлайн'))
@@ -965,17 +999,46 @@ async function loadIce() {
           const l = []
             .concat(j || [])
             .filter(isTurn)
-            .map((s) => ({ ...s, urls: [].concat(s.urls).filter((u) => !/:53(\?|$)/.test(u)) }));
-          servers.push(...l);
+            .map((sv) => ({ ...sv, urls: [].concat(sv.urls).filter((u) => !/:53(\?|$)/.test(u)) }));
+          out.push(...l);
           info.push(l.length ? 'Metered: есть' : 'Metered: пусто');
         })
         .catch(() => info.push('Metered недоступен'))
     );
   }
   await Promise.all(jobs);
-  S.hasTurn = servers.some(isTurn);
-  S.turnInfo = info.join(', ') || 'не настроен';
-  return servers;
+  S.turnInfo = info.join(', ') || 'источники TURN не настроены';
+  return out;
+}
+
+// Ленивая догрузка TURN: вызываем, только когда direct не встал вовремя,
+// соединение упало или пользователь сам выбрал режим «только TURN».
+// Звук в этот момент уже держит мост, поэтому медленный подъём TURN
+// не создаёт тишины. Повторные вызовы безопасны.
+async function ensureTurnLoaded(reason = '') {
+  if (S.turnLoaded || S.turnLoading) return S.hasTurn;
+  S.turnLoading = true;
+  try {
+    const turn = await fetchTurnServers();
+    if (!turn.length) {
+      S.turnLoaded = true; // не дёргаем источники впустую каждый раз
+      log('TURN недоступен (' + S.turnInfo + ') — остаёмся на direct + мост');
+      return false;
+    }
+    S.turnLoaded = true;
+    S.hasTurn = true;
+    S.ice = [...(S.stunOnlyIce || [{ urls: CONFIG.STUN }]), ...turn];
+    if (S.pc) {
+      try {
+        S.pc.setConfiguration(pcConfig());
+        S.pc.restartIce();
+      } catch {}
+    }
+    log('Лениво добавлен TURN (' + (reason || 'по требованию') + '): ' + S.turnInfo);
+    return true;
+  } finally {
+    S.turnLoading = false;
+  }
 }
 
 const pcConfig = () => ({
@@ -1014,6 +1077,7 @@ async function join() {
     $('#btnJoin').disabled = false;
     return toast('Неверная ссылка');
   }
+  if (S.audio.netMode === 'relay') await ensureTurnLoaded('режим «только TURN» из прошлых настроек');
   S.joined = true;
   show('call');
   refreshLocalView();
@@ -1058,13 +1122,13 @@ async function join() {
   // теряет relay-путь и звонок умирает «сам по себе».
   clearInterval(S.iceRefreshTimer);
   S.iceRefreshTimer = setInterval(async () => {
-    if (!S.joined) return;
-    const fresh = await loadIce().catch(() => null);
-    if (!fresh || !S.joined) return;
-    S.ice = fresh;
+    if (!S.joined || !S.turnLoaded || !S.hasTurn) return;
+    const turn = await fetchTurnServers().catch(() => null);
+    if (!turn || !turn.length || !S.joined) return;
+    S.ice = [...(S.stunOnlyIce || [{ urls: CONFIG.STUN }]), ...turn];
     if (S.pc) {
       try { S.pc.setConfiguration(pcConfig()); } catch {}
-      log('ICE-серверы обновлены (профилактика истечения TURN-кред)');
+      log('TURN-креды обновлены (профилактика истечения TTL)');
     }
   }, 60 * 60 * 1000);
   S.helloTimer = setInterval(() => {
@@ -1096,8 +1160,13 @@ function setupMediaSession() {
 }
 
 const myName = () => localStorage.zvName || 'Гость';
+const webCodecsBridgeSupported = () =>
+  typeof AudioEncoder !== 'undefined' &&
+  typeof AudioDecoder !== 'undefined' &&
+  typeof MediaStreamTrackProcessor !== 'undefined';
 function hello() {
-  S.sig?.send({ type: 'hello', name: myName(), ver: APP_VERSION });
+  // bc: умеем ли мы в мост 2.0 (WebCodecs) — собеседник выберет формат под нас
+  S.sig?.send({ type: 'hello', name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0 });
 }
 
 // ---------- Аварийный Аудио-Мост через Сигналинг (работает вообще без TURN и без UDP!) ----------
@@ -1108,9 +1177,14 @@ function activateBridge(reason = 'Активирован аудио-мост ч�
   clearTimeout(S.bridgeAutoTimer);
   log(reason);
   toast('Включён мост без TURN: голос идёт через зашифрованный сигнал', 5000);
+  if (!S.bridgeCounted) {
+    S.bridgeCounted = true;
+    countRoute('bridge');
+  }
   if (!S.callStart) {
     S.callStart = Date.now();
     beep(660, 0.16);
+    sysMsg(`Звонок начат · ваша версия ZVONochek v${APP_VERSION} · маршрут: мост без TURN`);
   }
   $('#bridgeBadge')?.classList.remove('hidden');
   $('#cPtt')?.classList.remove('hidden');
@@ -1120,6 +1194,8 @@ function activateBridge(reason = 'Активирован аудио-мост ч�
 }
 
 function stopBridge() {
+  stopBridge2();
+  if (S.bridgeDec) S.bridgeDec.nextPlay = 0;
   clearTimeout(S.bridgeAutoTimer);
   clearInterval(S.bridgeRecTimer);
   S.bridgeRecTimer = null;
@@ -1151,12 +1227,180 @@ function getSupportedAudioMime() {
   return types.find((t) => MediaRecorder.isTypeSupported(t)) || '';
 }
 
+// ---------- Мост 2.0: WebCodecs Opus (альтернативный метод, v14) ----------
+// Вместо кусков MediaRecorder по ~0,7 с кодируем звук настоящими Opus-кадрами
+// по 20 мс (AudioEncoder) и шлём пачками ~120 мс. Задержка моста падает в разы.
+// Работает только там, где есть WebCodecs + MediaStreamTrackProcessor
+// (Chromium). Собеседник без WebCodecs честно получает мост 1.0: формат
+// выбирается по флагу bc из hello/hi, а не по нашему желанию.
 function startBridgeRecorder() {
+  if (S.peer?.bridgeCodecs && webCodecsBridgeSupported() && startBridge2()) {
+    S.bridgeMode = 'webcodecs';
+    return;
+  }
+  S.bridgeMode = 'mediarecorder';
+  startBridgeRecorderV1();
+}
+
+function startBridge2() {
+  stopBridge2();
+  const track = S.procDest?.stream?.getAudioTracks?.()[0];
+  if (!track) return false;
+  const sampleRate = track.getSettings?.().sampleRate || 48000;
+  const st = { running: true, sampleRate, frames: [], flushTimer: null, enc: null, reader: null };
+  S.bridge2 = st;
+  try {
+    st.enc = new AudioEncoder({
+      output: (chunk) => {
+        try {
+          const buf = new ArrayBuffer(chunk.byteLength);
+          chunk.copyTo(buf);
+          st.frames.push(new Uint8Array(buf));
+        } catch {}
+      },
+      error: (e) => {
+        console.warn('bridge2 enc', e);
+        if (S.bridgeActive) {
+          stopBridge2();
+          S.bridgeMode = 'mediarecorder';
+          startBridgeRecorderV1();
+        }
+      },
+    });
+    st.enc.configure({ codec: 'opus', sampleRate, numberOfChannels: 1, bitrate: 24000 });
+    const processor = new MediaStreamTrackProcessor({ track });
+    st.reader = processor.readable.getReader();
+    st.flushTimer = setInterval(flushBridge2Frames, 120);
+    (async () => {
+      try {
+        while (st.running) {
+          const { value, done } = await st.reader.read();
+          if (done) break;
+          if (!value) continue;
+          // Кодируем только реальную речь: тишина не жжёт трафик сигналинга.
+          if (S.micOn && !S.deafened && S.isSpeaking && st.enc.state === 'configured') {
+            try { st.enc.encode(value); } catch {}
+          }
+          value.close();
+        }
+      } catch {}
+    })();
+    log('Мост 2.0 (WebCodecs Opus, кадры 20 мс) включён');
+    return true;
+  } catch (e) {
+    console.warn('bridge2 start', e);
+    stopBridge2();
+    return false;
+  }
+}
+
+function flushBridge2Frames() {
+  const st = S.bridge2;
+  if (!st || !st.frames.length || !S.peer) return;
+  const frames = st.frames.splice(0);
+  let total = 0;
+  for (const f of frames) total += 2 + f.length;
+  if (total < 10 || total > 60000) return;
+  const out = new Uint8Array(total);
+  const dv = new DataView(out.buffer);
+  let o = 0;
+  for (const f of frames) {
+    dv.setUint16(o, f.length);
+    o += 2;
+    out.set(f, o);
+    o += f.length;
+  }
+  S.sig?.send(
+    { type: 'voice2', to: S.peer.id, toInst: S.peer.inst, sr: st.sampleRate, b64: b64u.enc(out), _noZip: true },
+    { voice: true }
+  );
+}
+
+function stopBridge2() {
+  const st = S.bridge2;
+  if (!st) return;
+  st.running = false;
+  clearInterval(st.flushTimer);
+  try { st.reader?.cancel(); } catch {}
+  try { st.enc?.close(); } catch {}
+  if (S.bridge2 === st) S.bridge2 = null;
+}
+
+function ensureBridgeDecoder(sr) {
+  const ctx = ensureAudioEngine();
+  if (!ctx || typeof AudioDecoder === 'undefined') return null;
+  let d = S.bridgeDec;
+  if (d && d.sampleRate === sr && d.dec.state !== 'closed') return d;
+  if (d) {
+    try { d.dec.close(); } catch {}
+  }
+  d = S.bridgeDec = { sampleRate: sr, nextPlay: 0, ts: 0, dec: null };
+  d.dec = new AudioDecoder({
+    output: (data) => {
+      try { scheduleDecodedBridgeFrame(data); } catch {}
+      try { data.close(); } catch {}
+    },
+    error: (e) => console.warn('bridge2 dec', e),
+  });
+  d.dec.configure({ codec: 'opus', sampleRate: sr, numberOfChannels: 1 });
+  return d;
+}
+
+function scheduleDecodedBridgeFrame(data) {
+  const ctx = S.audioCtx;
+  if (!ctx || !S.bridgeDec) return;
+  const frames = data.numberOfFrames;
+  if (!frames) return;
+  const buf = ctx.createBuffer(1, frames, data.sampleRate);
+  const tmp = new Float32Array(frames);
+  try {
+    data.copyTo(tmp, { planeIndex: 0, format: 'f32-planar' });
+  } catch {
+    try { data.copyTo(tmp, { planeIndex: 0 }); } catch { return; }
+  }
+  buf.copyToChannel(tmp, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(S.remoteCompNode || ctx.destination);
+  // Маленький джиттер-буфер: не копим отставание больше ~0,35 с.
+  if (S.bridgeDec.nextPlay - ctx.currentTime > 0.35) S.bridgeDec.nextPlay = 0;
+  const startAt = Math.max(ctx.currentTime + 0.04, S.bridgeDec.nextPlay || 0);
+  src.start(startAt);
+  S.bridgeDec.nextPlay = startAt + buf.duration;
+}
+
+async function playBridgeVoice2(m) {
+  if (S.deafened || !m.b64) return;
+  if (typeof AudioDecoder === 'undefined') return; // мы бы и не заявили bc=1
+  if (!S.bridgeActive && S.pc?.connectionState !== 'connected') {
+    activateBridge('Получен голос WebCodecs от собеседника по мосту 2.0');
+  }
+  S.bridgeSpeakingUntil = Date.now() + 400;
+  $('#peerAvatarRing')?.classList.add('speaking');
+  const d = ensureBridgeDecoder(m.sr || 48000);
+  if (!d) return;
+  const bytes = b64u.dec(m.b64);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let o = 0;
+  while (o + 2 <= bytes.byteLength) {
+    const len = dv.getUint16(o);
+    o += 2;
+    if (len <= 0 || o + len > bytes.byteLength) break;
+    const pkt = bytes.slice(o, o + len);
+    o += len;
+    d.ts += 20000; // кадры по 20 мс
+    try {
+      d.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: d.ts, duration: 20000, data: pkt }));
+    } catch {}
+  }
+}
+
+function startBridgeRecorderV1() {
   if (typeof MediaRecorder === 'undefined') return;
   clearInterval(S.bridgeRecTimer);
   const mime = getSupportedAudioMime();
 
-  // Каждые 680 мс записываем и отправляем голосовой фрагмент, если пользователь говорит
+  // Каждые ~420 мс записываем и отправляем голосовой фрагмент, если пользователь говорит
   const recordSlice = () => {
     if (!S.bridgeActive || !S.joined || !S.peer) return;
     // Если прямое P2P WebRTC-соединение уже поднялось и пользователь не форсировал режим моста — уступаем P2P
@@ -1171,7 +1415,7 @@ function startBridgeRecorder() {
     try {
       const rec = new MediaRecorder(stream, {
         ...(mime ? { mimeType: mime } : {}),
-        audioBitsPerSecond: 14000, // 14 Кбит/с — компактные пакеты ~1.1 КБ для мгновенной доставки
+        audioBitsPerSecond: 16000, // 16 Кбит/с, куски короче (400 мс) — меньше задержка моста 1.0
       });
       const chunks = [];
       rec.ondataavailable = (ev) => {
@@ -1199,13 +1443,13 @@ function startBridgeRecorder() {
         if (rec.state === 'recording') {
           try { rec.stop(); } catch {}
         }
-      }, 640);
+      }, 400);
     } catch (e) {
       console.warn('bridge recorder', e);
     }
   };
 
-  S.bridgeRecTimer = setInterval(recordSlice, 660);
+  S.bridgeRecTimer = setInterval(recordSlice, 420);
 }
 
 async function playBridgeVoice(m) {
@@ -1262,6 +1506,20 @@ const stats = (() => {
 const saveStats = () => {
   localStorage.zvStats = JSON.stringify(stats);
 };
+// Счётчики маршрутов за всё время: видно, как часто реально нужен TURN.
+const routeStats = (() => {
+  try {
+    return JSON.parse(localStorage.zvRoutes) || { direct: 0, relay: 0, bridge: 0 };
+  } catch {
+    return { direct: 0, relay: 0, bridge: 0 };
+  }
+})();
+function countRoute(kind) {
+  routeStats[kind] = (routeStats[kind] || 0) + 1;
+  try {
+    localStorage.zvRoutes = JSON.stringify(routeStats);
+  } catch {}
+}
 const viaName = (v) =>
   ({ mqtt: 'MQTT', worker: 'Worker WS', 'worker-http': 'Worker HTTP', nostr: 'Nostr' }[v] || v);
 const to = () => ({ to: S.peer.id, toInst: S.peer.inst, gen: S.gen });
@@ -1273,8 +1531,9 @@ async function onSignal(m) {
     case 'hello':
     case 'hi':
       if (!acceptPeer(m)) return;
+      if (S.peer && typeof m.bc === 'number') S.peer.bridgeCodecs = !!m.bc;
       if (m.type === 'hello') {
-        S.sig.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION });
+        S.sig.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0 });
       }
       if ((m.ver || 0) !== APP_VERSION && !S.verWarned && (m.type === 'hello' || m.ver)) {
         S.verWarned = true;
@@ -1312,6 +1571,9 @@ async function onSignal(m) {
       break;
     case 'voice':
       if (acceptPeer(m)) await playBridgeVoice(m);
+      break;
+    case 'voice2':
+      if (acceptPeer(m)) await playBridgeVoice2(m);
       break;
     case 'sig_chat':
       if (acceptPeer(m) && typeof m.text === 'string') {
@@ -1371,6 +1633,19 @@ function setPeer(m) {
   // Если выбран режим «Только Мост без TURN» — включаем голосовой мост мгновенно!
   // В режиме «Авто» даём WebRTC 10 секунд: за это время обычный звонок успевает подняться,
   // а при блокировке UDP/отсутствии TURN автоматически включается мост через сигналинг.
+  // Лестница маршрутов v14: direct сразу, TURN — лениво через 6 секунд,
+  // если прямое соединение не встало. Мост при этом уже на подходе (10 с
+  // для зависшего checking, мгновенно при failed), поэтому тишины не будет.
+  clearTimeout(S.turnTimer);
+  if (S.audio.netMode === 'relay') {
+    ensureTurnLoaded('режим «только TURN» выбран заранее');
+  } else if (S.audio.netMode !== 'bridge') {
+    S.turnTimer = setTimeout(() => {
+      if (S.joined && S.peer && S.pc?.connectionState !== 'connected') {
+        ensureTurnLoaded('direct не встал за 6 секунд');
+      }
+    }, 6000);
+  }
   clearTimeout(S.bridgeAutoTimer);
   if (S.audio.netMode === 'bridge') {
     activateBridge('Выбран режим прямого моста через сигнал (без TURN)');
@@ -1408,6 +1683,7 @@ function createPC() {
   S.cands = { local: {}, remote: {} };
   S.route = '';
   S.method = '';
+  S.pcRouteCounted = false;
   S.qLevel = 0;
   S.qBad = 0;
   S.qGood = 0;
@@ -1647,6 +1923,7 @@ function onPcState(pc) {
     if (!S.callStart) {
       S.callStart = Date.now();
       beep();
+      sysMsg(`Звонок начат · ваша версия ZVONochek v${APP_VERSION}`);
     }
     if (!S.countedOk) {
       S.countedOk = true;
@@ -1667,7 +1944,10 @@ function onPcState(pc) {
     if (S.peer && !S.bridgeActive) {
       activateBridge('WebRTC P2P оборвался — включён резервный аудио-мост');
     }
-    restartIce();
+    // Звук уже держит мост — спокойно догружаем TURN и только потом restart.
+    ensureTurnLoaded('ICE failed').finally(() => {
+      if (S.pc === pc) restartIce();
+    });
   }
   updateStatus();
 }
@@ -1680,17 +1960,38 @@ function restartIce() {
   } catch {}
   armWatchdog(S.pc, S.polite ? 17000 : 11500);
 }
-window.addEventListener('online', () => S.pc && S.callStart && restartIce());
+// De-escalation при смене сети: новая сеть (Wi-Fi <-> LTE) может дать прямой
+// маршрут, поэтому сначала сбрасываем TURN и пробуем direct; TURN вернётся
+// лениво через 6 секунд, только если direct снова не встанет.
+function deescalateToDirect() {
+  if (!S.pc) return;
+  if (S.turnLoaded && S.hasTurn) {
+    S.turnLoaded = false;
+    S.hasTurn = false;
+    S.ice = S.stunOnlyIce || [{ urls: CONFIG.STUN }];
+    try { S.pc.setConfiguration(pcConfig()); } catch {}
+    log('Смена сети: сначала пробуем direct без TURN (экономия квоты)');
+    clearTimeout(S.turnTimer);
+    S.turnTimer = setTimeout(() => {
+      if (S.joined && S.pc?.connectionState !== 'connected') {
+        ensureTurnLoaded('после смены сети direct не встал');
+      }
+    }, 6000);
+  }
+  restartIce();
+}
+window.addEventListener('online', () => S.pc && S.callStart && deescalateToDirect());
 if (navigator.connection) {
   navigator.connection.addEventListener?.('change', () => {
     if (S.pc && S.callStart) {
       log('Смена типа сети — обновляем ICE маршруты');
-      restartIce();
+      deescalateToDirect();
     }
   });
 }
 
 function resetPC(keepBridge = false) {
+  S.bridgeCounted = false;
   clearTimeout(S.restartTimer);
   clearTimeout(S.watchdog);
   clearTimeout(S.resendTimer);
@@ -1797,6 +2098,7 @@ function diagText() {
   return (
     `ZVONochek v${APP_VERSION} — диагностика\nБраузер: ${navigator.userAgent}\n` +
     `Успешных P2P соединений: ${stats.ok} из ${stats.tries} (${pct}%)\n` +
+    `Маршруты за всё время: напрямую ${routeStats.direct || 0} · через TURN ${routeStats.relay || 0} · через мост ${routeStats.bridge || 0}\n` +
     transportText() +
     `\nМои маршруты: ${candText(S.cands?.local || {})}\nМаршруты собеседника: ${candText(
       S.cands?.remote || {}
@@ -1815,6 +2117,7 @@ function openDiag() {
   const pct = stats.tries ? Math.round((100 * stats.ok) / stats.tries) : 0;
   $('#diagStats', b).textContent =
     `Успешных P2P соединений: ${stats.ok} из ${stats.tries} (${pct}%)\n` +
+    `Маршруты за всё время: напрямую ${routeStats.direct || 0} · через TURN ${routeStats.relay || 0} · через мост ${routeStats.bridge || 0}\n` +
     transportText() +
     `\nМои маршруты: ${candText(S.cands?.local || {})}\nМаршруты собеседника: ${candText(
       S.cands?.remote || {}
@@ -1899,8 +2202,11 @@ function transportText() {
     `Канал 1 — MQTT-брокеры: ${sg.mqttUp}/${sg.mqttTotal} на связи\n` +
     `Канал 2 — Cloudflare Worker: ${wText}\n` +
     `Канал 3 — Nostr-реле (порт 443): ${sg.nostrUp || 0}/${sg.nostrTotal || 0} на связи\n` +
-    `TURN-ретранслятор: ${S.hasTurn ? 'есть' : 'нет (авто-мост активен)'} (${S.turnInfo || '—'})\n` +
-    `Маршрут звонка: ${S.bridgeActive ? 'Зашифрованный Мост через Сигналинг (без TURN)' : S.method || '—'}`
+    `TURN-ретранслятор: ${
+      S.hasTurn ? 'есть (эфемерный, из Worker)' : S.turnLoaded ? 'недоступен — работаем без него' : 'не запрашивался (ленивый режим)'
+    } (${S.turnInfo || '—'})\n` +
+    `Маршрут звонка: ${S.bridgeActive ? 'Зашифрованный Мост через Сигналинг (без TURN)' : S.method || '—'}\n` +
+    `Мост: ${S.bridgeActive ? (S.bridgeMode === 'webcodecs' ? '2.0 WebCodecs Opus' : '1.0 MediaRecorder') : 'выключен'} · WebCodecs в этом браузере: ${webCodecsBridgeSupported() ? 'есть' : 'нет'}`
   );
 }
 
@@ -1962,6 +2268,10 @@ function startStats(now) {
     if (method !== S.method) {
       S.method = method;
       log('Маршрут медиа: ' + method);
+      if (!S.pcRouteCounted) {
+        S.pcRouteCounted = true;
+        countRoute(relay ? 'relay' : 'direct');
+      }
     }
     progress(100, 'Соединено: ' + route);
     const rtt = Math.round((pair.currentRoundTripTime || 0) * 1000);
@@ -2381,17 +2691,20 @@ async function openSettingsModal() {
   };
 
   // Режим ввода (VAD vs PTT)
-  const rVad = $('#sModeVad', b),
+  const rOpen = $('#sModeOpen', b),
+    rVad = $('#sModeVad', b),
     rPtt = $('#sModePtt', b),
     vadWrap = $('#sVadControls', b);
+  if (rOpen) rOpen.checked = S.audio.inputMode === 'open';
   rVad.checked = S.audio.inputMode === 'vad';
   rPtt.checked = S.audio.inputMode === 'ptt';
-  vadWrap.classList.toggle('hidden', S.audio.inputMode === 'ptt');
+  vadWrap.classList.toggle('hidden', S.audio.inputMode !== 'vad');
   const onModeChange = () => {
-    S.audio.inputMode = rPtt.checked ? 'ptt' : 'vad';
-    vadWrap.classList.toggle('hidden', S.audio.inputMode === 'ptt');
+    S.audio.inputMode = rPtt.checked ? 'ptt' : rVad.checked ? 'vad' : 'open';
+    vadWrap.classList.toggle('hidden', S.audio.inputMode !== 'vad');
     syncAudioParams();
   };
+  if (rOpen) rOpen.onchange = onModeChange;
   rVad.onchange = onModeChange;
   rPtt.onchange = onModeChange;
 
@@ -2473,11 +2786,21 @@ async function openSettingsModal() {
   // Режим сети и обхода блокировок
   const sNetMode = $('#sNetMode', b);
   sNetMode.value = S.audio.netMode;
-  sNetMode.onchange = () => {
+  sNetMode.onchange = async () => {
     S.audio.netMode = sNetMode.value;
     syncAudioParams();
     if (S.audio.netMode === 'bridge') {
       if (S.peer) activateBridge('Включён режим моста без TURN');
+    } else if (S.audio.netMode === 'relay') {
+      // «Только TURN» — единственный случай, когда TURN грузится немедленно.
+      const ok = await ensureTurnLoaded('режим «только TURN» включён вручную');
+      if (!ok) toast('TURN недоступен: в Worker не настроены TURN-креды. Работаем через direct + мост');
+      else if (S.pc) {
+        try {
+          S.pc.setConfiguration(pcConfig());
+          restartIce();
+        } catch {}
+      }
     } else {
       if (S.pc?.connectionState === 'connected') stopBridge();
       if (S.pc) {
