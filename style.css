@@ -3,17 +3,17 @@
    ========================================================================== */
 
 :root {
-  --bg: #06070d;
+  --bg: #07080f;
   --bg-2: #0a0c15;
-  --surface: rgba(19, 22, 35, 0.72);
-  --surface-2: rgba(28, 32, 50, 0.72);
+  --surface: rgba(17, 20, 32, 0.88);
+  --surface-2: rgba(24, 28, 44, 0.88);
   --surface-3: rgba(38, 43, 66, 0.6);
   --line: rgba(255, 255, 255, 0.085);
   --line-2: rgba(255, 255, 255, 0.16);
   --text: #eef1fb;
   --muted: #9aa3c0;
   --faint: #6d7696;
-  --accent: #6c6cff;
+  --accent: #7d7aff;
   --accent-2: #22d3ee;
   --accent-3: #a78bfa;
   --mint: #2dd4bf;
@@ -28,9 +28,9 @@
   --r-lg: 20px;
   --r-md: 14px;
   --r-sm: 10px;
-  --shadow: 0 26px 70px -24px rgba(0, 0, 0, 0.85);
+  --shadow: 0 16px 40px -20px rgba(0, 0, 0, 0.8);
   --shadow-sm: 0 10px 30px -14px rgba(0, 0, 0, 0.7);
-  --glow: 0 18px 44px -16px rgba(108, 108, 255, 0.7);
+  --glow: 0 10px 28px -14px rgba(125, 122, 255, 0.55);
   --font: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
   --mono: "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas, monospace;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -94,9 +94,8 @@ body {
 .orb {
   position: absolute;
   border-radius: 50%;
-  filter: blur(90px);
-  opacity: 0.5;
-  will-change: transform;
+  filter: blur(70px);
+  opacity: 0.26;
 }
 
 .orb-1 {
@@ -105,7 +104,6 @@ body {
   left: -12vw;
   top: -14vw;
   background: radial-gradient(circle, rgba(108, 108, 255, 0.55), transparent 68%);
-  animation: drift-1 26s var(--ease) infinite alternate;
 }
 
 .orb-2 {
@@ -114,16 +112,15 @@ body {
   right: -10vw;
   top: 4vh;
   background: radial-gradient(circle, rgba(34, 211, 238, 0.32), transparent 68%);
-  animation: drift-2 32s var(--ease) infinite alternate;
 }
 
 .orb-3 {
+  display: none;
   width: 42vw;
   height: 42vw;
   left: 30vw;
   bottom: -24vw;
   background: radial-gradient(circle, rgba(167, 139, 250, 0.3), transparent 70%);
-  animation: drift-3 38s var(--ease) infinite alternate;
 }
 
 .bg-grid {
@@ -135,7 +132,7 @@ body {
   background-size: 64px 64px;
   mask-image: radial-gradient(circle at 50% 30%, #000 0%, transparent 72%);
   -webkit-mask-image: radial-gradient(circle at 50% 30%, #000 0%, transparent 72%);
-  opacity: 0.55;
+  opacity: 0.35;
 }
 
 @keyframes drift-1 {
@@ -784,7 +781,7 @@ label.check input {
   padding: clamp(18px, 2.2vw, 26px);
   display: flex;
   flex-direction: column;
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(12px);
   box-shadow: var(--shadow);
   min-width: 0;
 }
@@ -1052,7 +1049,7 @@ label.check input {
 #local {
   position: absolute;
   right: max(16px, env(safe-area-inset-right));
-  bottom: calc(96px + env(safe-area-inset-bottom));
+  bottom: calc(140px + env(safe-area-inset-bottom));
   width: min(24vw, 230px);
   aspect-ratio: 4 / 3;
   object-fit: cover;
@@ -1203,7 +1200,7 @@ button.pill:hover {
   padding: 17px;
   z-index: 9;
   box-shadow: var(--shadow);
-  backdrop-filter: blur(22px);
+  backdrop-filter: blur(12px);
   animation: pop-in 0.18s var(--ease);
 }
 @keyframes pop-in {
@@ -1256,7 +1253,7 @@ button.pill:hover {
   background: rgba(14, 17, 28, 0.72);
   border: 1px solid var(--line-2);
   border-radius: 22px;
-  backdrop-filter: blur(24px);
+  backdrop-filter: blur(12px);
   box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.9);
   z-index: 5;
   overflow-x: auto;
@@ -1302,10 +1299,10 @@ button.pill:hover {
   background: rgba(13, 16, 26, 0.92);
   border-left: 1px solid var(--line-2);
   z-index: 8;
-  backdrop-filter: blur(22px);
+  backdrop-filter: blur(12px);
   display: flex;
   flex-direction: column;
-  backdrop-filter: blur(24px);
+  backdrop-filter: blur(12px);
   box-shadow: -30px 0 60px -30px rgba(0, 0, 0, 0.8);
   animation: slide-in 0.22s var(--ease);
 }
@@ -1662,14 +1659,14 @@ button.pill:hover {
   z-index: 40;
   box-shadow: var(--shadow);
   font-size: 13.5px;
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(12px);
   transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
   animation: rise 0.2s var(--ease);
 }
 /* В звонке не перекрываем верхние статусы и не мешаем док-панели. */
 #call:not(.hidden) ~ #toast {
   top: auto;
-  bottom: calc(96px + env(safe-area-inset-bottom));
+  bottom: calc(140px + env(safe-area-inset-bottom));
 }
 
 /* ---------- Карточка прогресса ---------- */
@@ -1681,7 +1678,7 @@ button.pill:hover {
   padding: 16px;
   color: var(--text);
   text-align: left;
-  backdrop-filter: blur(20px);
+  backdrop-filter: blur(12px);
   box-shadow: var(--shadow-sm);
 }
 .conn-top {
@@ -1805,7 +1802,15 @@ button.pill:hover {
     font-size: clamp(34px, 9vw, 46px);
   }
   .feature-rail {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .feat-card span {
+    font-size: 11.5px;
+    line-height: 1.35;
+  }
+  .feat-note {
+    display: none;
   }
   .quick-sliders,
   .dev-grid,
@@ -1824,45 +1829,64 @@ button.pill:hover {
     width: 19px;
     height: 19px;
   }
+  /* Док звонка на телефоне: сетка 4×2 вместо горизонтальной «колбасы»
+     со скроллом. Все 8 кнопок видны сразу, цели — не меньше 52px,
+     подписи возвращены (в сетке для них есть место). */
   .controls {
     left: 8px;
     right: 8px;
     bottom: calc(8px + env(safe-area-inset-bottom));
     transform: none;
     max-width: none;
-    justify-content: flex-start;
-    gap: 4px;
-    padding: 6px;
-    border-radius: 18px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    padding: 8px;
+    border-radius: 20px;
+    overflow-x: visible;
   }
   .controls .round {
-    width: 40px;
-    height: 40px;
-    padding: 0;
-    border-radius: 12px;
+    width: 100%;
+    height: 54px;
+    padding: 4px 2px;
+    border-radius: 14px;
+    flex-direction: column;
+    gap: 3px;
   }
   .controls .round .ic {
-    width: 18px;
-    height: 18px;
+    width: 21px;
+    height: 21px;
   }
   .controls .round.red {
-    position: sticky;
-    right: 0;
-    padding: 0;
-    box-shadow: -14px 0 18px rgba(8, 9, 15, 0.75);
+    padding: 4px 2px;
   }
   .controls .lbl {
-    display: none;
+    display: block;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    line-height: 1;
   }
-  .ptt-btn {
-    height: 40px;
-    padding: 0 10px;
-    font-size: 11.5px;
+  .controls .ptt-btn {
+    grid-column: 1 / -1;
+    height: 48px;
+    font-size: 13px;
   }
   #local {
     width: 30vw;
-    bottom: calc(78px + env(safe-area-inset-bottom));
+    bottom: calc(142px + env(safe-area-inset-bottom));
     right: 12px;
+  }
+  /* iOS не приближает страницу при фокусе на полях с шрифтом >= 16px */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+  button,
+  .btn,
+  .round {
+    touch-action: manipulation;
   }
   #local.screen {
     width: 36vw;
@@ -1980,4 +2004,36 @@ button.pill:hover {
   .card {
     background: rgba(16, 19, 31, 0.97);
   }
+}
+
+/* ---------- v13: подсказки в настройках ---------- */
+.sec-note {
+  font: 600 10.5px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mint);
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  border-radius: 999px;
+  padding: 3px 8px;
+  margin-left: 6px;
+  vertical-align: 2px;
+  white-space: nowrap;
+}
+.sec-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 2px 0 8px;
+}
+label.disabled {
+  opacity: 0.45;
+}
+label.disabled select {
+  pointer-events: none;
+}
+
+/* Телефон в альбомной ориентации: док остаётся сеткой, превью не прячется под него */
+@media (max-width: 780px) and (max-height: 560px) and (orientation: landscape) {
+  #local { bottom: calc(142px + env(safe-area-inset-bottom)); }
+  .controls .round { height: 46px; }
+  .controls .lbl { display: none; }
 }

@@ -1,8 +1,8 @@
-import { CONFIG } from './config.js?v=12';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=12';
-import { Signaling } from './signaling.js?v=12';
+import { CONFIG } from './config.js?v=13';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=13';
+import { Signaling } from './signaling.js?v=13';
 
-export const APP_VERSION = 12;
+export const APP_VERSION = 13;
 const $ = (s, r = document) => r.querySelector(s);
 const setUse = (sel, name) => {
   const el = typeof sel === 'string' ? $(sel) : sel;
@@ -12,7 +12,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=12').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=13').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -32,6 +32,21 @@ const randHex = (n) =>
 const selfId = sessionStorage.zvId || (sessionStorage.zvId = randHex(8));
 const inst = randHex(6); // меняется при каждой перезагрузке страницы
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
+
+// Миграция настроек v13 (один раз): у пользователей прошлых версий обработка
+// звука была сохранена включённой в localStorage — сбрасываем её в «выкл»,
+// чтобы новый дефолт сработал и у них, а не только на чистом профиле.
+try {
+  if (Number(localStorage.zvSettingsV || 0) < 13) {
+    localStorage.zvNoise = '0';
+    localStorage.zvEcho = '0';
+    localStorage.zvAgc = '0';
+    localStorage.zvComp = '0';
+    localStorage.zvOpusTune = '0';
+    if (!localStorage.zvBitrate) localStorage.zvBitrate = '48';
+    localStorage.zvSettingsV = '13';
+  }
+} catch {}
 
 const S = {
   secret: null,
@@ -66,11 +81,18 @@ const S = {
     peerVol: Number(localStorage.zvPeerVol ?? 100),
     inputMode: localStorage.zvInputMode || 'vad', // 'vad' | 'ptt'
     vadGate: Number(localStorage.zvVadGate ?? -45), // -75 .. -15 dB
-    noise: localStorage.zvNoise !== '0',
-    echo: localStorage.zvEcho !== '0',
-    agc: localStorage.zvAgc !== '0',
-    comp: localStorage.zvComp !== '0',
-    bitrate: Number(localStorage.zvBitrate || 24), // 12, 24, 48, 64 kbps
+    // v13: обработка звука и ручная настройка Opus по умолчанию ВЫКЛЮЧЕНЫ.
+    // Раньше noise/echo/agc/comp были включены «из коробки» ( !== '0' ), а Opus
+    // принудительно переписывался в SDP (FEC + DTX + maxaveragebitrate=24k):
+    // связка браузерный DSP + DTX + наш VAD-гейт резала тихий голос и окончания
+    // фраз, а после долгой паузы Opus с DTX мог «просыпаться» с задержкой.
+    // Теперь чистый тракт: браузерный Opus — авто, DSP — только по явному выбору.
+    noise: localStorage.zvNoise === '1',
+    echo: localStorage.zvEcho === '1',
+    agc: localStorage.zvAgc === '1',
+    comp: localStorage.zvComp === '1',
+    opusTune: localStorage.zvOpusTune === '1',
+    bitrate: Number(localStorage.zvBitrate || 48), // 12, 24, 48, 64 kbps (применяется только при opusTune)
     netMode: localStorage.zvNetMode || (localStorage.zvRelay === '1' ? 'relay' : 'auto'), // 'auto' | 'bridge' | 'relay'
   },
 
@@ -88,6 +110,10 @@ const S = {
   remoteAnalyser: null,
   remoteDest: null,
   meterTimer: null,
+  ctxResumeAt: 0,
+  audioStallN: 0,
+  lastAudioBytes: -1,
+  lastAudioRecoverAt: 0,
 
   // Аварийный аудио-мост через сигналинг (работа без TURN и при блокировке UDP)
   bridgeActive: false,
@@ -248,6 +274,21 @@ function ensureAudioEngine() {
   if (S.audioCtx.state === 'suspended') {
     S.audioCtx.resume().catch(() => {});
   }
+  if (!S.audioCtx.onstatechange) {
+    // iOS/Android усыпляют AudioContext при звонке на телефон, блокировке
+    // экрана и после долгой тишины. Весь входящий звук у нас идёт через этот
+    // граф (у <video id="remote"> громкость выставлена в 0), поэтому
+    // suspended == полная тишина при живом WebRTC-соединении.
+    S.audioCtx.onstatechange = () => {
+      log('AudioContext: ' + S.audioCtx.state);
+      if (S.audioCtx.state !== 'running') {
+        S.audioCtx.resume().catch(() => {});
+        updateRemoteAudibility();
+      } else {
+        updateRemoteAudibility();
+      }
+    };
+  }
   if (!S.procDest) {
     const ctx = S.audioCtx;
     S.hpFilter = ctx.createBiquadFilter();
@@ -297,6 +338,32 @@ function ensureAudioEngine() {
   return S.audioCtx;
 }
 
+
+// Куда реально звучит собеседник: через WebAudio-граф (громкость 0-200%),
+// а если граф недоступен/уснул — напрямую через элемент <video id="remote">
+// (громкость до 100%). Раньше при уснувшем AudioContext звук пропадал
+// полностью и навсегда: элемент был заглушён, а граф молчал.
+function updateRemoteAudibility() {
+  const vid = $('#remote');
+  if (!vid) return;
+  const viaEngine = !!(S.audioCtx && S.audioCtx.state === 'running' && S.remoteSource);
+  vid.volume = viaEngine || S.deafened ? 0 : Math.min(1, S.audio.peerVol / 100);
+  if (S.deafened) vid.volume = 0;
+}
+
+// Попытка оживить входящий звук без пересоздания звонка.
+function recoverRemoteAudio(reason) {
+  const now = Date.now();
+  if (now - (S.lastAudioRecoverAt || 0) < 45000) return;
+  S.lastAudioRecoverAt = now;
+  log('Восстанавливаем входящий звук: ' + reason);
+  const ctx = ensureAudioEngine();
+  ctx?.resume?.().catch(() => {});
+  attachRemoteToEngine();
+  updateRemoteAudibility();
+  $('#remote')?.play().catch(() => {});
+}
+
 function attachMicToEngine(rawTrack) {
   S.rawAudioTrack = rawTrack;
   const ctx = ensureAudioEngine();
@@ -335,11 +402,9 @@ function attachRemoteToEngine() {
     } else {
       try { S.remoteAnalyser.connect(ctx.destination); } catch {}
     }
-    // Приглушаем прямой звук из <video id="remote">, чтобы громкость регулировалась через GainNode (0-200%)
-    const vid = $('#remote');
-    if (vid && ctx.state === 'running') {
-      vid.volume = 0;
-    }
+    // Приглушаем прямой звук из <video id="remote">, пока граф жив,
+    // чтобы громкость регулировалась через GainNode (0-200%)
+    updateRemoteAudibility();
   } catch (e) {
     console.warn('remote audio graph', e);
   }
@@ -359,6 +424,7 @@ function persistSoon() {
       localStorage.zvEcho = S.audio.echo ? '1' : '0';
       localStorage.zvAgc = S.audio.agc ? '1' : '0';
       localStorage.zvComp = S.audio.comp ? '1' : '0';
+      localStorage.zvOpusTune = S.audio.opusTune ? '1' : '0';
       localStorage.zvBitrate = String(S.audio.bitrate);
       localStorage.zvNetMode = S.audio.netMode;
       localStorage.zvRelay = S.audio.netMode === 'relay' ? '1' : '0';
@@ -374,14 +440,7 @@ function syncAudioParams() {
   if (S.remoteCompNode) S.remoteCompNode.ratio.value = S.audio.comp ? 3.5 : 1;
   if (S.remoteGainNode) S.remoteGainNode.gain.value = S.deafened ? 0 : S.audio.peerVol / 100;
 
-  const vid = $('#remote');
-  if (vid) {
-    if (S.audioCtx && S.audioCtx.state === 'running' && S.remoteSource) {
-      vid.volume = 0;
-    } else {
-      vid.volume = S.deafened ? 0 : Math.min(1, S.audio.peerVol / 100);
-    }
-  }
+  updateRemoteAudibility();
 
   // Обновляем подписи и ползунки во всех открытых панелях
   const gatePct = Math.max(0, Math.min(100, ((S.audio.vadGate + 75) / 60) * 100));
@@ -405,7 +464,9 @@ function syncAudioParams() {
   }
   setUse('#preInputModeTag use', S.audio.inputMode === 'ptt' ? 'i-radio' : 'i-mic');
   if ($('#preCodecTag')) {
-    $('#preCodecTag').textContent = `Opus ${S.audio.bitrate} kbps + FEC`;
+    $('#preCodecTag').textContent = S.audio.opusTune
+      ? `Opus ${S.audio.bitrate} kbps · FEC, без DTX`
+      : 'Opus · авто (настройки браузера)';
   }
   // Показываем кнопку PTT на экране звонка, если включен режим рации или активен мост
   $('#cPtt')?.classList.toggle('hidden', S.audio.inputMode !== 'ptt' && !S.bridgeActive);
@@ -416,6 +477,14 @@ function startMeterLoop() {
   const buf = new Float32Array(256);
   const rBuf = new Uint8Array(64);
   S.meterTimer = setInterval(() => {
+    // 0. Сторож AudioContext: браузеры усыпляют его при блокировке экрана,
+    //    входящем телефонном звонке и долгой тишине — а вместе с ним пропадал
+    //    весь входящий звук при живом соединении. Будим не чаще раза в секунду.
+    if (S.audioCtx && S.audioCtx.state !== 'running' && Date.now() - (S.ctxResumeAt || 0) > 1000) {
+      S.ctxResumeAt = Date.now();
+      S.audioCtx.resume().catch(() => {});
+      updateRemoteAudibility();
+    }
     // 1. Анализ локального микрофона и работа гейта (VAD / PTT)
     if (S.micAnalyser && S.rawAudioTrack && S.rawAudioTrack.readyState === 'live') {
       S.micAnalyser.getFloatTimeDomainData(buf);
@@ -440,14 +509,20 @@ function startMeterLoop() {
       } else if (S.audio.inputMode === 'ptt') {
         pass = S.pttPressed;
       } else {
+        // Гистерезис: открываемся по порогу, закрываемся на 7 дБ ниже и с
+        // длинным хвостом. Раньше гейт (280 мс, без гистерезиса, крутой срез
+        // за 15 мс) глотал тихие слова и окончания фраз — собеседнику казалось,
+        // что «громкость то пропадает, то возвращается».
         if (db >= S.audio.vadGate) {
-          S.vadHoldUntil = now + 280; // задержка закрытия гейта 280 мс, чтобы не глотать окончания слов
+          S.vadHoldUntil = now + 900;
+        } else if (db >= S.audio.vadGate - 7 && now < S.vadHoldUntil) {
+          S.vadHoldUntil = now + 300;
         }
         pass = now < S.vadHoldUntil;
       }
       S.isSpeaking = pass;
       if (S.gateGainNode && S.audioCtx) {
-        S.gateGainNode.gain.setTargetAtTime(pass ? 1 : 0, S.audioCtx.currentTime, 0.015);
+        S.gateGainNode.gain.setTargetAtTime(pass ? 1 : 0, S.audioCtx.currentTime, 0.07);
       }
       $('#cMic')?.classList.toggle('speaking', pass);
       $('#preAvatarRing')?.classList.toggle('speaking', pass);
@@ -511,8 +586,10 @@ const audioC = () => ({
 });
 const videoC = () => ({
   deviceId: S.dev.cam ? { ideal: S.dev.cam } : undefined,
-  width: { ideal: 1280 },
-  height: { ideal: 720 },
+  // Хорошее качество по умолчанию: просим Full HD, браузер сам снизит
+  // разрешение, если камера/сеть слабее; адаптация качества ниже тоже работает.
+  width: { ideal: 1920 },
+  height: { ideal: 1080 },
   frameRate: { ideal: 30 },
 });
 
@@ -695,7 +772,7 @@ async function toggleScreen() {
   if (S.screenTrack) return stopScreen();
   try {
     const st = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 15 } },
+      video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
       audio: false,
     });
     S.screenTrack = st.getVideoTracks()[0];
@@ -908,17 +985,21 @@ const pcConfig = () => ({
   iceCandidatePoolSize: 4, // предсбор STUN-кандидатов для ускоренного рукопожатия без TURN
 });
 
-// Настройка кодека Opus в SDP (FEC против потерь пакетов + DTX для экономии батареи + выбранный битрейт)
+// Ручная настройка Opus в SDP — ТОЛЬКО если пользователь сам включил её в
+// настройках (opusTune). По умолчанию SDP не трогаем: браузерный Opus и так
+// включает FEC по ситуации и подбирает битрейт лучше фиксированных 24 кбит/с.
+// DTX не включаем даже в ручном режиме: usedtx=1 вместе с VAD-гейтом резал
+// тихий голос и «съедал» первые слова после паузы в долгих разговорах.
 function tuneOpusSdp(sdp) {
-  if (!sdp) return sdp;
-  const bps = (S.audio.bitrate || 24) * 1000;
+  if (!sdp || !S.audio.opusTune) return sdp;
+  const bps = (S.audio.bitrate || 48) * 1000;
   return sdp.replace(/a=fmtp:(\d+) (.*)/g, (full, pt, params) => {
     if (!sdp.includes(`a=rtpmap:${pt} opus/48000`)) return full;
     const clean = params
       .split(';')
       .filter((kv) => !/^(useinbandfec|usedtx|maxaveragebitrate|cbr)=/.test(kv.trim()))
       .join(';');
-    return `a=fmtp:${pt} ${clean};useinbandfec=1;usedtx=1;cbr=0;maxaveragebitrate=${bps}`;
+    return `a=fmtp:${pt} ${clean};useinbandfec=1;usedtx=0;cbr=0;maxaveragebitrate=${bps}`;
   });
 }
 
@@ -972,6 +1053,20 @@ async function join() {
   progress(10, 'Подключение к каналам сигналинга…');
   S.sig.start();
   S.joinedAt = Date.now();
+  // TURN-креды Worker живут 6 часов: в долгом звонке обновляем ICE-серверы
+  // каждый час, иначе после истечения TTL первое же переподключение ICE
+  // теряет relay-путь и звонок умирает «сам по себе».
+  clearInterval(S.iceRefreshTimer);
+  S.iceRefreshTimer = setInterval(async () => {
+    if (!S.joined) return;
+    const fresh = await loadIce().catch(() => null);
+    if (!fresh || !S.joined) return;
+    S.ice = fresh;
+    if (S.pc) {
+      try { S.pc.setConfiguration(pcConfig()); } catch {}
+      log('ICE-серверы обновлены (профилактика истечения TURN-кред)');
+    }
+  }, 60 * 60 * 1000);
   S.helloTimer = setInterval(() => {
     if (!S.pc || (S.pc.connectionState !== 'connected' && !S.bridgeActive)) hello();
     if (!S.peer && !S.waitHinted && Date.now() - S.joinedAt > 25000) {
@@ -1346,6 +1441,11 @@ function createPC() {
     S.remote.addTrack(track);
     if (track.kind === 'audio') {
       attachRemoteToEngine();
+      track.addEventListener('mute', () => log('Входящий аудиотрек замьючен (сеть/источник)'));
+      track.addEventListener('unmute', () => {
+        log('Входящий аудиотрек снова активен');
+        recoverRemoteAudio('unmute входящего трека');
+      });
     }
     const upd = () => updateRemoteView();
     track.onmute = upd;
@@ -1823,6 +1923,7 @@ function startStats(now) {
       lost = 0,
       recv = 0,
       bytes = 0,
+      audioBytes = 0,
       outLoss = 0;
     r.forEach((x) => {
       if (x.type === 'transport' && x.selectedCandidatePairId) pairId = x.selectedCandidatePairId;
@@ -1837,6 +1938,7 @@ function startStats(now) {
         lost += x.packetsLost || 0;
         recv += x.packetsReceived || 0;
         bytes += x.bytesReceived || 0;
+        if ((x.kind || x.mediaType) === 'audio') audioBytes += x.bytesReceived || 0;
       }
       if (x.type === 'remote-inbound-rtp' && x.kind === 'video' && typeof x.fractionLost === 'number')
         outLoss = Math.max(outLoss, x.fractionLost * 100);
@@ -1871,6 +1973,19 @@ function startStats(now) {
       loss = dl + dr > 0 ? (100 * dl) / (dl + dr) : 0;
       kbps = ((bytes - p.bytes) * 8) / (curNow - p.now);
     }
+    // «Тихая смерть» звука в долгих звонках: соединение живо, а входящие
+    // аудиобайты встали (уснул AudioContext / отвалился remote-трек).
+    // DTX теперь выключен, поэтому даже в тишине пакеты идут — полная
+    // остановка на ~10 секунд это аномалия, пробуем оживить тракт сами.
+    if (S.callStart && Date.now() - S.callStart > 45000 && audioBytes > 0) {
+      if (S.lastAudioBytes >= 0 && audioBytes === S.lastAudioBytes) S.audioStallN++;
+      else S.audioStallN = 0;
+      S.lastAudioBytes = audioBytes;
+      if (S.audioStallN >= 5) {
+        S.audioStallN = 0;
+        recoverRemoteAudio('нет входящих аудиобайт ~10 с при живом звонке');
+      }
+    }
     const lvl = rtt < 200 && loss < 2 ? 'good' : rtt < 450 && loss < 7 ? 'mid' : 'bad';
     adaptQuality(outLoss, rtt);
     const q = $('#quality');
@@ -1890,15 +2005,16 @@ function startStats(now) {
 }
 
 const QLEVELS = [
-  { maxBitrate: 1500000, scale: 1, fps: 30 },
-  { maxBitrate: 600000, scale: 1.5, fps: 24 },
-  { maxBitrate: 300000, scale: 2, fps: 15 },
+  { maxBitrate: 2500000, scale: 1, fps: 30 }, // Full HD по умолчанию
+  { maxBitrate: 1200000, scale: 1.5, fps: 30 },
+  { maxBitrate: 600000, scale: 2, fps: 24 },
+  { maxBitrate: 250000, scale: 3, fps: 15 },
   { maxBitrate: 120000, scale: 4, fps: 10 },
 ];
 async function applyQuality() {
   if (!S.pc) return;
   const L = QLEVELS[S.qLevel || 0];
-  const audioBps = (S.audio.bitrate || 24) * 1000;
+  const audioBps = (S.audio.bitrate || 48) * 1000;
   for (const snd of S.pc.getSenders()) {
     if (!snd.track) continue;
     const p = snd.getParameters();
@@ -1906,7 +2022,9 @@ async function applyQuality() {
     if (snd.track.kind === 'audio') {
       p.encodings[0].priority = 'high';
       p.encodings[0].networkPriority = 'high';
-      p.encodings[0].maxBitrate = audioBps;
+      // Не упираем звук в потолок, пока ручная настройка Opus выключена.
+      if (S.audio.opusTune) p.encodings[0].maxBitrate = audioBps;
+      else delete p.encodings[0].maxBitrate;
     } else {
       p.encodings[0].maxBitrate = L.maxBitrate;
       p.encodings[0].scaleResolutionDownBy = L.scale;
@@ -2323,9 +2441,29 @@ async function openSettingsModal() {
     syncAudioParams();
   };
 
-  // Битрейт кодека Opus
+  // Ручная настройка Opus: по умолчанию выключена, битрейт недоступен
   const sBitrate = $('#sBitrate', b);
+  const sOpusTune = $('#sOpusTune', b);
   sBitrate.value = String(S.audio.bitrate);
+  const paintOpus = () => {
+    sBitrate.disabled = !S.audio.opusTune;
+    sBitrate.closest('label')?.classList.toggle('disabled', !S.audio.opusTune);
+  };
+  if (sOpusTune) {
+    sOpusTune.checked = S.audio.opusTune;
+    sOpusTune.onchange = () => {
+      S.audio.opusTune = sOpusTune.checked;
+      paintOpus();
+      syncAudioParams();
+      applyQuality();
+      toast(
+        S.audio.opusTune
+          ? 'Ручной Opus применится полностью при следующем подключении'
+          : 'Opus — авто: SDP больше не переписываем'
+      );
+    };
+  }
+  paintOpus();
   sBitrate.onchange = () => {
     S.audio.bitrate = Number(sBitrate.value);
     syncAudioParams();
@@ -2379,6 +2517,7 @@ async function hangup() {
   S.peer = null;
   S.joined = false;
   clearInterval(S.helloTimer);
+  clearInterval(S.iceRefreshTimer);
   S.log = [];
   S.via = {};
   if (S.screenTrack) {
@@ -2408,6 +2547,7 @@ window.addEventListener('pagehide', () => {
 });
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'visible' && S.joined) {
+    if (S.audioCtx && S.audioCtx.state !== 'running') recoverRemoteAudio('возврат на вкладку');
     try {
       S.wakeLock = await navigator.wakeLock?.request('screen');
     } catch {}

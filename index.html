@@ -6,8 +6,8 @@
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#06070d">
-<meta name="description" content="ZVONochek — защищённые портативные аудио- и видеозвонки по ссылке. E2EE, мультиканальный сигналинг, работа без TURN.">
+<meta name="theme-color" content="#07080f">
+<meta name="description" content="ZVONochek — защищённые аудио- и видеозвонки по ссылке. E2EE, без регистрации, прямо в браузере.">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="ZVONochek">
@@ -17,7 +17,7 @@
 <link rel="icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=12">
+<link rel="stylesheet" href="style.css?v=13">
 </head>
 <body>
 
@@ -92,9 +92,9 @@
         <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use href="#i-logo"/></svg>
         <div class="brand-name">ZVON<span>ochek</span></div>
       </div>
-      <div class="hero-badge"><svg class="ic"><use href="#i-shield"/></svg> E2EE · P2P · MULTI-CHANNEL · v12</div>
+      <div class="hero-badge"><svg class="ic"><use href="#i-shield"/></svg> E2EE · P2P · v13</div>
       <h1>Звонки, которые<br><span class="grad">не заглушить</span></h1>
-      <p class="sub">Портативные аудио- и видеозвонки по ссылке. Без регистрации, аккаунтов и установки. Ключ шифрования живёт только в адресной строке.</p>
+      <p class="sub">Аудио- и видеозвонки по ссылке. Без регистрации и установки — ключ шифрования живёт только в адресной строке.</p>
 
       <button id="btnCreate" class="btn primary big glow-btn"><svg class="ic"><use href="#i-bolt"/></svg><span>Создать защищённый звонок</span></button>
 
@@ -116,25 +116,25 @@
     <div class="feature-rail">
       <div class="feat-card">
         <span class="feat-ic accent"><svg class="ic"><use href="#i-shield"/></svg></span>
-        <b>Мост без TURN и UDP</b>
-        <span>Голос идёт через зашифрованный сигналинг, когда WebRTC заблокирован.</span>
+        <b>Мост без TURN</b>
+        <span>Голос — через зашифрованный сигнал, если WebRTC заблокирован.</span>
       </div>
       <div class="feat-card">
         <span class="feat-ic cyan"><svg class="ic"><use href="#i-wifi"/></svg></span>
-        <b>4 канала сигналинга</b>
-        <span>MQTT, Worker WS, HTTP-поллинг и Nostr — гонка без потери рукопожатия.</span>
+        <b>4 канала связи</b>
+        <span>MQTT, Worker, HTTP и Nostr — какой первым пройдёт.</span>
       </div>
       <div class="feat-card">
         <span class="feat-ic mint"><svg class="ic"><use href="#i-settings"/></svg></span>
-        <b>Звук как в Discord</b>
-        <span>Громкость 0–200%, VAD, рация PTT, компрессор и шумоподавление.</span>
+        <b>Чистый звук</b>
+        <span>Громкость 0–200% и рация PTT. Обработка — только если сами включите.</span>
       </div>
       <div class="feat-card">
         <span class="feat-ic amber"><svg class="ic"><use href="#i-lock"/></svg></span>
-        <b>Сквозное шифрование</b>
-        <span>AES-256-GCM и сверка кода безопасности по 5 эмодзи и 6 цифрам.</span>
+        <b>Шифрование</b>
+        <span>AES-256-GCM и код сверки для проверки собеседника.</span>
       </div>
-      <div class="feat-note"><svg class="ic"><use href="#i-spark"/></svg> Один клик — и комната готова. Ссылка заменяет аккаунт.</div>
+      <div class="feat-note"><svg class="ic"><use href="#i-spark"/></svg> Один клик — и комната готова.</div>
     </div>
   </div>
 </section>
@@ -153,7 +153,7 @@
         </div>
         <div class="preview-hud">
           <span class="hud-tag" id="preInputModeTag"><svg class="ic"><use href="#i-mic"/></svg><span id="preInputModeText">Активация по голосу</span></span>
-          <span class="hud-tag" id="preCodecTag">Opus 24 kbps + FEC</span>
+          <span class="hud-tag" id="preCodecTag">Opus · авто (настройки браузера)</span>
         </div>
         <div class="preview-ctrls">
           <button id="pMic" class="round" title="Микрофон" aria-label="Микрофон"><svg class="ic"><use href="#i-mic"/></svg></button>
@@ -378,20 +378,23 @@
   </div>
 
   <div class="settings-sec">
-    <h4>3. Обработка звука и Opus</h4>
+    <h4>3. Обработка звука и Opus <span class="sec-note">по умолчанию всё выключено</span></h4>
+    <p class="sec-hint">Чистый тракт без обработки обычно звучит лучше и стабильнее в долгих звонках. Включайте отдельные пункты, только если есть конкретная проблема: эхо, шум или тихий голос.</p>
     <label class="check"><input type="checkbox" id="sNoise"> Шумоподавление + фильтр гула</label>
     <label class="check"><input type="checkbox" id="sEcho"> Эхоподавление</label>
     <label class="check"><input type="checkbox" id="sAgc"> Авторегулировка уровня</label>
     <label class="check"><input type="checkbox" id="sComp"> Компрессор тихого голоса</label>
 
-    <label>Профиль битрейта Opus (FEC + DTX)
+    <label class="check"><input type="checkbox" id="sOpusTune"> Ручная настройка Opus (переписывать SDP)</label>
+    <label>Профиль битрейта Opus (FEC, без DTX)
       <select id="sBitrate">
         <option value="12">Экстрим 12 Кбит/с — для глушилок и слабой сети</option>
-        <option value="24">Стандарт 24 Кбит/с — оптимально + FEC</option>
-        <option value="48">Высокое качество 48 Кбит/с — чистый голос</option>
+        <option value="24">Стандарт 24 Кбит/с</option>
+        <option value="48" selected>Высокое качество 48 Кбит/с — чистый голос</option>
         <option value="64">Студия HD 64 Кбит/с — максимум детализации</option>
       </select>
     </label>
+    <p class="sec-hint">Полностью ручной Opus применится при следующем подключении. DTX не используем: он резал тихий голос после пауз.</p>
   </div>
 
   <div class="settings-sec">
@@ -434,6 +437,6 @@
 
 <script src="vendor/mqtt.min.js"></script>
 <script src="vendor/qrcode.js"></script>
-<script type="module" src="app.js?v=12"></script>
+<script type="module" src="app.js?v=13"></script>
 </body>
 </html>
