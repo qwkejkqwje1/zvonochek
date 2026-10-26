@@ -1,4 +1,4 @@
-// ZVONochek Worker v11 — Ультимативный сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
+// ZVONochek Worker v12 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
 // Worker пересылает только зашифрованные сообщения (AES-256-GCM) и не знает ключей комнат.
 
 const JSON_HEADERS = {
@@ -27,6 +27,21 @@ function checkTurnRateLimit(ip, limit = 20, windowMs = 60_000) {
   return true;
 }
 
+// Ограничение HTTP-поллинга/POST на комнату с одного IP (WS ограничен внутри Durable Object).
+const roomRateLimit = new Map();
+function checkRoomRateLimit(key, limit, windowMs = 10_000) {
+  const now = Date.now();
+  if (roomRateLimit.size > 8000) roomRateLimit.clear();
+  const entry = roomRateLimit.get(key);
+  if (!entry || now > entry.resetAt) {
+    roomRateLimit.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (entry.count >= limit) return false;
+  entry.count++;
+  return true;
+}
+
 // Базовые STUN на случай, если внешние TURN API не настроены или недоступны
 const FALLBACK_STUN = [
   {
@@ -47,7 +62,8 @@ export default {
       .map((s) => s.trim())
       .filter(Boolean);
 
-    // Разрешаем запросы без Origin (мобильные WebView / PWA) или из белого списка
+    // Разрешаем запросы без Origin (мобильные WebView / PWA) или из белого списка.
+    // Никогда не отвечаем `*`: чужой Origin либо получает эхо своего адреса, либо ничего.
     const originOk = allowed.length === 0 || !origin || allowed.includes(origin);
     const cors =
       originOk && origin
@@ -58,14 +74,10 @@ export default {
             'access-control-max-age': '86400',
             vary: 'Origin',
           }
-        : {
-            'access-control-allow-origin': '*',
-            'access-control-allow-methods': 'GET, POST, OPTIONS',
-            'access-control-allow-headers': 'Content-Type, Authorization',
-          };
+        : {};
 
     if (req.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: cors });
+      return new Response(null, { status: originOk ? 204 : 403, headers: cors });
     }
 
     if (url.pathname === '/' || url.pathname === '/health') {
@@ -74,11 +86,28 @@ export default {
         (env.METERED_DOMAIN && env.METERED_API_KEY) ||
         (env.TURN_URLS && env.TURN_USERNAME)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 11, turn: hasTurn, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 12, turn: hasTurn, ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {
       return json({ error: 'origin not allowed' }, 403, cors);
+    }
+
+    // Поллинг и POST — самые дешёвые цели для флуда, ограничиваем их по IP.
+    if (url.pathname.startsWith('/room/') && req.method !== 'GET' && req.method !== 'POST') {
+      return json({ error: 'method not allowed' }, 405, cors);
+    }
+    if (
+      url.pathname.startsWith('/room/') &&
+      (req.method === 'POST' || req.method === 'GET') &&
+      req.headers.get('Upgrade') !== 'websocket'
+    ) {
+      const ip = req.headers.get('CF-Connecting-IP') || 'unknown';
+      const room = url.pathname.split('/')[2] || '';
+      const limit = req.method === 'POST' ? 90 : 40;
+      if (!checkRoomRateLimit(`${ip}|${room}|${req.method}`, limit)) {
+        return json({ error: 'rate limited' }, 429, cors);
+      }
     }
 
     // 1) Выдача временных TURN-ключей (параллельный опрос с таймаутом 3.5 сек)
@@ -253,7 +282,11 @@ export class Room {
     if (req.headers.get('Upgrade') !== 'websocket') {
       if (req.method === 'GET') {
         this.prune();
-        const since = Number(url.searchParams.get('since') || 0);
+        let since = Number(url.searchParams.get('since') || 0);
+        // Часы клиента могут убежать вперёд — тогда since окажется в будущем и
+        // поллинг навсегда вернёт пустоту. Подрезаем курсор по серверному времени.
+        if (!Number.isFinite(since) || since < 0) since = 0;
+        if (since > Date.now()) since = Date.now() - 40_000;
         const messages = this.recentMessages
           .filter((item) => item.ts > since && (!peerId || item.senderId !== peerId))
           .map((item) => ({ ts: item.ts, data: item.data }));

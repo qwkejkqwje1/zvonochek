@@ -1,13 +1,18 @@
-import { CONFIG } from './config.js?v=11';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=11';
-import { Signaling } from './signaling.js?v=11';
+import { CONFIG } from './config.js?v=12';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=12';
+import { Signaling } from './signaling.js?v=12';
 
-export const APP_VERSION = 11;
+export const APP_VERSION = 12;
 const $ = (s, r = document) => r.querySelector(s);
+const setUse = (sel, name) => {
+  const el = typeof sel === 'string' ? $(sel) : sel;
+  if (el) el.setAttribute('href', '#' + name);
+};
+const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel)?.querySelector('use'), name);
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=11').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=12').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -26,6 +31,7 @@ const randHex = (n) =>
   [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, '0')).join('');
 const selfId = sessionStorage.zvId || (sessionStorage.zvId = randHex(8));
 const inst = randHex(6); // меняется при каждой перезагрузке страницы
+const MAX_FILE_BYTES = 256 * 1024 * 1024;
 
 const S = {
   secret: null,
@@ -125,6 +131,11 @@ const S = {
 function show(id) {
   ['home', 'prejoin', 'call'].forEach((s) => $('#' + s).classList.toggle('hidden', s !== id));
 }
+function syncChatOpen() {
+  const call = $('#call');
+  const chat = $('#chat');
+  if (call && chat) call.classList.toggle('chat-open', !chat.classList.contains('hidden'));
+}
 let toastT;
 function toast(t, ms = 3200) {
   const e = $('#toast');
@@ -151,7 +162,10 @@ document.addEventListener('click', (e) => {
   const c = e.target.closest('[data-close]');
   if (!c) return;
   if (c.dataset.close === 'modal') closeModal();
-  else $('#' + c.dataset.close)?.classList.add('hidden');
+  else {
+    $('#' + c.dataset.close)?.classList.add('hidden');
+    if (c.dataset.close === 'chat') syncChatOpen();
+  }
 });
 $('#modal').addEventListener('click', (e) => {
   if (e.target.id === 'modal') closeModal();
@@ -215,6 +229,13 @@ $('#btnOpenLink').onclick = () => {
   } else {
     toast('Неверный формат ссылки или ключа');
   }
+};
+$('#btnBackHome').onclick = () => {
+  if (S.joined) return;
+  S.secret = null;
+  stopLocal();
+  history.replaceState(null, '', location.pathname);
+  show('home');
 };
 
 // ---------- Аудио-движок Discord (Web Audio API: 0-200% Gain, VAD, Compressor, Loopback) ----------
@@ -324,18 +345,29 @@ function attachRemoteToEngine() {
   }
 }
 
+let persistTimer = 0;
+function persistSoon() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = 0;
+    try {
+      localStorage.zvMicVol = String(S.audio.micVol);
+      localStorage.zvPeerVol = String(S.audio.peerVol);
+      localStorage.zvInputMode = S.audio.inputMode;
+      localStorage.zvVadGate = String(S.audio.vadGate);
+      localStorage.zvNoise = S.audio.noise ? '1' : '0';
+      localStorage.zvEcho = S.audio.echo ? '1' : '0';
+      localStorage.zvAgc = S.audio.agc ? '1' : '0';
+      localStorage.zvComp = S.audio.comp ? '1' : '0';
+      localStorage.zvBitrate = String(S.audio.bitrate);
+      localStorage.zvNetMode = S.audio.netMode;
+      localStorage.zvRelay = S.audio.netMode === 'relay' ? '1' : '0';
+    } catch {}
+  }, 250);
+}
+
 function syncAudioParams() {
-  localStorage.zvMicVol = String(S.audio.micVol);
-  localStorage.zvPeerVol = String(S.audio.peerVol);
-  localStorage.zvInputMode = S.audio.inputMode;
-  localStorage.zvVadGate = String(S.audio.vadGate);
-  localStorage.zvNoise = S.audio.noise ? '1' : '0';
-  localStorage.zvEcho = S.audio.echo ? '1' : '0';
-  localStorage.zvAgc = S.audio.agc ? '1' : '0';
-  localStorage.zvComp = S.audio.comp ? '1' : '0';
-  localStorage.zvBitrate = String(S.audio.bitrate);
-  localStorage.zvNetMode = S.audio.netMode;
-  localStorage.zvRelay = S.audio.netMode === 'relay' ? '1' : '0';
+  persistSoon();
 
   if (S.hpFilter) S.hpFilter.frequency.value = S.audio.noise ? 85 : 20;
   if (S.micGainNode) S.micGainNode.gain.value = S.audio.micVol / 100;
@@ -366,10 +398,12 @@ function syncAudioParams() {
   if ($('#qaMicVol')) $('#qaMicVol').value = S.audio.micVol;
   if ($('#qaMicVolTxt')) $('#qaMicVolTxt').textContent = S.audio.micVol + '%';
   if ($('#quickVolLabel')) $('#quickVolLabel').textContent = S.deafened ? 'ВЫКЛ' : S.audio.peerVol + '%';
-  if ($('#preInputModeTag')) {
-    $('#preInputModeTag').textContent =
-      S.audio.inputMode === 'ptt' ? '📻 Рация (Нажми и говори)' : `🎙️ По голосу (${S.audio.vadGate} дБ)`;
+  setBtnIcon('#btnQuickAudio', S.deafened ? 'i-volume-x' : 'i-volume');
+  if ($('#preInputModeText')) {
+    $('#preInputModeText').textContent =
+      S.audio.inputMode === 'ptt' ? 'Рация (нажми и говори)' : `По голосу (${S.audio.vadGate} дБ)`;
   }
+  setUse('#preInputModeTag use', S.audio.inputMode === 'ptt' ? 'i-radio' : 'i-mic');
   if ($('#preCodecTag')) {
     $('#preCodecTag').textContent = `Opus ${S.audio.bitrate} kbps + FEC`;
   }
@@ -444,16 +478,19 @@ function toggleMicTest(btnEl) {
       S.gateGainNode.disconnect(ctx.destination);
     }
   } catch {}
-  for (const id of ['#pTestMic', '#sTestMic']) {
+  paintMicTest();
+  if (btnEl) btnEl.setAttribute('aria-pressed', String(S.testingMic));
+}
+function paintMicTest() {
+  const labels = { '#pTestMic': ['Проверить микрофон', 'Стоп тест'], '#sTestMic': ['Проверить', 'Стоп'] };
+  for (const [id, [idle, active]] of Object.entries(labels)) {
     const b = $(id);
-    if (b) {
-      b.classList.toggle('active-test', S.testingMic);
-      b.textContent = S.testingMic ? '⏹️ Стоп тест' : '🔊 Проверить микрофон';
-    }
-  }
-  if (btnEl) {
-    btnEl.classList.toggle('active-test', S.testingMic);
-    btnEl.textContent = S.testingMic ? '⏹️ Стоп' : '🔊 Проверить';
+    if (!b) continue;
+    b.classList.toggle('active-test', S.testingMic);
+    b.setAttribute('aria-pressed', String(S.testingMic));
+    const lbl = b.querySelector('.lbl');
+    if (lbl) lbl.textContent = S.testingMic ? active : idle;
+    setBtnIcon(b, S.testingMic ? 'i-stop' : 'i-volume');
   }
 }
 function stopMicTest() {
@@ -462,13 +499,7 @@ function stopMicTest() {
   try {
     S.gateGainNode?.disconnect(S.audioCtx.destination);
   } catch {}
-  for (const id of ['#pTestMic', '#sTestMic']) {
-    const b = $(id);
-    if (b) {
-      b.classList.remove('active-test');
-      b.textContent = '🔊 Проверить микрофон';
-    }
-  }
+  paintMicTest();
 }
 
 // ---------- Медиа и переключение устройств ----------
@@ -632,7 +663,7 @@ function toggleDeafen() {
   if (a) a.enabled = S.micOn && !S.deafened;
   syncAudioParams();
   syncButtons();
-  toast(S.deafened ? '🔇 Звук и микрофон отключены (Deafen)' : '🔊 Звук включён');
+  toast(S.deafened ? 'Звук и микрофон отключены (Deafen)' : 'Звук включён');
 }
 
 async function toggleCam() {
@@ -713,10 +744,35 @@ function refreshLocalView() {
   $('#local')?.classList.toggle('hidden', !v && !S.screenTrack);
 }
 function syncButtons() {
-  for (const id of ['#pMic', '#cMic']) $(id)?.classList.toggle('off', !S.micOn || S.deafened);
-  for (const id of ['#pCam', '#cCam']) $(id)?.classList.toggle('off', !S.camOn);
-  $('#cDeaf')?.classList.toggle('off', S.deafened);
-  $('#cScreen')?.classList.toggle('on', !!S.screenTrack);
+  const micOff = !S.micOn || S.deafened;
+  for (const id of ['#pMic', '#cMic']) {
+    const b = $(id);
+    if (!b) continue;
+    b.classList.toggle('off', micOff);
+    b.setAttribute('aria-pressed', String(!micOff));
+    b.title = micOff ? 'Микрофон выключен' : 'Микрофон включён';
+    setBtnIcon(b, micOff ? 'i-mic-off' : 'i-mic');
+  }
+  for (const id of ['#pCam', '#cCam']) {
+    const b = $(id);
+    if (!b) continue;
+    b.classList.toggle('off', !S.camOn);
+    b.setAttribute('aria-pressed', String(S.camOn));
+    b.title = S.camOn ? 'Камера включена' : 'Камера выключена';
+    setBtnIcon(b, S.camOn ? 'i-cam' : 'i-cam-off');
+  }
+  const deaf = $('#cDeaf');
+  if (deaf) {
+    deaf.classList.toggle('off', S.deafened);
+    deaf.setAttribute('aria-pressed', String(S.deafened));
+    setBtnIcon(deaf, S.deafened ? 'i-headphones-off' : 'i-headphones');
+  }
+  const scr = $('#cScreen');
+  if (scr) {
+    scr.classList.toggle('on', !!S.screenTrack);
+    scr.setAttribute('aria-pressed', String(!!S.screenTrack));
+    setBtnIcon(scr, S.screenTrack ? 'i-stop' : 'i-screen');
+  }
 }
 
 // ---------- Управление Рацией (Push-To-Talk: кнопка + клавиша Пробел) ----------
@@ -726,7 +782,9 @@ function setPtt(active) {
   const btn = $('#cPtt');
   if (btn) {
     btn.classList.toggle('tx', active);
-    btn.textContent = active ? '🟢 ПЕРЕДАЧА РЕЧИ…' : '📻 Держите для речи';
+    btn.setAttribute('aria-pressed', String(active));
+    const lbl = $('#pttLabel');
+    if (lbl) lbl.textContent = active ? 'Передача речи…' : 'Держите для речи';
   }
   if (active && navigator.vibrate) navigator.vibrate(18);
 }
@@ -809,7 +867,7 @@ const isTurn = (s) => [].concat(s?.urls || []).some((u) => /^turns?:/.test(u));
 
 async function loadIce() {
   const servers = [{ urls: CONFIG.STUN }, ...CONFIG.EXTRA_ICE_SERVERS];
-  const info = CONFIG.EXTRA_ICE_SERVERS.some(isTurn) ? ['Встроенный TURN ✓'] : [];
+  const info = CONFIG.EXTRA_ICE_SERVERS.some(isTurn) ? ['Встроенный TURN: есть'] : [];
   const jobs = [];
   if (CONFIG.WORKER_URL) {
     jobs.push(
@@ -817,7 +875,7 @@ async function loadIce() {
         .then((j) => {
           const l = (j?.iceServers || []).filter(isTurn);
           servers.push(...l);
-          info.push(l.length ? 'Worker TURN ✓' : 'Worker: без TURN (только сигнал)');
+          info.push(l.length ? 'Worker TURN: есть' : 'Worker: без TURN (только сигнал)');
         })
         .catch(() => info.push('Worker: офлайн'))
     );
@@ -832,7 +890,7 @@ async function loadIce() {
             .filter(isTurn)
             .map((s) => ({ ...s, urls: [].concat(s.urls).filter((u) => !/:53(\?|$)/.test(u)) }));
           servers.push(...l);
-          info.push(l.length ? 'Metered ✓' : 'Metered: пусто');
+          info.push(l.length ? 'Metered: есть' : 'Metered: пусто');
         })
         .catch(() => info.push('Metered недоступен'))
     );
@@ -951,9 +1009,10 @@ function hello() {
 function activateBridge(reason = 'Активирован аудио-мост через сигналинг') {
   if (!S.peer || S.bridgeActive) return;
   S.bridgeActive = true;
+  S.bridgeNextPlayTime = 0;
   clearTimeout(S.bridgeAutoTimer);
-  log('🛡️ ' + reason);
-  toast('🛡️ Включён Мост без TURN (голос идёт через зашифрованный сигнал)', 5000);
+  log(reason);
+  toast('Включён мост без TURN: голос идёт через зашифрованный сигнал', 5000);
   if (!S.callStart) {
     S.callStart = Date.now();
     beep(660, 0.16);
@@ -973,9 +1032,17 @@ function stopBridge() {
     try { S.bridgeRecorder.stop(); } catch {}
   }
   S.bridgeRecorder = null;
+  const wasActive = S.bridgeActive;
   S.bridgeActive = false;
+  S.bridgeNextPlayTime = 0;
+  S.bridgeSpeakingUntil = 0;
   $('#bridgeBadge')?.classList.add('hidden');
   syncAudioParams();
+  // Код сверки зависел от режима моста — возвращаем код прямого P2P-соединения.
+  if (S.pc?.connectionState === 'connected') {
+    showSafety();
+    if (wasActive && !S.leaving) toast('Прямое P2P-соединение установлено — мост отключён');
+  }
 }
 
 function getSupportedAudioMime() {
@@ -1020,14 +1087,17 @@ function startBridgeRecorder() {
         const blob = new Blob(chunks, { type: rec.mimeType || mime || 'audio/webm' });
         const buf = new Uint8Array(await blob.arrayBuffer());
         if (buf.byteLength < 60 || buf.byteLength > 45000) return;
-        S.sig?.send({
-          type: 'voice',
-          to: S.peer.id,
-          toInst: S.peer.inst,
-          mime: blob.type,
-          b64: b64u.enc(buf),
-          _noZip: true,
-        });
+        S.sig?.send(
+          {
+            type: 'voice',
+            to: S.peer.id,
+            toInst: S.peer.inst,
+            mime: blob.type,
+            b64: b64u.enc(buf),
+            _noZip: true,
+          },
+          { voice: true }
+        );
       };
       rec.start();
       setTimeout(() => {
@@ -1062,6 +1132,8 @@ async function playBridgeVoice(m) {
       const src = ctx.createBufferSource();
       src.buffer = audioBuf;
       src.connect(S.remoteCompNode || ctx.destination);
+      // Не даём очереди расти: при лагах сети сбрасываем накопленное опережение.
+      if (S.bridgeNextPlayTime - ctx.currentTime > 0.6) S.bridgeNextPlayTime = 0;
       const startAt = Math.max(ctx.currentTime + 0.03, S.bridgeNextPlayTime || 0);
       src.start(startAt);
       S.bridgeNextPlayTime = startAt + audioBuf.duration;
@@ -1202,16 +1274,20 @@ function setPeer(m) {
   createPC();
 
   // Если выбран режим «Только Мост без TURN» — включаем голосовой мост мгновенно!
-  // А в режиме «Авто» — если за 7.5 секунд прямой WebRTC не пробил NAT/файрвол, автоматически подхватываем мостом!
+  // В режиме «Авто» даём WebRTC 10 секунд: за это время обычный звонок успевает подняться,
+  // а при блокировке UDP/отсутствии TURN автоматически включается мост через сигналинг.
   clearTimeout(S.bridgeAutoTimer);
   if (S.audio.netMode === 'bridge') {
     activateBridge('Выбран режим прямого моста через сигнал (без TURN)');
   } else {
     S.bridgeAutoTimer = setTimeout(() => {
-      if (S.joined && S.peer && S.pc?.connectionState !== 'connected' && !S.bridgeActive) {
+      if (!S.joined || !S.peer || S.bridgeActive) return;
+      const cs = S.pc?.connectionState;
+      const ice = S.pc?.iceConnectionState;
+      if (cs !== 'connected' && (cs === 'failed' || cs === 'disconnected' || ice === 'checking' || ice === 'failed')) {
         activateBridge('Прямой P2P заблокирован или нет TURN — включён авто-мост через сигнал');
       }
-    }, 7500);
+    }, 10_000);
   }
 }
 
@@ -1587,7 +1663,7 @@ function progress(pct, step) {
 function progressDetail() {
   const sg = S.sigStatus;
   const workerTag = CONFIG.WORKER_URL
-    ? `Worker ${sg.worker === 'up' ? 'WS✓' : sg.workerHttp === 'up' ? 'HTTP✓' : '✗'}`
+    ? `Worker ${sg.worker === 'up' ? 'WS: есть' : sg.workerHttp === 'up' ? 'HTTP: есть' : 'нет'}`
     : null;
   const ways = [
     `MQTT ${sg.mqttUp}/${sg.mqttTotal}`,
@@ -1669,18 +1745,32 @@ function updateStatus() {
   const sg = S.sigStatus;
   const sigUp = sg.mqttUp > 0 || sg.worker === 'up' || sg.workerHttp === 'up' || sg.nostrUp > 0;
   let text;
-  if (!sigUp) text = '⏳ Подключение к сети…';
-  else if (!S.peer) text = '🟢 Ожидаем собеседника';
-  else if (s === 'connected') text = `🟢 ${S.peer.name}`;
-  else if (S.bridgeActive) text = `🟢 ${S.peer.name}`;
-  else text = `🔄 ${S.pct}% · ${S.step}`;
-  st.textContent = text;
+  let iconName;
+  if (!sigUp) {
+    text = 'Подключение к сети…';
+    iconName = 'i-loader';
+  } else if (!S.peer) {
+    text = 'Ожидаем собеседника';
+    iconName = 'i-users';
+  } else if (s === 'connected') {
+    text = S.peer.name;
+    iconName = 'i-check';
+  } else if (S.bridgeActive) {
+    text = S.peer.name;
+    iconName = 'i-shield';
+  } else {
+    text = `${S.pct}% · ${S.step}`;
+    iconName = 'i-loader';
+  }
+  const statusText = $('#statusText');
+  if (statusText) statusText.textContent = text;
+  setUse('#statusIcon', iconName);
 
   const isLive = s === 'connected' || S.bridgeActive;
   $('#waitText').textContent = !S.peer
     ? S.waitHinted
       ? 'Собеседник пока не найден. Если он уже в звонке — попросите его обновить страницу'
-      : 'Отправьте ссылку собеседнику 🔗'
+      : 'Отправьте ссылку собеседнику'
     : s === 'connected'
     ? S.peer.cam === false
       ? 'Голосовой звонок (камера выключена)'
@@ -1700,16 +1790,16 @@ function transportText() {
   const sg = S.sigStatus;
   const wText = CONFIG.WORKER_URL
     ? sg.worker === 'up'
-      ? 'WebSocket на связи ✓'
+      ? 'WebSocket на связи'
       : sg.workerHttp === 'up'
-      ? 'HTTP-поллинг на связи ✓ (обход блока WS)'
+      ? 'HTTP-поллинг на связи (обход блока WS)'
       : 'подключение…'
     : 'не настроен';
   return (
     `Канал 1 — MQTT-брокеры: ${sg.mqttUp}/${sg.mqttTotal} на связи\n` +
     `Канал 2 — Cloudflare Worker: ${wText}\n` +
     `Канал 3 — Nostr-реле (порт 443): ${sg.nostrUp || 0}/${sg.nostrTotal || 0} на связи\n` +
-    `TURN-ретранслятор: ${S.hasTurn ? 'есть ✓' : 'нет (авто-мост активен)'} (${S.turnInfo || '—'})\n` +
+    `TURN-ретранслятор: ${S.hasTurn ? 'есть' : 'нет (авто-мост активен)'} (${S.turnInfo || '—'})\n` +
     `Маршрут звонка: ${S.bridgeActive ? 'Зашифрованный Мост через Сигналинг (без TURN)' : S.method || '—'}`
   );
 }
@@ -1717,10 +1807,8 @@ function transportText() {
 setInterval(() => {
   if (!S.callStart) return;
   const sec = Math.floor((Date.now() - S.callStart) / 1000);
-  $('#timer').textContent = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(
-    2,
-    '0'
-  )}`;
+  const txt = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+  if ($('#timerText')) $('#timerText').textContent = txt;
 }, 1000);
 
 function startStats(now) {
@@ -1786,12 +1874,14 @@ function startStats(now) {
     const lvl = rtt < 200 && loss < 2 ? 'good' : rtt < 450 && loss < 7 ? 'mid' : 'bad';
     adaptQuality(outLoss, rtt);
     const q = $('#quality');
-    q.className = 'pill mono-pill ' + lvl;
-    q.textContent = `${{ good: '📶', mid: '📶', bad: '⚠️' }[lvl]} ${
-      relay ? 'TURN' : 'P2P'
-    } · ${rtt} мс · ${loss.toFixed(1)}% · ${
-      kbps > 100 ? (kbps / 1000).toFixed(1) + ' Мбит/с' : Math.round(kbps) + ' Кбит/с'
-    }`;
+    q.classList.remove('good', 'mid', 'bad');
+    q.classList.add(lvl, 'mono-pill');
+    if ($('#qualityText')) {
+      $('#qualityText').textContent = `${relay ? 'TURN' : 'P2P'} · ${rtt} мс · ${loss.toFixed(1)}% · ${
+        kbps > 100 ? (kbps / 1000).toFixed(1) + ' Мбит/с' : Math.round(kbps) + ' Кбит/с'
+      }`;
+    }
+    setUse('#quality use', lvl === 'bad' ? 'i-warning' : 'i-wifi');
     q.classList.remove('hidden');
     updateStatus();
   };
@@ -1863,7 +1953,8 @@ async function showSafety() {
   if (!a || !b) return;
   S.safety = await safetyCode(a, b);
   const el = $('#safety');
-  el.textContent = '🛡️ ' + S.safety.emoji;
+  const pill = $('#safetyPill');
+  if (pill) pill.textContent = S.safety.emoji;
   el.classList.remove('hidden');
 }
 
@@ -1871,7 +1962,8 @@ async function showBridgeSafety() {
   if (!S.room || !S.peer) return;
   S.safety = await safetyCodeBridge(S.room.topic, selfId, S.peer.id);
   const el = $('#safety');
-  el.textContent = '🛡️ ' + S.safety.emoji;
+  const pill = $('#safetyPill');
+  if (pill) pill.textContent = S.safety.emoji;
   el.classList.remove('hidden');
 }
 
@@ -1914,7 +2006,11 @@ function onCtrl(raw) {
     updateStatus();
   }
 }
+function hideChatEmpty() {
+  $('#chatEmpty')?.remove();
+}
 function addMsg(who, text, me) {
+  hideChatEmpty();
   const d = document.createElement('div');
   d.className = 'm' + (me ? ' me' : '');
   const w = document.createElement('div');
@@ -1928,10 +2024,12 @@ function addMsg(who, text, me) {
   return d;
 }
 function sysMsg(text) {
+  hideChatEmpty();
   const d = document.createElement('div');
   d.className = 'm sys';
   d.textContent = text;
   $('#msgs').append(d);
+  $('#msgs').scrollTop = 1e9;
 }
 $('#chatForm').onsubmit = (e) => {
   e.preventDefault();
@@ -1955,12 +2053,29 @@ $('#fileInput').onchange = (e) => {
     e.target.value = '';
     return;
   }
-  for (const f of e.target.files) S.sendQueue.push(f);
+  for (const f of e.target.files) {
+    if (f.size > MAX_FILE_BYTES) {
+      toast(`Файл больше ${fmtSize(MAX_FILE_BYTES)} — передача отменена`);
+      continue;
+    }
+    S.sendQueue.push(f);
+  }
   e.target.value = '';
   pumpFiles();
 };
 function fileBubble(who, name, size, me) {
-  const d = addMsg(who, `📄 ${name} (${fmtSize(size)})`, me);
+  const d = addMsg(who, '', me);
+  const row = document.createElement('div');
+  row.className = 'file-row';
+  const ic = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  ic.setAttribute('class', 'ic');
+  const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+  use.setAttribute('href', '#i-attach');
+  ic.append(use);
+  const label = document.createElement('span');
+  label.textContent = `${name} · ${fmtSize(size)}`;
+  row.append(ic, label);
+  d.lastElementChild?.append(row);
   const p = document.createElement('div');
   p.className = 'prog';
   p.append(document.createElement('i'));
@@ -2007,6 +2122,11 @@ function onFileData(d) {
     if (m.t === 'start') {
       const name = String(m.name || 'file').slice(0, 200),
         size = Number(m.size) || 0;
+      if (size > MAX_FILE_BYTES) {
+        S.incoming = null;
+        sysMsg(`Собеседник пытался отправить файл больше ${fmtSize(MAX_FILE_BYTES)}`);
+        return;
+      }
       S.incoming = {
         name,
         size,
@@ -2018,20 +2138,32 @@ function onFileData(d) {
     } else if (m.t === 'end' && S.incoming) {
       const f = S.incoming;
       S.incoming = null;
+      if (f.got !== f.size) {
+        f.el.querySelector('.who').textContent = 'Передача прервана';
+        return;
+      }
       setProg(f.el, 1);
-      const url = URL.createObjectURL(new Blob(f.parts, { type: 'application/octet-stream' }));
+      const url = URL.createObjectURL(new Blob(f.parts, { type: f.mime || 'application/octet-stream' }));
       const a = document.createElement('a');
+      a.className = 'dl';
       a.href = url;
       a.download = f.name;
-      a.textContent = '⬇️ Скачать';
+      a.innerHTML = '<svg class="ic"><use href="#i-download"></use></svg><span>Скачать</span>';
+      a.addEventListener('click', () => setTimeout(() => URL.revokeObjectURL(url), 120000), { once: true });
       f.el.append(a);
       if ($('#chat').classList.contains('hidden')) {
         S.unread++;
         $('#unread').textContent = S.unread;
         $('#unread').classList.remove('hidden');
+        beep();
       }
     }
   } else if (S.incoming) {
+    if (S.incoming.got + d.byteLength > S.incoming.size + 1024) {
+      S.incoming.el.querySelector('.who').textContent = 'Передача прервана';
+      S.incoming = null;
+      return;
+    }
     S.incoming.parts.push(d);
     S.incoming.got += d.byteLength;
     setProg(S.incoming.el, S.incoming.got / (S.incoming.size || 1));
@@ -2045,9 +2177,10 @@ $('#cCam').onclick = toggleCam;
 $('#cScreen').onclick = toggleScreen;
 $('#cChat').onclick = () => {
   $('#chat').classList.toggle('hidden');
+  syncChatOpen();
   S.unread = 0;
   $('#unread').classList.add('hidden');
-  $('#chatInput').focus();
+  if (!$('#chat').classList.contains('hidden')) $('#chatInput').focus();
 };
 $('#cInvite').onclick = () => {
   const b = openModal('#tplInvite');
@@ -2232,36 +2365,39 @@ $('#unmuteHint').onclick = () => {
 };
 $('#cHang').onclick = hangup;
 
-function hangup() {
+async function hangup() {
   try {
     S.sig?.send({ type: 'bye' });
     S.sig?.sendByeBeacon();
   } catch {}
-  setTimeout(() => {
-    resetPC(false);
-    S.sig?.close();
-    S.sig = null;
-    S.peer = null;
-    S.joined = false;
-    clearInterval(S.helloTimer);
-    S.log = [];
-    S.via = {};
-    if (S.screenTrack) {
-      S.screenTrack.onended = null;
-      S.screenTrack.stop();
-      S.screenTrack = null;
-    }
-    stopLocal();
-    try {
-      S.wakeLock?.release();
-    } catch {}
-    $('#msgs').replaceChildren();
-    $('#chat').classList.add('hidden');
-    $('#quickAudioPop')?.classList.add('hidden');
-    history.replaceState(null, '', location.pathname);
-    show('home');
-    $('#homeMsg').textContent = 'Звонок завершён';
-  }, 150);
+  // Даём очереди отправки шанс доставить bye до закрытия сокета.
+  await new Promise((r) => setTimeout(r, 200));
+  S.leaving = true;
+  resetPC(false);
+  S.sig?.close();
+  S.sig = null;
+  S.peer = null;
+  S.joined = false;
+  clearInterval(S.helloTimer);
+  S.log = [];
+  S.via = {};
+  if (S.screenTrack) {
+    S.screenTrack.onended = null;
+    S.screenTrack.stop();
+    S.screenTrack = null;
+  }
+  stopLocal();
+  try {
+    S.wakeLock?.release();
+  } catch {}
+  $('#msgs').replaceChildren();
+  $('#chat').classList.add('hidden');
+  syncChatOpen();
+  $('#quickAudioPop')?.classList.add('hidden');
+  history.replaceState(null, '', location.pathname);
+  show('home');
+  $('#homeMsg').textContent = 'Звонок завершён';
+  S.leaving = false;
 }
 
 window.addEventListener('pagehide', () => {
@@ -2279,4 +2415,12 @@ document.addEventListener('visibilitychange', async () => {
   }
 });
 
-route();
+const action = new URLSearchParams(location.search).get('action');
+if (action === 'new' && !location.hash) {
+  const k = newSecret();
+  history.replaceState(null, '', location.pathname + '#k=' + k);
+  S.secret = k;
+  preJoin();
+} else {
+  route();
+}

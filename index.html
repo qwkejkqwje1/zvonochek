@@ -5,60 +5,137 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
-<meta name="theme-color" content="#0b0d13">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#06070d">
+<meta name="description" content="ZVONochek — защищённые портативные аудио- и видеозвонки по ссылке. E2EE, мультиканальный сигналинг, работа без TURN.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ZVONochek">
+<meta name="format-detection" content="telephone=no">
 <title>ZVONochek — защищённые портативные звонки</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=11">
+<link rel="stylesheet" href="style.css?v=12">
 </head>
 <body>
 
+<!-- Иконки: единый stroke-набор (24×24, currentColor) -->
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+  <defs>
+    <linearGradient id="brandGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b7bff"/><stop offset=".5" stop-color="#5b6cff"/><stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <symbol id="i-logo" viewBox="0 0 48 48">
+    <rect x="1" y="1" width="46" height="46" rx="13" fill="url(#brandGrad)"/>
+    <rect x="1" y="1" width="46" height="46" rx="13" fill="none" stroke="rgba(255,255,255,.22)"/>
+    <path d="M24 10.5c-5.2 0-9.2 4.1-9.2 9.2v5.6l-2.6 4.4h23.6l-2.6-4.4v-5.6c0-5.1-4-9.2-9.2-9.2Z" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M20.4 33.4a3.6 3.6 0 0 0 7.2 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="34.6" cy="34.4" r="7.2" fill="#0b0d13"/>
+    <circle cx="34.6" cy="34.4" r="5.5" fill="#2dd4bf"/>
+    <path d="M32.4 34.5l1.5 1.5 2.8-3.1" fill="none" stroke="#062d2a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 3v6.1c0 4.6-3.2 7.7-7.5 9.2-4.3-1.5-7.5-4.6-7.5-9.2V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2.5L4.5 14H10l-1 7.5L18 9.5h-5.5z"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8.5a15 15 0 0 1 19 0"/><path d="M5.5 12.2a10.5 10.5 0 0 1 13 0"/><path d="M8.6 15.8a6 6 0 0 1 6.8 0"/><circle cx="12" cy="19.3" r="1.1" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-wifi-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8.5a15 15 0 0 1 8.2-3.9"/><path d="M14.6 5a15 15 0 0 1 6.9 3.5"/><path d="M5.6 12.2A10.5 10.5 0 0 1 9 10.3"/><path d="M15.3 10.4a10.5 10.5 0 0 1 3.2 1.8"/><path d="M8.7 15.8a6 6 0 0 1 6.6 0"/><circle cx="12" cy="19.3" r="1.1" fill="currentColor" stroke="none"/><path d="M3 3l18 18"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21M9 21h6"/></symbol>
+  <symbol id="i-mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6a3 3 0 0 1 6 0v4"/><path d="M9 9.5V11a3 3 0 0 0 4.5 2.6"/><path d="M5.5 11a6.5 6.5 0 0 0 10 5.5"/><path d="M18.5 11a6.5 6.5 0 0 1-.6 2.7"/><path d="M12 17.5V21M9 21h6"/><path d="M3 3l18 18"/></symbol>
+  <symbol id="i-cam" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5"/></symbol>
+  <symbol id="i-cam-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 6H13a3 3 0 0 1 3 3v1.5"/><path d="M16 14.5V15a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V9a3 3 0 0 1 2-2.8"/><path d="M16 10.5l6-3.5v10l-3-1.7"/><path d="M3 3l18 18"/></symbol>
+  <symbol id="i-headphones" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><path d="M4 14h2.2a1.3 1.3 0 0 1 1.3 1.3v3.4A1.3 1.3 0 0 1 6.2 20H5.3A1.3 1.3 0 0 1 4 18.7z"/><path d="M20 14h-2.2a1.3 1.3 0 0 0-1.3 1.3v3.4a1.3 1.3 0 0 0 1.3 1.3h.9a1.3 1.3 0 0 0 1.3-1.3z"/></symbol>
+  <symbol id="i-headphones-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14v-2a8 8 0 0 1 11.2-7.4"/><path d="M19.8 9.5A8 8 0 0 1 20 12v2"/><path d="M4 14h2.2a1.3 1.3 0 0 1 1.3 1.3v3.4A1.3 1.3 0 0 1 6.2 20H5.3A1.3 1.3 0 0 1 4 18.7z"/><path d="M20 14h-2.2a1.3 1.3 0 0 0-1.3 1.3v3.4a1.3 1.3 0 0 0 1.3 1.3h.9a1.3 1.3 0 0 0 1.3-1.3z"/><path d="M3 3l18 18"/></symbol>
+  <symbol id="i-screen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="12.5" rx="2.5"/><path d="M8.5 20.5h7M12 16.5v4"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5H8l-5 3 1.6-4.9A8.5 8.5 0 1 1 21 11.5z"/><path d="M8.5 11.5h.01M12 11.5h.01M15.5 11.5h.01"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 13.5a4 4 0 0 0 5.7 0l3-3a4 4 0 1 0-5.7-5.7l-1.4 1.4"/><path d="M13.5 10.5a4 4 0 0 0-5.7 0l-3 3a4 4 0 1 0 5.7 5.7l1.4-1.4"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-hangup" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><g transform="rotate(135 12 12)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.9a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.9.3 1.9.6 2.9.7a2 2 0 0 1 1.7 2z"/></g></symbol>
+  <symbol id="i-radio" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="12" height="10" rx="2.5"/><path d="M15 11.5l6-3.5v8l-6-3.5"/><path d="M7 8l5-5"/><circle cx="7" cy="13" r="1.1" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.2"/><rect x="14" y="3" width="7" height="7" rx="1.2"/><rect x="3" y="14" width="7" height="7" rx="1.2"/><path d="M14 14h3v3h-3zM20 14h1M14 20h1M18 18h3v3"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7.5A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5V12"/><path d="M16 6l-4-4-4 4M12 2v13"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2.5"/><path d="M5.5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5v1"/></symbol>
+  <symbol id="i-diag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 8-6-16-3 8H2"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2.5L10.8 13.2"/><path d="M21.5 2.5l-6.8 19-3.9-8.3-8.3-3.9z"/></symbol>
+  <symbol id="i-attach" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.3l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l8-8"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l1.9 5.6 5.6 1.9-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.9z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></symbol>
+  <symbol id="i-warning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.5L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.5a2 2 0 0 0-3.4 0z"/><path d="M12 9v4.5M12 17.5h.01"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4.5l12 7.5-12 7.5z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6.5 9H3v6h3.5L11 19z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9.5 9.5 0 0 1 0 13"/></symbol>
+  <symbol id="i-volume-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6.5 9H3v6h3.5L11 19z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5.2l3.2 2"/></symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6"/></symbol>
+<symbol id="i-arrow-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-loader" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9" /></symbol>
+  <symbol id="i-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10v4M7 7v10M11 4v16M15 7v10M19 10v4"/></symbol>
+</svg>
+
+<div class="page-bg" aria-hidden="true">
+  <span class="orb orb-1"></span><span class="orb orb-2"></span><span class="orb orb-3"></span>
+  <span class="bg-grid"></span>
+</div>
+
 <!-- Главный экран -->
-<section id="home" class="screen">
-  <div class="hero-card">
-    <div class="hero-badge">E2EE • MULTI-MESH • ANTI-BLOCK v11</div>
-    <div class="logo">📞 <b>ZVON</b>ochek</div>
-    <p class="sub">Ультимативные портативные звонки по ссылке. Пробивают блокировки и работают даже без TURN-сервера.</p>
-
-    <button id="btnCreate" class="btn primary big glow-btn">⚡ Создать защищённый звонок</button>
-
-    <div class="join-box">
-      <input id="homeLinkInput" placeholder="Или вставьте ссылку / ключ комнаты #k=…" autocomplete="off">
-      <button id="btnOpenLink" class="btn">Войти</button>
-    </div>
-
-    <div class="features-grid">
-      <div class="feat-item">
-        <span class="feat-icon">🛡️</span>
-        <div>
-          <b>Мост без TURN и UDP</b>
-          <span>Если WebRTC заблокирован — голос идёт через зашифрованный сигнал (WSS/HTTPS)</span>
-        </div>
+<section id="home" class="screen home">
+  <div class="home-wrap">
+    <div class="hero-card">
+      <div class="brand">
+        <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use href="#i-logo"/></svg>
+        <div class="brand-name">ZVON<span>ochek</span></div>
       </div>
-      <div class="feat-item">
-        <span class="feat-icon">📡</span>
-        <div>
-          <b>4 канала сигналинга</b>
-          <span>Гонка MQTT + Worker WS + HTTP-поллинг + Nostr (порт 443) без потерь</span>
-        </div>
+      <div class="hero-badge"><svg class="ic"><use href="#i-shield"/></svg> E2EE · P2P · MULTI-CHANNEL · v12</div>
+      <h1>Звонки, которые<br><span class="grad">не заглушить</span></h1>
+      <p class="sub">Портативные аудио- и видеозвонки по ссылке. Без регистрации, аккаунтов и установки. Ключ шифрования живёт только в адресной строке.</p>
+
+      <button id="btnCreate" class="btn primary big glow-btn"><svg class="ic"><use href="#i-bolt"/></svg><span>Создать защищённый звонок</span></button>
+
+      <div class="join-box">
+        <label class="sr-only" for="homeLinkInput">Ссылка или ключ комнаты</label>
+        <input id="homeLinkInput" placeholder="Ссылка или ключ #k=…" autocomplete="off" spellcheck="false">
+        <button id="btnOpenLink" class="btn"><svg class="ic"><use href="#i-arrow-right"/></svg><span>Войти</span></button>
       </div>
-      <div class="feat-item">
-        <span class="feat-icon">🎛️</span>
-        <div>
-          <b>Звук как в Discord</b>
-          <span>Громкость 0–200%, фильтр шума, порог голоса (VAD), компрессор и рация PTT</span>
-        </div>
-      </div>
-      <div class="feat-item">
-        <span class="feat-icon">🔒</span>
-        <div>
-          <b>Сквозное шифрование</b>
-          <span>Ключ AES-256-GCM живёт только в ссылке, сверка по 5 эмодзи</span>
-        </div>
+
+      <p id="homeMsg" class="msg"></p>
+
+      <div class="trust-row">
+        <span><svg class="ic"><use href="#i-check"/></svg> Без регистрации</span>
+        <span><svg class="ic"><use href="#i-lock"/></svg> Ключ не на сервере</span>
+        <span><svg class="ic"><use href="#i-globe"/></svg> PWA / офлайн</span>
       </div>
     </div>
 
-    <p id="homeMsg" class="msg"></p>
+    <div class="feature-rail">
+      <div class="feat-card">
+        <span class="feat-ic accent"><svg class="ic"><use href="#i-shield"/></svg></span>
+        <b>Мост без TURN и UDP</b>
+        <span>Голос идёт через зашифрованный сигналинг, когда WebRTC заблокирован.</span>
+      </div>
+      <div class="feat-card">
+        <span class="feat-ic cyan"><svg class="ic"><use href="#i-wifi"/></svg></span>
+        <b>4 канала сигналинга</b>
+        <span>MQTT, Worker WS, HTTP-поллинг и Nostr — гонка без потери рукопожатия.</span>
+      </div>
+      <div class="feat-card">
+        <span class="feat-ic mint"><svg class="ic"><use href="#i-settings"/></svg></span>
+        <b>Звук как в Discord</b>
+        <span>Громкость 0–200%, VAD, рация PTT, компрессор и шумоподавление.</span>
+      </div>
+      <div class="feat-card">
+        <span class="feat-ic amber"><svg class="ic"><use href="#i-lock"/></svg></span>
+        <b>Сквозное шифрование</b>
+        <span>AES-256-GCM и сверка кода безопасности по 5 эмодзи и 6 цифрам.</span>
+      </div>
+      <div class="feat-note"><svg class="ic"><use href="#i-spark"/></svg> Один клик — и комната готова. Ссылка заменяет аккаунт.</div>
+    </div>
   </div>
 </section>
 
@@ -70,23 +147,22 @@
         <video id="preview" autoplay playsinline muted></video>
         <div id="previewOff" class="video-off hidden">
           <div class="avatar-ring" id="preAvatarRing">
-            <div class="avatar" id="preAvatar">🎙️</div>
+            <div class="avatar" id="preAvatar"><svg class="ic lg"><use href="#i-mic"/></svg></div>
           </div>
-          <span>Камера выключена (Аудио-режим)</span>
+          <span>Камера выключена — аудио-режим</span>
         </div>
         <div class="preview-hud">
-          <span class="hud-tag" id="preInputModeTag">🎙️ Активация по голосу</span>
+          <span class="hud-tag" id="preInputModeTag"><svg class="ic"><use href="#i-mic"/></svg><span id="preInputModeText">Активация по голосу</span></span>
           <span class="hud-tag" id="preCodecTag">Opus 24 kbps + FEC</span>
         </div>
         <div class="preview-ctrls">
-          <button id="pMic" class="round" title="Микрофон">🎙️</button>
-          <button id="pCam" class="round" title="Камера">📷</button>
-          <button id="pTestMic" class="btn small pill-btn" title="Услышать свой голос">🔊 Проверить микрофон</button>
-          <button id="pOpenSettings" class="round" title="Настройки звука и связи">⚙️</button>
+          <button id="pMic" class="round" title="Микрофон" aria-label="Микрофон"><svg class="ic"><use href="#i-mic"/></svg></button>
+          <button id="pCam" class="round" title="Камера" aria-label="Камера"><svg class="ic"><use href="#i-cam"/></svg></button>
+          <button id="pTestMic" class="btn small pill-btn" title="Услышать свой голос"><svg class="ic"><use href="#i-volume"/></svg><span class="lbl">Проверить микрофон</span></button>
+          <button id="pOpenSettings" class="round" title="Настройки звука и связи" aria-label="Настройки"><svg class="ic"><use href="#i-settings"/></svg></button>
         </div>
       </div>
 
-      <!-- Живой индикатор уровня микрофона как в Discord -->
       <div class="meter-card">
         <div class="meter-head">
           <span>Чувствительность микрофона (VAD)</span>
@@ -96,14 +172,14 @@
           <div id="pVadBar" class="vad-bar"></div>
           <div id="pVadGateMark" class="vad-gate-mark" title="Порог срабатывания микрофона"></div>
         </div>
-        <div class="Quick-sliders">
+        <div class="quick-sliders">
           <label class="slider-lbl">
-            <span>🎙️ Усиление микрофона: <b id="pMicVolTxt">100%</b></span>
-            <input type="range" id="pMicVol" min="0" max="200" value="100">
+            <span><svg class="ic"><use href="#i-mic"/></svg> Усиление микрофона <b id="pMicVolTxt">100%</b></span>
+            <input type="range" id="pMicVol" min="0" max="200" value="100" aria-label="Усиление микрофона">
           </label>
           <label class="slider-lbl">
-            <span>🔊 Громкость собеседника: <b id="pPeerVolTxt">100%</b></span>
-            <input type="range" id="pPeerVol" min="0" max="200" value="100">
+            <span><svg class="ic"><use href="#i-volume"/></svg> Громкость собеседника <b id="pPeerVolTxt">100%</b></span>
+            <input type="range" id="pPeerVol" min="0" max="200" value="100" aria-label="Громкость собеседника">
           </label>
         </div>
       </div>
@@ -111,34 +187,39 @@
 
     <div class="side">
       <div class="side-header">
-        <div class="logo small">📞 <b>ZVON</b>ochek</div>
-        <span class="ver-badge">v11</span>
-      </div>
-
-      <label>Ваше имя в звонке
-        <input id="name" maxlength="40" placeholder="Например, Алекс">
-      </label>
-
-      <div class="dev-grid">
-        <label>Микрофон<select id="pMicSel"></select></label>
-        <label>Камера<select id="pCamSel"></select></label>
-      </div>
-
-      <div class="invite">
-        <div class="invite-title">🔑 Зашифрованная ссылка для собеседника</div>
-        <div class="linkrow">
-          <input id="link" readonly>
-          <button id="btnCopy" class="btn">Копировать</button>
+        <div class="brand small">
+          <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use href="#i-logo"/></svg>
+          <div class="brand-name">ZVON<span>ochek</span></div>
         </div>
-        <div class="row">
-          <button id="btnShare" class="btn hidden">📤 Поделиться</button>
-          <button id="btnQr" class="btn">📱 QR-код</button>
-        </div>
-        <div id="qr" class="qr hidden"></div>
+        <button id="btnBackHome" class="btn ghost small" title="На главную"><svg class="ic"><use href="#i-arrow-left"/></svg><span class="lbl">Назад</span></button>
       </div>
 
-      <button id="btnJoin" class="btn primary big glow-btn">🚀 Войти в звонок</button>
-      <p id="preMsg" class="msg"></p>
+      <div class="side-body">
+        <label for="name">Ваше имя в звонке
+          <input id="name" maxlength="40" placeholder="Например, Алекс" autocomplete="nickname">
+        </label>
+
+        <div class="dev-grid">
+          <label>Микрофон<select id="pMicSel"></select></label>
+          <label>Камера<select id="pCamSel"></select></label>
+        </div>
+
+        <div class="invite">
+          <div class="invite-title"><svg class="ic"><use href="#i-lock"/></svg> Зашифрованная ссылка для собеседника</div>
+          <div class="linkrow">
+            <input id="link" readonly aria-label="Ссылка приглашения">
+            <button id="btnCopy" class="btn" title="Скопировать ссылку"><svg class="ic"><use href="#i-copy"/></svg><span class="lbl">Копировать</span></button>
+          </div>
+          <div class="row">
+            <button id="btnShare" class="btn hidden"><svg class="ic"><use href="#i-share"/></svg><span>Поделиться</span></button>
+            <button id="btnQr" class="btn"><svg class="ic"><use href="#i-qr"/></svg><span>QR-код</span></button>
+          </div>
+          <div id="qr" class="qr hidden"></div>
+        </div>
+
+        <button id="btnJoin" class="btn primary big glow-btn"><svg class="ic"><use href="#i-bell"/></svg><span>Войти в звонок</span></button>
+        <p id="preMsg" class="msg"></p>
+      </div>
     </div>
   </div>
 </section>
@@ -154,14 +235,12 @@
         <div class="avatar" id="peerAvatar">?</div>
       </div>
       <div id="peerNameTitle" class="peer-title">Ожидаем собеседника…</div>
-      <div id="waitText" class="wait-sub">Отправьте ссылку собеседнику 🔗</div>
+      <div id="waitText" class="wait-sub">Отправьте ссылку собеседнику</div>
 
-      <!-- Осциллограф / индикатор голоса -->
       <div id="voiceWave" class="voice-wave hidden">
         <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
       </div>
 
-      <!-- Карточка прогресса рукопожатия и пробития связи -->
       <div id="conn" class="conn">
         <div class="conn-top">
           <b id="connPct">0%</b>
@@ -170,111 +249,105 @@
         <div class="bar"><i id="connBar"></i></div>
         <div id="connMethod" class="conn-method"></div>
         <div class="conn-actions">
-          <button id="btnForceBridge" class="btn small accent-outline" title="Включить передачу голоса через сигнал без ожидания WebRTC/TURN">🛡️ Включить мост без TURN</button>
-          <button id="btnDiag" class="btn small">🩺 Диагностика</button>
+          <button id="btnForceBridge" class="btn small accent-outline" title="Включить передачу голоса через сигнал без ожидания WebRTC/TURN"><svg class="ic"><use href="#i-shield"/></svg><span>Мост без TURN</span></button>
+          <button id="btnDiag" class="btn small"><svg class="ic"><use href="#i-diag"/></svg><span>Диагностика</span></button>
         </div>
       </div>
     </div>
 
     <video id="local" autoplay playsinline muted></video>
-    <button id="unmuteHint" class="btn primary hidden">🔊 Нажмите, чтобы включить звук</button>
+    <button id="unmuteHint" class="btn primary hidden"><svg class="ic"><use href="#i-volume"/></svg><span>Включить звук</span></button>
   </div>
 
-  <!-- Верхний тактический статус-бар (HUD) -->
   <header class="topbar">
     <div class="tb-left">
-      <span id="status" class="pill">⏳ Подключение…</span>
-      <span id="timer" class="pill mono-pill hidden">00:00</span>
-      <span id="bridgeBadge" class="pill bridge-pill hidden" title="Голос передаётся через зашифрованный канал сигналинга (без TURN/UDP)">🛡️ Мост (Без TURN)</span>
+      <span id="status" class="pill pill-status"><svg class="ic"><use id="statusIcon" href="#i-loader"/></svg><span id="statusText">Подключение…</span></span>
+      <span id="timer" class="pill mono-pill hidden"><svg class="ic"><use href="#i-clock"/></svg><span id="timerText">00:00</span></span>
+      <span id="bridgeBadge" class="pill bridge-pill hidden" title="Голос передаётся через зашифрованный канал сигналинга (без TURN/UDP)"><svg class="ic"><use href="#i-shield"/></svg><span>Мост (без TURN)</span></span>
     </div>
     <div class="tb-right">
-      <button id="btnQuickAudio" class="pill" title="Быстрая настройка громкости (0–200%)">🔊 <span id="quickVolLabel">100%</span></button>
-      <span id="quality" class="pill hidden" title="Качество и маршрут связи"></span>
-      <button id="safety" class="pill hidden" title="Код безопасности E2EE"></button>
+      <button id="btnQuickAudio" class="pill pill-btn" title="Быстрая настройка громкости (0–200%)" aria-label="Быстрая настройка громкости"><svg class="ic"><use href="#i-volume"/></svg><span id="quickVolLabel">100%</span></button>
+      <span id="quality" class="pill hidden" aria-label="Качество связи"><svg class="ic"><use href="#i-wifi"/></svg><span id="qualityText"></span></span>
+      <button id="safety" class="pill pill-btn hidden" title="Код безопасности E2EE" aria-label="Код безопасности E2EE"><svg class="ic"><use href="#i-shield"/></svg><span id="safetyPill"></span></button>
     </div>
   </header>
 
-  <!-- Всплывающий микшер громкости прямо в звонке (как в Discord) -->
   <div id="quickAudioPop" class="quick-audio-pop hidden">
     <div class="qa-head">
-      <b>🎛️ Аудио-микшер звонка</b>
-      <button class="x" data-close="quickAudioPop">✕</button>
+      <b><svg class="ic"><use href="#i-volume"/></svg> Аудио-микшер звонка</b>
+      <button class="x" data-close="quickAudioPop" aria-label="Закрыть"><svg class="ic"><use href="#i-close"/></svg></button>
     </div>
     <label class="slider-lbl">
-      <span>🔊 Громкость собеседника: <b id="qaPeerVolTxt">100%</b></span>
-      <input type="range" id="qaPeerVol" min="0" max="200" value="100">
+      <span>Громкость собеседника <b id="qaPeerVolTxt">100%</b></span>
+      <input type="range" id="qaPeerVol" min="0" max="200" value="100" aria-label="Громкость собеседника">
     </label>
     <label class="slider-lbl">
-      <span>🎙️ Усиление моего микрофона: <b id="qaMicVolTxt">100%</b></span>
-      <input type="range" id="qaMicVol" min="0" max="200" value="100">
+      <span>Усиление микрофона <b id="qaMicVolTxt">100%</b></span>
+      <input type="range" id="qaMicVol" min="0" max="200" value="100" aria-label="Усиление микрофона">
     </label>
     <div class="qa-meter-row">
-      <span>Уровень микрофона:</span>
+      <span>Уровень микрофона</span>
       <div class="vad-bar-wrap small">
         <div id="qaVadBar" class="vad-bar"></div>
         <div id="qaVadGateMark" class="vad-gate-mark"></div>
       </div>
     </div>
     <div class="qa-toggles">
-      <label class="check"><input type="checkbox" id="qaBoost"> Выравнивание тихого голоса (Compressor)</label>
-      <label class="check"><input type="checkbox" id="qaBridgeMode"> 🛡️ Принудительный мост без TURN (Анти-блок)</label>
+      <label class="check"><input type="checkbox" id="qaBoost"> Выравнивание тихого голоса</label>
+      <label class="check"><input type="checkbox" id="qaBridgeMode"> Принудительный мост без TURN</label>
     </div>
-    <button id="qaMoreSettings" class="btn small full-w">⚙️ Все настройки звука и устройств…</button>
+    <button id="qaMoreSettings" class="btn small full-w"><svg class="ic"><use href="#i-settings"/></svg><span>Все настройки звука и устройств</span></button>
   </div>
 
-  <!-- Нижняя панель управления (Thumb-Zone / Discord Dock) -->
   <nav class="controls">
-    <button id="cMic" class="round" title="Микрофон (Вкл/Выкл)">🎙️</button>
-    <button id="cDeaf" class="round" title="Оглушить звук (Deafen — выкл. звук и микрофон)">🎧</button>
-    <button id="cPtt" class="ptt-btn hidden" title="Удерживайте для передачи голоса (или клавиша Пробел)">📻 Держите для речи</button>
-    <button id="cCam" class="round" title="Камера">📷</button>
-    <button id="cScreen" class="round" title="Демонстрация экрана">🖥️</button>
-    <button id="cChat" class="round" title="Чат и передача файлов">💬<span id="unread" class="badge hidden">0</span></button>
-    <button id="cInvite" class="round" title="Ссылка и QR-код">🔗</button>
-    <button id="cSettings" class="round" title="Настройки голоса и связи">⚙️</button>
-    <button id="cHang" class="round red" title="Завершить звонок">📵</button>
+    <button id="cMic" class="round" title="Микрофон" aria-label="Микрофон"><svg class="ic"><use href="#i-mic"/></svg><span class="lbl">Микрофон</span></button>
+    <button id="cDeaf" class="round" title="Оглушить звук" aria-label="Оглушить звук"><svg class="ic"><use href="#i-headphones"/></svg><span class="lbl">Звук</span></button>
+    <button id="cPtt" class="ptt-btn hidden" title="Удерживайте для передачи голоса (или Пробел)"><svg class="ic"><use href="#i-radio"/></svg><span id="pttLabel">Держите для речи</span></button>
+    <button id="cCam" class="round" title="Камера" aria-label="Камера"><svg class="ic"><use href="#i-cam"/></svg><span class="lbl">Камера</span></button>
+    <button id="cScreen" class="round" title="Демонстрация экрана" aria-label="Демонстрация экрана"><svg class="ic"><use href="#i-screen"/></svg><span class="lbl">Экран</span></button>
+    <button id="cChat" class="round" title="Чат и файлы" aria-label="Чат"><svg class="ic"><use href="#i-chat"/></svg><span class="lbl">Чат</span><span id="unread" class="badge hidden">0</span></button>
+    <button id="cInvite" class="round" title="Ссылка и QR-код" aria-label="Приглашение"><svg class="ic"><use href="#i-link"/></svg><span class="lbl">Ссылка</span></button>
+    <button id="cSettings" class="round" title="Настройки" aria-label="Настройки"><svg class="ic"><use href="#i-settings"/></svg><span class="lbl">Настройки</span></button>
+    <button id="cHang" class="round red" title="Завершить звонок" aria-label="Завершить звонок"><svg class="ic"><use href="#i-hangup"/></svg><span class="lbl">Выйти</span></button>
   </nav>
 
-  <!-- Боковая панель чата и передачи файлов -->
   <aside id="chat" class="panel hidden">
     <div class="panel-head">
-      <span>💬 Зашифрованный чат и файлы</span>
-      <button class="x" data-close="chat">✕</button>
+      <span><svg class="ic"><use href="#i-chat"/></svg> Зашифрованный чат</span>
+      <button class="x" data-close="chat" aria-label="Закрыть"><svg class="ic"><use href="#i-close"/></svg></button>
     </div>
-    <div id="msgs" class="msgs"></div>
+    <div id="msgs" class="msgs"><div id="chatEmpty" class="chat-empty"><svg class="ic lg"><use href="#i-lock"/></svg><b>Сообщения защищены</b><span>Текст и файлы идут напрямую между браузерами. Ни сервер, ни брокеры их не видят.</span></div></div>
     <form id="chatForm" class="chatform">
-      <label class="attach" title="Отправить файл (напрямую P2P)">📎<input id="fileInput" type="file" multiple hidden></label>
-      <input id="chatInput" autocomplete="off" placeholder="Написать сообщение…">
-      <button class="btn primary">➤</button>
+      <label class="attach" title="Отправить файл (напрямую P2P)" aria-label="Прикрепить файл"><svg class="ic"><use href="#i-attach"/></svg><input id="fileInput" type="file" multiple hidden></label>
+      <input id="chatInput" autocomplete="off" placeholder="Написать сообщение…" aria-label="Сообщение">
+      <button class="btn primary" aria-label="Отправить"><svg class="ic"><use href="#i-send"/></svg></button>
     </form>
   </aside>
 </section>
 
-<!-- Модальное окно -->
 <div id="modal" class="modal hidden">
   <div class="card">
-    <button class="x" data-close="modal">✕</button>
+    <button class="x" data-close="modal" aria-label="Закрыть"><svg class="ic"><use href="#i-close"/></svg></button>
     <div id="modalBody"></div>
   </div>
 </div>
 
-<div id="toast" class="toast hidden"></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
-<!-- Шаблон: Настройки голоса, видео и связи (Discord-стиль) -->
 <template id="tplSettings">
-  <h3>🎛️ Настройки голоса и связи</h3>
+  <h3><svg class="ic"><use href="#i-settings"/></svg> Настройки голоса и связи</h3>
 
   <div class="settings-sec">
-    <h4>1. Устройства и громкость (0–200%)</h4>
+    <h4>1. Устройства и громкость</h4>
     <label>Микрофон<select id="sMic"></select></label>
     <label class="slider-lbl">
-      <span>Усиление микрофона: <b id="sMicVolTxt">100%</b></span>
+      <span>Усиление микрофона <b id="sMicVolTxt">100%</b></span>
       <input type="range" id="sMicVol" min="0" max="200" value="100">
     </label>
 
-    <label id="sSpkWrap">Устройство вывода (Динамик / Наушники)<select id="sSpk"></select></label>
+    <label id="sSpkWrap">Устройство вывода<select id="sSpk"></select></label>
     <label class="slider-lbl">
-      <span>Громкость собеседника (Audio Boost): <b id="sPeerVolTxt">100%</b></span>
+      <span>Громкость собеседника <b id="sPeerVolTxt">100%</b></span>
       <input type="range" id="sPeerVol" min="0" max="200" value="100">
     </label>
 
@@ -282,15 +355,15 @@
   </div>
 
   <div class="settings-sec">
-    <h4>2. Режим ввода и чувствительность (как в Discord)</h4>
+    <h4>2. Режим ввода и чувствительность</h4>
     <div class="seg-row">
-      <label class="seg-opt"><input type="radio" name="sInputMode" id="sModeVad" value="vad"> 🎙️ По голосу (VAD)</label>
-      <label class="seg-opt"><input type="radio" name="sInputMode" id="sModePtt" value="ptt"> 📻 Рация (Нажми и говори)</label>
+      <label class="seg-opt"><input type="radio" name="sInputMode" id="sModeVad" value="vad"> По голосу (VAD)</label>
+      <label class="seg-opt"><input type="radio" name="sInputMode" id="sModePtt" value="ptt"> Рация (PTT)</label>
     </div>
 
     <div id="sVadControls">
       <label class="slider-lbl">
-        <span>Порог активации голосом (отсечение шума): <b id="sVadGateTxt">-45 дБ</b></span>
+        <span>Порог активации голосом <b id="sVadGateTxt">-45 дБ</b></span>
         <input type="range" id="sVadGate" min="-75" max="-15" value="-45">
       </label>
     </div>
@@ -300,68 +373,67 @@
         <div id="sVadBar" class="vad-bar"></div>
         <div id="sVadGateMark" class="vad-gate-mark"></div>
       </div>
-      <button id="sTestMic" class="btn small">🔊 Проверить</button>
+      <button id="sTestMic" class="btn small"><svg class="ic"><use href="#i-volume"/></svg><span class="lbl">Проверить</span></button>
     </div>
   </div>
 
   <div class="settings-sec">
-    <h4>3. Обработка звука и кодек Opus</h4>
-    <label class="check"><input type="checkbox" id="sNoise"> Шумоподавление + фильтр гула (Noise Suppression)</label>
-    <label class="check"><input type="checkbox" id="sEcho"> Эхоподавление (Echo Cancellation)</label>
-    <label class="check"><input type="checkbox" id="sAgc"> Авторегулировка уровня (Auto Gain Control)</label>
-    <label class="check"><input type="checkbox" id="sComp"> Выравнивание тихого голоса собеседника (Compressor)</label>
+    <h4>3. Обработка звука и Opus</h4>
+    <label class="check"><input type="checkbox" id="sNoise"> Шумоподавление + фильтр гула</label>
+    <label class="check"><input type="checkbox" id="sEcho"> Эхоподавление</label>
+    <label class="check"><input type="checkbox" id="sAgc"> Авторегулировка уровня</label>
+    <label class="check"><input type="checkbox" id="sComp"> Компрессор тихого голоса</label>
 
     <label>Профиль битрейта Opus (FEC + DTX)
       <select id="sBitrate">
-        <option value="12">📡 Экстрим 12 Кбит/с (для глушилок и слабой сети)</option>
-        <option value="24">🟢 Стандарт 24 Кбит/с (оптимально + защита от потерь)</option>
-        <option value="48">🎧 Высокое качество 48 Кбит/с (чистый голос)</option>
-        <option value="64">💎 Студия HD 64 Кбит/с (максимальная детализация)</option>
+        <option value="12">Экстрим 12 Кбит/с — для глушилок и слабой сети</option>
+        <option value="24">Стандарт 24 Кбит/с — оптимально + FEC</option>
+        <option value="48">Высокое качество 48 Кбит/с — чистый голос</option>
+        <option value="64">Студия HD 64 Кбит/с — максимум детализации</option>
       </select>
     </label>
   </div>
 
   <div class="settings-sec">
-    <h4>4. Обход блокировок и маршрут сети</h4>
+    <h4>4. Обход блокировок и маршрут</h4>
     <label>Режим соединения
       <select id="sNetMode">
-        <option value="auto">⚡ Авто (P2P + Авто-мост через сигнал без TURN при блокировках)</option>
-        <option value="bridge">🛡️ Только Мост через Сигналинг (работает вообще без TURN и без UDP)</option>
-        <option value="relay">🕵️ Скрыть мой IP (только через TURN-ретранслятор)</option>
+        <option value="auto">Авто — P2P + мост при блокировке</option>
+        <option value="bridge">Только мост через сигналинг (без TURN/UDP)</option>
+        <option value="relay">Скрыть IP — только через TURN</option>
       </select>
     </label>
     <div id="sTransports" class="mono status-box"></div>
-    <button id="sDiag" class="btn full-w">🩺 Открыть журнал диагностики</button>
+    <button id="sDiag" class="btn full-w"><svg class="ic"><use href="#i-diag"/></svg><span>Открыть журнал диагностики</span></button>
   </div>
 </template>
 
-<!-- Шаблон: Код безопасности -->
 <template id="tplSafety">
-  <h3>🛡️ Криптографический код сверки</h3>
-  <p>Сравните эти 5 символов с собеседником голосом. Если они <b>совпадают</b>, соединение защищено сквозным шифрованием и никто не перехватывает звонок.</p>
+  <h3><svg class="ic"><use href="#i-shield"/></svg> Криптографический код сверки</h3>
+  <p>Сравните эти символы с собеседником голосом. Если они <b>совпадают</b>, соединение защищено сквозным шифрованием и посредника (MITM) нет.</p>
   <div id="safetyEmoji" class="safety-emoji"></div>
   <div id="safetyDigits" class="safety-digits"></div>
 </template>
 
-<!-- Шаблон: Диагностика -->
 <template id="tplDiag">
-  <h3>🩺 Диагностика соединения</h3>
+  <h3><svg class="ic"><use href="#i-diag"/></svg> Диагностика соединения</h3>
   <div id="diagStats" class="mono status-box"></div>
   <h4>Журнал событий</h4>
   <pre id="diagLog" class="mono diaglog"></pre>
-  <button id="diagCopy" class="btn primary full-w">📋 Скопировать отчёт</button>
+  <button id="diagCopy" class="btn primary full-w"><svg class="ic"><use href="#i-copy"/></svg><span>Скопировать отчёт</span></button>
 </template>
 
-<!-- Шаблон: Пригласить -->
 <template id="tplInvite">
-  <h3>🔗 Пригласить собеседника</h3>
-  <p>Отправьте эту ссылку собеседнику. Секретный ключ шифрования находится после символа <code>#</code> и никогда не передаётся на сервер.</p>
-  <div class="linkrow"><input id="iLink" readonly><button id="iCopy" class="btn">Копировать</button></div>
+  <h3><svg class="ic"><use href="#i-link"/></svg> Пригласить собеседника</h3>
+  <p>Отправьте эту ссылку собеседнику. Секретный ключ находится после символа <code>#</code> и никогда не передаётся на сервер.</p>
+  <div class="linkrow"><input id="iLink" readonly><button id="iCopy" class="btn"><svg class="ic"><use href="#i-copy"/></svg><span class="lbl">Копировать</span></button></div>
   <div id="iQr" class="qr"></div>
 </template>
 
+<noscript><p style="padding:24px;text-align:center">Для звонков ZVONochek нужен JavaScript.</p></noscript>
+
 <script src="vendor/mqtt.min.js"></script>
 <script src="vendor/qrcode.js"></script>
-<script type="module" src="app.js?v=11"></script>
+<script type="module" src="app.js?v=12"></script>
 </body>
 </html>

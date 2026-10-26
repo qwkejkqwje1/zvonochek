@@ -4,8 +4,8 @@
 //   3) Cloudflare Worker HTTP-поллинг + POST (работает даже при полной блокировке WebSocket)
 //   4) Публичные Nostr-реле поверх WSS (порт 443, подписанные эфемерные события)
 // Каждое сообщение сжимается и шифруется AES-256-GCM; дубли отсекаются по mid.
-import { seal, open } from './crypto.js?v=11';
-import { schnorr, utils } from './vendor/secp256k1.js?v=11';
+import { seal, open } from './crypto.js?v=12';
+import { schnorr, utils } from './vendor/secp256k1.js?v=12';
 
 const hexs = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 const NOSTR_KIND = 29333; // эфемерные события: реле их не хранят, только пересылают
@@ -36,7 +36,8 @@ export class Signaling {
     this.wsState = this.workerUrl ? 'connecting' : 'off';
     this.httpState = 'off';
     this.pollTimer = null;
-    this.lastPollTs = Date.now() - 35_000;
+    // Стартуем без предположений о часах устройства: сервер сам сообщит своё время.
+    this.lastPollTs = 0;
     this.seen = new Map();
     this.closed = false;
     this.onTransportUp = () => {};
@@ -206,10 +207,13 @@ export class Signaling {
           }
           if (Array.isArray(j.messages)) {
             for (const item of j.messages) {
-              if (item.ts > this.lastPollTs) this.lastPollTs = item.ts;
+              if (Number.isFinite(item.ts) && item.ts > this.lastPollTs) this.lastPollTs = item.ts;
               if (item.data) this._recv(item.data, 'worker-http');
             }
           }
+          // Курсор ведём по серверным часам — иначе расхождение времени устройства
+          // заставляет нас либо запрашивать будущее (пусто), либо перечитывать прошлое.
+          if (Number.isFinite(j.now) && j.now > this.lastPollTs) this.lastPollTs = j.now;
         }
       } catch {
         if (this.httpState === 'up') {
@@ -328,12 +332,55 @@ export class Signaling {
     return JSON.stringify(['EVENT', e]);
   }
 
+  // Голосовой чанк: шлём по 1–2 быстрым каналам, без подписи Nostr на каждый чанк
+  // (schnorr-подпись на 2–3 чанка в секунду съедает батарею и процессор телефона).
+  _sendVoice(data) {
+    let sent = false;
+    for (const c of this.clients.slice(0, 2)) {
+      if (!c.connected) continue;
+      try {
+        c.publish(this.mqttTopic, data, { qos: 0 });
+        sent = true;
+      } catch {}
+    }
+    const ws = this.ws;
+    if (ws?.readyState === 1) {
+      try {
+        ws.send(data);
+        ws._bytes += data.length;
+        this._budget(ws);
+        sent = true;
+      } catch {}
+    }
+    if (!sent && this.workerUrl) {
+      this._httpPost(data);
+      sent = true;
+    }
+    if (!sent) {
+      const relay = [...this.nostr.values()].find((w) => w?.readyState === 1);
+      if (relay) {
+        this._nostrEvent(data)
+          .then((ev) => {
+            relay.send(ev);
+            relay._bytes += ev.length;
+            this._nbudget(relay, relay);
+          })
+          .catch(() => {});
+      }
+    }
+  }
+
   // Веерная отправка во все активные каналы одновременно
-  async send(msg) {
+  async send(msg, opts = {}) {
     if (this.closed) return;
     const full = { ...msg, from: this.selfId, inst: this.inst, mid: rid(), ts: Date.now() };
     this.seen.set(full.mid, full.ts);
     const data = await seal(this.key, full, this.topic);
+
+    if (msg.type === 'voice' || opts.voice) {
+      this._sendVoice(data);
+      return;
+    }
 
     // А) MQTT-брокеры
     for (const c of this.clients) {
@@ -395,11 +442,18 @@ export class Signaling {
 
   async _recv(raw, via) {
     if (!raw || typeof raw !== 'string' || raw.length > 220000) return;
-    const m = await open(this.key, raw, this.topic);
+    let m;
+    try {
+      m = await open(this.key, raw, this.topic);
+    } catch {
+      return;
+    }
     if (!m || m.from === this.selfId) return;
     if (m.to && m.to !== this.selfId) return;
     if (m.toInst && m.toInst !== this.inst) return;
-    if (Math.abs(Date.now() - m.ts) > 12 * 3600 * 1000) return;
+    // Раньше здесь отбрасывались пакеты старше 12 часов — при сбитых часах
+    // устройства это ломало соединение целиком. Свежесть ограничивает сам транспорт.
+    if (!m.mid) return;
     if (this.seen.has(m.mid)) return;
     this.seen.set(m.mid, Date.now());
     if (this.seen.size > 2500) {
