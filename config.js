@@ -50,11 +50,32 @@ export const CONFIG = {
   // TURN от Metered.ca (если используется динамический API-ключ на клиенте)
   METERED: { domain: '', apiKey: '' },
 
-  // v14: СТАТИЧЕСКИХ TURN-КРЕДОВ В КЛИЕНТЕ БОЛЬШЕ НЕТ.
-  // Раньше здесь лежали логин/пароль Metered и ExpressTURN в открытом виде:
-  // их видел любой, кто открыл исходники, и мог жечь чужую квоту.
-  // Теперь TURN только эфемерный и только из собственного Worker (/turn,
-  // короткоживущие креды), и запрашивается ЛЕНИВО — лишь когда прямое
-  // соединение и мост не справились. Нет Worker-TURN — проект честно
-  // работает без TURN: direct P2P + голосовой мост через сигналинг.
+  // v14, решение владельца от 27.10.2026: статические креды ВРЕМЕННО возвращены
+  // как резервный источник TURN — чтобы при необходимости звонки могли ходить
+  // через них, пока в Worker не настроены эфемерные креды. Используются только
+  // ЛЕНИВО (ensureTurnLoaded), на старте звонка трафик через них не идёт.
+  // Известный компромисс: креды видны в исходниках публичного репозитория.
+  // Запасные ICE/TURN-серверы (с приоритетом порта 443 и TCP/TLS для обхода DPI)
+  EXTRA_ICE_SERVERS: [
+    { urls: 'stun:stun.relay.metered.ca:80' },
+    {
+      urls: [
+        'turns:global.relay.metered.ca:443?transport=tcp',
+        'turn:global.relay.metered.ca:443',
+        'turn:global.relay.metered.ca:80?transport=tcp',
+        'turn:global.relay.metered.ca:80',
+      ],
+      username: 'b0cc17f06cf20504ab5cd581',
+      credential: 'YSV26ACRA6JxZ8TQ',
+    },
+    // Запасной TURN: ExpressTURN
+    {
+      urls: [
+        'turn:free.expressturn.com:3478?transport=tcp',
+        'turn:free.expressturn.com:3478',
+      ],
+      username: '000000002107165853',
+      credential: '3T1HHXm3M1UWIyZ3pOzBv5EwRbI=',
+    },
+  ],
 };

@@ -1007,6 +1007,14 @@ async function fetchTurnServers() {
     );
   }
   await Promise.all(jobs);
+  // Резерв владельца: статические креды из config.js (возвращены решением
+  // от 27.10.2026). Попадают сюда, а не в стартовый ICE, поэтому трафик через
+  // них идёт только при реальной необходимости (ленивая догрузка).
+  const stat = (CONFIG.EXTRA_ICE_SERVERS || []).filter(isTurn);
+  if (stat.length) {
+    out.push(...stat);
+    info.push('Статический резерв из config: есть');
+  }
   S.turnInfo = info.join(', ') || 'источники TURN не настроены';
   return out;
 }
