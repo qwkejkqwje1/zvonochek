@@ -1,8 +1,8 @@
-import { CONFIG } from './config.js?v=18';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=18';
-import { Signaling } from './signaling.js?v=18';
+import { CONFIG } from './config.js?v=19';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=19';
+import { Signaling } from './signaling.js?v=19';
 
-export const APP_VERSION = 18;
+export const APP_VERSION = 19;
 export const APP_BUILD = '2026-10-27';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -17,7 +17,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=18').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=19').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -66,6 +66,7 @@ const S = {
   pc: null,
   peer: null,
   polite: false,
+  peerDialect: 'plain', // 'g' — если основной собеседник говорит с нами групповым протоколом (клиент v16)
   makingOffer: false,
   ignoreOffer: false,
   pendingCands: [],
@@ -1588,8 +1589,10 @@ async function onSignal(m) {
   // Рассинхрон ролей при одновременном входе троих: собеседник может считать
   // нас «лишним» и говорить групповым протоколом (g_desc/g_cand) с нами как
   // с основным — переводим в основной протокол и обрабатываем как обычно.
-  if (isPrimaryPeer && m.type === 'g_desc') m = { ...m, type: 'desc' };
-  else if (isPrimaryPeer && m.type === 'g_cand') m = { ...m, type: 'cand' };
+  if (isPrimaryPeer && (m.type === 'g_desc' || m.type === 'g_cand')) {
+    noteGDialect();
+    m = { ...m, type: m.type === 'g_desc' ? 'desc' : 'cand' };
+  }
   // (v18: обратный перевод не нужен — group.js говорит и понимает desc/cand.)
   switch (m.type) {
     case 'hello':
@@ -1644,6 +1647,11 @@ async function onSignal(m) {
         onIncomingChat(m.text);
       }
       break;
+    case 'g_hi':
+      // Основной собеседник отвечает групповым протоколом (у него клиент,
+      // где мы — mesh-участник): запоминаем диалект и отвечаем тем же.
+      if (S.peer?.id === m.from && S.peer.inst === m.inst) noteGDialect();
+      break;
     case 'g_chat':
       if (typeof m.text === 'string') onIncomingChat(m.text, m.name);
       break;
@@ -1693,6 +1701,7 @@ function acceptPeer(m) {
 function setPeer(m) {
   S.peer = { id: m.from, inst: m.inst, name: m.name || 'Собеседник', seen: Date.now() };
   S.polite = selfId < m.from;
+  S.peerDialect = 'plain';
   S.gen = 0;
   S.countedOk = false;
   stats.tries++;
@@ -1831,7 +1840,7 @@ function createPC() {
       return;
     }
     S.cands.local[candidate.type] = (S.cands.local[candidate.type] || 0) + 1;
-    S.sig.send({ type: 'cand', ...to(), cand: candidate.toJSON() });
+    S.sig.send({ type: candMsgType(), ...to(), cand: candidate.toJSON() });
     progressDetail();
   };
   pc.oniceconnectionstatechange = () => {
@@ -1881,6 +1890,23 @@ function waitGathering(pc, ms) {
 const sdpCands = (sdp) => sdp.match(/^a=candidate:.*$/gm) || [];
 
 // Двухэтапная отправка SDP: быстрый старт через 450 мс + полный пакет кандидатов после досбора
+// Собеседник на клиенте v16 считает нас mesh-участником и говорит со своим
+// group.js (g_desc/g_cand), а наши обычные desc/cand его маршрутизация просто
+// выбрасывает. Заметив его диалект, отвечаем тем же — иначе пара висит в
+// цикле offer'ов без единого answer (полевые тесты v16–v18).
+function noteGDialect() {
+  if (S.peerDialect === 'g') return;
+  S.peerDialect = 'g';
+  log('Собеседник говорит групповым протоколом — отвечаем g_desc/g_cand');
+  const pc = S.pc;
+  if (pc?.localDescription && pc.signalingState === 'have-local-offer') {
+    const d = { type: pc.localDescription.type, sdp: tuneOpusSdp(pc.localDescription.sdp) };
+    S.sig?.send({ type: 'g_desc', ...to(), desc: d });
+  }
+}
+const descMsgType = () => (S.peerDialect === 'g' ? 'g_desc' : 'desc');
+const candMsgType = () => (S.peerDialect === 'g' ? 'g_cand' : 'cand');
+
 async function sendDesc(pc) {
   await waitGathering(pc, 450);
   if (pc !== S.pc || !pc.localDescription) return;
@@ -1889,7 +1915,7 @@ async function sendDesc(pc) {
     sdp: tuneOpusSdp(pc.localDescription.sdp),
   };
   S.ackReceived = false;
-  S.sig.send({ type: 'desc', ...to(), desc });
+  S.sig.send({ type: descMsgType(), ...to(), desc });
   log(
     `Отправлен ${desc.type === 'offer' ? 'запрос (offer)' : 'ответ (answer)'} (${
       sdpCands(desc.sdp).length
@@ -1907,7 +1933,7 @@ async function sendDesc(pc) {
         sdp: tuneOpusSdp(pc.localDescription.sdp),
       };
       if (sdpCands(fullDesc.sdp).length > sdpCands(desc.sdp).length) {
-        S.sig.send({ type: 'desc', ...to(), desc: fullDesc });
+        S.sig.send({ type: descMsgType(), ...to(), desc: fullDesc });
       }
     }
   }
@@ -1923,7 +1949,7 @@ function scheduleResend(pc, desc, n) {
       ? { type: pc.localDescription.type, sdp: tuneOpusSdp(pc.localDescription.sdp) }
       : desc;
     log(`Повтор отправки ${latestDesc.type} (#${n})`);
-    S.sig.send({ type: 'desc', ...to(), desc: latestDesc });
+    S.sig.send({ type: descMsgType(), ...to(), desc: latestDesc });
     scheduleResend(pc, latestDesc, n + 1);
   }, 2300);
 }
