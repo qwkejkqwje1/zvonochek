@@ -1,4 +1,4 @@
-// ZVONochek Worker v16 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
+// ZVONochek Worker v17 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
 // Worker пересылает только зашифрованные сообщения (AES-256-GCM) и не знает ключей комнат.
 
 const JSON_HEADERS = {
@@ -86,7 +86,7 @@ export default {
         (env.METERED_DOMAIN && env.METERED_API_KEY) ||
         (env.TURN_URLS && env.TURN_USERNAME)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 16, turn: hasTurn, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 17, turn: hasTurn, ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {

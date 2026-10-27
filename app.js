@@ -1,8 +1,8 @@
-import { CONFIG } from './config.js?v=16';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=16';
-import { Signaling } from './signaling.js?v=16';
+import { CONFIG } from './config.js?v=17';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=17';
+import { Signaling } from './signaling.js?v=17';
 
-export const APP_VERSION = 16;
+export const APP_VERSION = 17;
 export const APP_BUILD = '2026-10-27';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -17,7 +17,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=16').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=17').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -1578,6 +1578,17 @@ async function onSignal(m) {
       return;
     }
     S.groupHook?.onSignal?.(m);
+    return;
+  }
+  // Рассинхрон ролей при одновременном входе троих: собеседник может считать
+  // нас «лишним» и говорить групповым протоколом (g_desc/g_cand) с нами как
+  // с основным — переводим в основной протокол и обрабатываем как обычно.
+  if (isPrimaryPeer && m.type === 'g_desc') m = { ...m, type: 'desc' };
+  else if (isPrimaryPeer && m.type === 'g_cand') m = { ...m, type: 'cand' };
+  // Обратный случай: собеседник говорит с нами основным протоколом (desc/cand),
+  // а у нас он числится групповым — переводим в групповой и отдаём в group.js.
+  if (S.peer && !isPrimaryPeer && !primaryStale && (m.type === 'desc' || m.type === 'cand')) {
+    S.groupHook?.onSignal?.({ ...m, type: m.type === 'desc' ? 'g_desc' : 'g_cand' });
     return;
   }
   switch (m.type) {
