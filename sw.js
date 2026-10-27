@@ -1,13 +1,14 @@
-// ZVONochek Service Worker v14 — мгновенный старт, офлайн-оболочка и безопасные обновления
-const CACHE_NAME = 'zvonochek-v14';
+// ZVONochek Service Worker v16 — мгновенный старт, офлайн-оболочка и безопасные обновления
+const CACHE_NAME = 'zvonochek-v16';
 const CORE = [
   './',
   './index.html',
-  './style.css?v=14',
-  './app.js?v=14',
-  './signaling.js?v=14',
-  './crypto.js?v=14',
-  './config.js?v=14',
+  './style.css?v=16',
+  './app.js?v=16',
+  './group.js?v=16',
+  './signaling.js?v=16',
+  './crypto.js?v=16',
+  './config.js?v=16',
   './icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -16,7 +17,7 @@ const CORE = [
   './manifest.webmanifest',
   './vendor/mqtt.min.js',
   './vendor/qrcode.js',
-  './vendor/secp256k1.js?v=14',
+  './vendor/secp256k1.js?v=16',
 ];
 
 self.addEventListener('install', (e) => {

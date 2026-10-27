@@ -1,4 +1,4 @@
-// ZVONochek v14 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
+// ZVONochek v16 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
 export const CONFIG = {
   APP_NAME: 'ZVONochek',
 

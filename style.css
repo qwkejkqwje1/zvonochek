@@ -2061,3 +2061,48 @@ label.disabled select {
   letter-spacing: 0.06em;
   color: var(--faint);
 }
+
+/* ---------- v16: групповой режим — плитки участников ---------- */
+.tiles {
+  position: absolute;
+  top: calc(70px + env(safe-area-inset-top));
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 4;
+  max-height: calc(100dvh - 240px);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.tiles::-webkit-scrollbar { display: none; }
+.tile {
+  position: relative;
+  width: 148px;
+  aspect-ratio: 4 / 3;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  background: #0d1020;
+  box-shadow: var(--shadow-sm);
+  flex: none;
+}
+.tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tile-name {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 11px var(--font);
+  color: #fff;
+  background: rgba(5, 6, 12, 0.62);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+@media (max-width: 780px) {
+  .tiles { top: calc(64px + env(safe-area-inset-top)); right: 8px; }
+  .tile { width: 104px; border-radius: 12px; }
+}

@@ -1,8 +1,8 @@
-import { CONFIG } from './config.js?v=14';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=14';
-import { Signaling } from './signaling.js?v=14';
+import { CONFIG } from './config.js?v=16';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=16';
+import { Signaling } from './signaling.js?v=16';
 
-export const APP_VERSION = 14;
+export const APP_VERSION = 16;
 export const APP_BUILD = '2026-10-27';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -17,7 +17,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=14').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=16').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -136,6 +136,8 @@ const S = {
 
   ice: [],
   hasTurn: false,
+  roster: new Map(), // inst -> {id, name, seen} все участники комнаты (для группового режима)
+  groupHook: null, // сюда регистрируется group.js (mesh для 3+ участников)
   ctrl: null,
   fileCh: null,
   sendQueue: [],
@@ -701,6 +703,7 @@ async function fillDevices(prefix = 'p') {
 }
 
 async function setSendTrack(kind, track) {
+  S.groupHook?.refreshTracks?.();
   if (!S.pc) return;
   const tr = S.pc.getTransceivers().find((t) => !t.stopped && t.receiver.track?.kind === kind);
   if (tr) {
@@ -969,7 +972,7 @@ async function loadIce() {
   S.stunOnlyIce = servers;
   S.turnLoaded = false;
   S.hasTurn = false;
-  S.turnInfo = 'ленивый режим: TURN не запрашивался (экономия квоты)';
+  S.turnInfo = 'TURN не запрашивался (экономия квоты)';
   return servers;
 }
 
@@ -1180,6 +1183,10 @@ function hello() {
 // ---------- Аварийный Аудио-Мост через Сигналинг (работает вообще без TURN и без UDP!) ----------
 function activateBridge(reason = 'Активирован аудио-мост через сигналинг') {
   if (!S.peer || S.bridgeActive) return;
+  if (rosterCount() > 1) {
+    log('Мост недоступен в групповом звонке (3+ участника)');
+    return;
+  }
   S.bridgeActive = true;
   S.bridgeNextPlayTime = 0;
   clearTimeout(S.bridgeAutoTimer);
@@ -1242,6 +1249,10 @@ function getSupportedAudioMime() {
 // (Chromium). Собеседник без WebCodecs честно получает мост 1.0: формат
 // выбирается по флагу bc из hello/hi, а не по нашему желанию.
 function startBridgeRecorder() {
+  if (!S.bridgeCounted) {
+    S.bridgeCounted = true;
+    countRoute('bridge');
+  }
   if (S.peer?.bridgeCodecs && webCodecsBridgeSupported() && startBridge2()) {
     S.bridgeMode = 'webcodecs';
     return;
@@ -1532,9 +1543,43 @@ const viaName = (v) =>
   ({ mqtt: 'MQTT', worker: 'Worker WS', 'worker-http': 'Worker HTTP', nostr: 'Nostr' }[v] || v);
 const to = () => ({ to: S.peer.id, toInst: S.peer.inst, gen: S.gen });
 
+const MAX_REMOTE_PEERS = 5; // комната: я + основной собеседник + до 4 групповых (mesh)
+function rosterCount() {
+  const now = Date.now();
+  let n = 0;
+  for (const [k, v] of S.roster) {
+    if (now - v.seen > 90000) S.roster.delete(k);
+    else n++;
+  }
+  return n;
+}
+
 async function onSignal(m) {
   if (S.dead.has(m.inst)) return;
   S.via[m.via] = (S.via[m.via] || 0) + 1;
+  // Ростер комнаты: запоминаем всех, кого слышим (нужно для группового режима,
+  // группового чата и отключения моста при 3+ участниках).
+  if (m.from && m.inst && m.from !== selfId) {
+    const prev = S.roster.get(m.inst);
+    S.roster.set(m.inst, { id: m.from, name: m.name || prev?.name || 'Участник', seen: Date.now() });
+    if (S.bridgeActive && rosterCount() > 1) {
+      log('В комнате больше двух участников — мост отключён (групповой режим)');
+      stopBridge();
+    }
+  }
+  // Групповой трафик: сообщения не от основного собеседника уходят в group.js.
+  const isPrimaryPeer = S.peer && S.peer.id === m.from && S.peer.inst === m.inst;
+  const primaryStale =
+    S.peer && !isPrimaryPeer && S.pc?.connectionState !== 'connected' && !S.bridgeActive && Date.now() - S.peer.seen > 30000;
+  if (S.peer && !isPrimaryPeer && !primaryStale && ['hello', 'hi', 'g_hi', 'g_desc', 'g_cand'].includes(m.type)) {
+    if (m.type === 'hello' && !S.roster.has(m.inst)) return;
+    if (m.type === 'hello' && rosterCount() > MAX_REMOTE_PEERS) {
+      S.sig?.send({ type: 'full', to: m.from, toInst: m.inst });
+      return;
+    }
+    S.groupHook?.onSignal?.(m);
+    return;
+  }
   switch (m.type) {
     case 'hello':
     case 'hi':
@@ -1588,7 +1633,12 @@ async function onSignal(m) {
         onIncomingChat(m.text);
       }
       break;
+    case 'g_chat':
+      if (typeof m.text === 'string') onIncomingChat(m.text, m.name);
+      break;
     case 'bye':
+      S.roster.delete(m.inst);
+      S.groupHook?.onPeerBye?.(m);
       if (S.peer?.id === m.from && S.peer.inst === m.inst) peerLeft();
       break;
     case 'full':
@@ -1617,6 +1667,9 @@ function acceptPeer(m) {
   if (p) {
     const alive = S.pc?.connectionState === 'connected' || S.bridgeActive || Date.now() - p.seen < 30000;
     if (alive) {
+      // Групповой режим: лишних не выгоняем, пока в комнате есть место —
+      // их подберёт group.js (mesh). 'full' только при переполнении.
+      if (rosterCount() <= MAX_REMOTE_PEERS) return false;
       S.sig.send({ type: 'full', to: m.from, toInst: m.inst });
       return false;
     }
@@ -2414,8 +2467,8 @@ $('#safety').onclick = () => {
 function sendCtrl(o) {
   if (S.ctrl?.readyState === 'open') S.ctrl.send(JSON.stringify(o));
 }
-function onIncomingChat(text) {
-  addMsg(S.peer?.name || 'Собеседник', String(text).slice(0, 5000), false);
+function onIncomingChat(text, nameOverride) {
+  addMsg(nameOverride || S.peer?.name || 'Собеседник', String(text).slice(0, 5000), false);
   if ($('#chat').classList.contains('hidden')) {
     S.unread++;
     $('#unread').textContent = S.unread;
@@ -2471,6 +2524,13 @@ $('#chatForm').onsubmit = (e) => {
   e.preventDefault();
   const v = $('#chatInput').value.trim();
   if (!v) return;
+  if (rosterCount() > 1 && S.sig) {
+    // Групповой чат: одно сообщение всем участникам через E2EE-сигналинг.
+    S.sig.send({ type: 'g_chat', text: v, name: myName() });
+    addMsg('Вы', v, true);
+    $('#chatInput').value = '';
+    return;
+  }
   if (S.ctrl?.readyState === 'open') {
     sendCtrl({ t: 'chat', text: v });
   } else if (S.peer && S.sig) {
@@ -2885,6 +2945,39 @@ document.addEventListener('visibilitychange', async () => {
     if (S.pc && S.callStart && S.pc.connectionState !== 'connected') restartIce();
   }
 });
+
+// ---------- Групповой режим (group.js): публичный интерфейс ----------
+function attachGroupAudio(track) {
+  const ctx = ensureAudioEngine();
+  if (!ctx || !S.remoteCompNode || !track) return null;
+  try {
+    const src = ctx.createMediaStreamSource(new MediaStream([track]));
+    src.connect(S.remoteCompNode);
+    return src;
+  } catch {
+    return null;
+  }
+}
+window.ZVGroupAPI = {
+  get sig() { return S.sig; },
+  get local() { return S.local; },
+  get selfId() { return selfId; },
+  get inst() { return inst; },
+  get joined() { return S.joined; },
+  myName,
+  log,
+  toast,
+  pcConfig,
+  ensureTurnLoaded,
+  tuneOpusSdp,
+  attachGroupAudio,
+  isDeafened: () => S.deafened,
+  peerVol: () => S.audio.peerVol,
+  registerHook: (h) => {
+    S.groupHook = h;
+    log('Групповой модуль подключён (mesh до ' + (MAX_REMOTE_PEERS + 1) + ' участников)');
+  },
+};
 
 const action = new URLSearchParams(location.search).get('action');
 if (action === 'new' && !location.hash) {
