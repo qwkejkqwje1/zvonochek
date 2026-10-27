@@ -7,8 +7,9 @@
 // Протокол поверх существующего сигналинга (все сообщения зашифрованы AES-GCM):
 //   hello / hi  — app.js маршрутизирует сюда всё, что не от основного пира
 //   g_hi        — наш ответ на чужой hello
-//   g_desc      — SDP (offer/answer) групповой сессии
-//   g_cand      — ICE-кандидаты групповой сессии
+//   desc / cand — SDP и ICE групповой сессии (с v18 — те же типы, что у
+//                 основного движка: единый протокол, приёму также понятны
+//                 устаревшие g_desc / g_cand от клиентов v16/v17)
 const API = window.ZVGroupAPI;
 if (API) {
   const $ = (s, r = document) => r.querySelector(s);
@@ -99,7 +100,7 @@ if (API) {
     };
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
-        API.sig?.send({ type: 'g_cand', to: sess.id, toInst: sess.inst, cand: candidate.toJSON() });
+        API.sig?.send({ type: 'cand', to: sess.id, toInst: sess.inst, cand: candidate.toJSON() });
       }
     };
     pc.onconnectionstatechange = () => {
@@ -120,7 +121,7 @@ if (API) {
     const pc = sess.pc;
     if (!pc?.localDescription) return;
     API.sig?.send({
-      type: 'g_desc',
+      type: 'desc',
       to: sess.id,
       toInst: sess.inst,
       desc: { type: pc.localDescription.type, sdp: API.tuneOpusSdp(pc.localDescription.sdp) },
@@ -175,11 +176,13 @@ if (API) {
         }
         break;
       }
+      case 'desc':
       case 'g_desc': {
         const sess = sessions.get(m.inst) || createSession(m);
         onDesc(sess, m.desc);
         break;
       }
+      case 'cand':
       case 'g_cand': {
         const sess = sessions.get(m.inst);
         if (!sess || !m.cand) return;

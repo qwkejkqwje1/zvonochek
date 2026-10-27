@@ -1,8 +1,8 @@
-import { CONFIG } from './config.js?v=17';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=17';
-import { Signaling } from './signaling.js?v=17';
+import { CONFIG } from './config.js?v=18';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=18';
+import { Signaling } from './signaling.js?v=18';
 
-export const APP_VERSION = 17;
+export const APP_VERSION = 18;
 export const APP_BUILD = '2026-10-27';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -17,7 +17,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=17').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=18').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -1544,6 +1544,7 @@ const viaName = (v) =>
 const to = () => ({ to: S.peer.id, toInst: S.peer.inst, gen: S.gen });
 
 const MAX_REMOTE_PEERS = 5; // комната: я + основной собеседник + до 4 групповых (mesh)
+const groupVerWarned = new Set(); // inst участников, которым уже показали предупреждение о версии
 function rosterCount() {
   const now = Date.now();
   let n = 0;
@@ -1571,7 +1572,11 @@ async function onSignal(m) {
   const isPrimaryPeer = S.peer && S.peer.id === m.from && S.peer.inst === m.inst;
   const primaryStale =
     S.peer && !isPrimaryPeer && S.pc?.connectionState !== 'connected' && !S.bridgeActive && Date.now() - S.peer.seen > 30000;
-  if (S.peer && !isPrimaryPeer && !primaryStale && ['hello', 'hi', 'g_hi', 'g_desc', 'g_cand'].includes(m.type)) {
+  if (S.peer && !isPrimaryPeer && !primaryStale && ['hello', 'hi', 'g_hi', 'g_desc', 'g_cand', 'desc', 'cand'].includes(m.type)) {
+    if ((m.type === 'hello' || m.type === 'hi') && m.ver && m.ver !== APP_VERSION && !groupVerWarned.has(m.inst)) {
+      groupVerWarned.add(m.inst);
+      log(`Участник ${m.name || ''} на версии v${m.ver}, у вас v${APP_VERSION} — для групповых звонков лучше обновиться всем`);
+    }
     if (m.type === 'hello' && !S.roster.has(m.inst)) return;
     if (m.type === 'hello' && rosterCount() > MAX_REMOTE_PEERS) {
       S.sig?.send({ type: 'full', to: m.from, toInst: m.inst });
@@ -1585,12 +1590,7 @@ async function onSignal(m) {
   // с основным — переводим в основной протокол и обрабатываем как обычно.
   if (isPrimaryPeer && m.type === 'g_desc') m = { ...m, type: 'desc' };
   else if (isPrimaryPeer && m.type === 'g_cand') m = { ...m, type: 'cand' };
-  // Обратный случай: собеседник говорит с нами основным протоколом (desc/cand),
-  // а у нас он числится групповым — переводим в групповой и отдаём в group.js.
-  if (S.peer && !isPrimaryPeer && !primaryStale && (m.type === 'desc' || m.type === 'cand')) {
-    S.groupHook?.onSignal?.({ ...m, type: m.type === 'desc' ? 'g_desc' : 'g_cand' });
-    return;
-  }
+  // (v18: обратный перевод не нужен — group.js говорит и понимает desc/cand.)
   switch (m.type) {
     case 'hello':
     case 'hi':
