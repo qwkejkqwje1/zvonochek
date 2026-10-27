@@ -1,8 +1,11 @@
-import { CONFIG } from './config.js?v=19';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u } from './crypto.js?v=19';
-import { Signaling } from './signaling.js?v=19';
+import { CONFIG } from './config.js?v=20';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed } from './crypto.js?v=20';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=20';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=20';
+import { kvPut, kvAll } from './store.js?v=20';
+import { Signaling } from './signaling.js?v=20';
 
-export const APP_VERSION = 19;
+export const APP_VERSION = 20;
 export const APP_BUILD = '2026-10-27';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -17,7 +20,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=19').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=20').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -138,6 +141,14 @@ const S = {
   ice: [],
   hasTurn: false,
   roster: new Map(), // inst -> {id, name, seen} все участники комнаты (для группового режима)
+  personal: null, // идентичность коммуникатора (identity.js)
+  personalRoom: null, // {topic, key} личной комнаты
+  inboxListener: null,
+  incoming: null, // активный входящий ring {ringId, payload, fromFp}
+  outCall: null, // активный исходящий ring
+  linkFp: null, // &d= из открытой ссылки (личная ссылка владельца)
+  autoJoinPending: false,
+  pushSub: null,
   groupHook: null, // сюда регистрируется group.js (mesh для 3+ участников)
   ctrl: null,
   fileCh: null,
@@ -170,6 +181,7 @@ const S = {
 // ---------- Утилиты UI ----------
 function show(id) {
   ['home', 'prejoin', 'call'].forEach((s) => $('#' + s).classList.toggle('hidden', s !== id));
+  if (id === 'home') refreshPersonalUI().catch(() => {});
 }
 function syncChatOpen() {
   const call = $('#call');
@@ -212,7 +224,9 @@ $('#modal').addEventListener('click', (e) => {
 });
 
 const fmtSize = (b) => (b > 1e6 ? (b / 1e6).toFixed(1) + ' МБ' : Math.ceil(b / 1e3) + ' КБ');
-const roomLink = () => location.origin + location.pathname + '#k=' + S.secret;
+const roomLink = () =>
+  location.origin + location.pathname + '#k=' + S.secret +
+  (S.personal && S.secret === S.personal.secret ? '&d=' + S.personal.fp : '');
 
 function renderQr(el, text) {
   if (typeof qrcode === 'undefined' || !el) return;
@@ -245,7 +259,10 @@ function beep(freq = 880, dur = 0.14) {
 
 // ---------- Маршрутизация и Главный экран ----------
 function route() {
-  const k = new URLSearchParams(location.hash.slice(1)).get('k');
+  const params = new URLSearchParams(location.hash.slice(1));
+  const k = params.get('k');
+  const d = params.get('d');
+  S.linkFp = d && /^[a-f0-9]{32}$/.test(d) ? d : null;
   if (S.joined) return;
   if (k && /^[A-Za-z0-9_-]{22,}$/.test(k)) {
     S.secret = k;
@@ -265,7 +282,8 @@ $('#btnOpenLink').onclick = () => {
   if (!raw) return toast('Вставьте ссылку или ключ звонка');
   const m = raw.match(/k=([A-Za-z0-9_-]{22,})/) || raw.match(/^([A-Za-z0-9_-]{22,})$/);
   if (m) {
-    location.hash = 'k=' + m[1];
+    const dm = raw.match(/d=([a-f0-9]{32})/);
+    location.hash = 'k=' + m[1] + (dm ? '&d=' + dm[1] : '');
   } else {
     toast('Неверный формат ссылки или ключа');
   }
@@ -918,6 +936,7 @@ async function preJoin() {
   show('prejoin');
   $('#name').value = localStorage.zvName || '';
   $('#link').value = roomLink();
+  $('#callOwnerBox')?.classList.toggle('hidden', !S.linkFp || (S.personal && S.secret === S.personal.secret));
   $('#qr').classList.add('hidden');
   $('#btnShare').classList.toggle('hidden', !navigator.share);
   syncAudioParams();
@@ -928,6 +947,10 @@ async function preJoin() {
   await startLocal();
   refreshLocalView();
   syncButtons();
+  if (S.autoJoinPending) {
+    S.autoJoinPending = false;
+    join();
+  }
 }
 $('#pMic').onclick = toggleMic;
 $('#pCam').onclick = toggleCam;
@@ -2023,6 +2046,12 @@ function onPcState(pc) {
       beep();
       sysMsg(`Звонок начат · ваша версия ZVONochek v${APP_VERSION}`);
     }
+    if (S.outCall) {
+      // Собеседник и так в комнате (ждал по-старому) — ring больше не нужен
+      const oc = S.outCall;
+      inboxCancel(CONFIG.WORKER_URL, oc.topic, oc.ringId, oc.signFn, oc.fromDevicePub).catch(() => {});
+      finishOutCall('connected', true);
+    }
     if (!S.countedOk) {
       S.countedOk = true;
       stats.ok++;
@@ -2982,6 +3011,352 @@ document.addEventListener('visibilitychange', async () => {
     if (S.pc && S.callStart && S.pc.connectionState !== 'connected') restartIce();
   }
 });
+
+
+// ---------- Коммуникатор v20: личная ссылка, дозвон с рингтоном, входящие ----------
+let ringCtx = null;
+let ringTimer = null;
+function startRingtone() {
+  stopRingtone();
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = (ringCtx = new Ctx());
+    const beep = (t0, f) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.22, t0 + 0.03);
+      g.gain.setValueAtTime(0.22, t0 + 0.36);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.42);
+      o.connect(g).connect(ctx.destination);
+      o.start(t0);
+      o.stop(t0 + 0.45);
+    };
+    const cycle = () => {
+      if (!ringCtx) return;
+      const t = ctx.currentTime + 0.05;
+      beep(t, 440);
+      beep(t + 0.5, 480);
+      ringTimer = setTimeout(cycle, 2300);
+    };
+    cycle();
+  } catch {}
+}
+function stopRingtone() {
+  clearTimeout(ringTimer);
+  ringTimer = null;
+  if (ringCtx) {
+    ringCtx.close().catch(() => {});
+    ringCtx = null;
+  }
+}
+
+async function journalAdd(dir, name, outcome) {
+  try {
+    await kvPut('calls', `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, {
+      ts: Date.now(),
+      dir,
+      name: String(name || '').slice(0, 60),
+      outcome,
+    });
+  } catch {}
+}
+async function renderCalls() {
+  const el = $('#callsList');
+  if (!el) return;
+  let all = [];
+  try {
+    all = (await kvAll('calls')).sort((a, b) => b.value.ts - a.value.ts).slice(0, 6);
+  } catch {}
+  el.replaceChildren();
+  if (!all.length) {
+    const li = document.createElement('li');
+    li.textContent = 'Пока пусто';
+    el.append(li);
+    return;
+  }
+  const names = { accepted: 'состоялся', declined: 'отклонён', missed: 'без ответа', cancelled: 'отменён', expired: 'без ответа' };
+  for (const { value: v } of all) {
+    const li = document.createElement('li');
+    li.textContent = `${v.dir === 'in' ? 'Входящий' : 'Исходящий'} · ${v.name || 'Без имени'} · ${names[v.outcome] || v.outcome} · ${new Date(v.ts).toLocaleString()}`;
+    el.append(li);
+  }
+}
+
+async function refreshPersonalUI() {
+  if (!$('#personalBox')) return;
+  const has = await hasPersonal();
+  $('#personalNone')?.classList.toggle('hidden', has);
+  $('#personalMain')?.classList.toggle('hidden', !has);
+  if (!has) return;
+  const p = await getPersonal();
+  S.personal = p;
+  if (!S.personalRoom) S.personalRoom = await deriveRoom(p.secret);
+  const linkEl = $('#personalLink');
+  if (linkEl) linkEl.value = personalLinkOf(p);
+  startInboxListener();
+  loadMissed().catch(() => {});
+  renderCalls();
+  updatePushUI();
+}
+
+function startInboxListener() {
+  if (S.inboxListener || !CONFIG.WORKER_URL || !S.personal || !S.personalRoom) return;
+  const p = S.personal;
+  const topic = S.personalRoom.topic;
+  inboxRegister(CONFIG.WORKER_URL, topic, p, S.pushSub).catch(() => {});
+  S.inboxListener = new InboxListener(CONFIG.WORKER_URL, topic, p, {
+    onRing: (m) => handleIncomingRing(m).catch(() => {}),
+    onState: (m) => {
+      if (S.incoming && m.ringId === S.incoming.ringId && m.state !== 'ringing') {
+        closeIncoming();
+        toast(
+          m.state === 'accepted'
+            ? 'Звонок принят на другом устройстве'
+            : m.state === 'declined'
+              ? 'Звонок отклонён на другом устройстве'
+              : 'Входящий звонок завершён'
+        );
+      }
+    },
+    onStatus: (st) => {
+      const el = $('#personalStatus');
+      if (el) {
+        el.textContent =
+          st === 'online'
+            ? 'Вы доступны для входящих звонков по личной ссылке'
+            : 'Нет связи с сервером входящих — дозвон временно недоступен';
+      }
+    },
+  });
+  S.inboxListener.connect();
+}
+
+async function handleIncomingRing({ ringId, blob, fromFp }) {
+  if (S.incoming || S.joined || !S.personalRoom) return;
+  let payload = null;
+  try {
+    payload = await openSealed(S.personalRoom.key, blob, S.personalRoom.topic);
+  } catch {}
+  const name = payload?.name || 'Неизвестный';
+  S.incoming = { ringId, payload, fromFp };
+  $('#inName').textContent = name;
+  $('#inMeta').textContent = `Входящий звонок по личной ссылке · отпечаток ${String(fromFp || '').slice(0, 8)}…`;
+  $('#inAvatar').textContent = (name.trim()[0] || '?').toUpperCase();
+  $('#incomingCall')?.classList.remove('hidden');
+  startRingtone();
+  try {
+    navigator.vibrate?.([250, 150, 250, 150, 250]);
+  } catch {}
+  inboxAck(CONFIG.WORKER_URL, S.personalRoom.topic, ringId, S.personal).catch(() => {});
+}
+
+function closeIncoming() {
+  stopRingtone();
+  $('#incomingCall')?.classList.add('hidden');
+  S.incoming = null;
+}
+
+$('#btnAccept') &&
+  ($('#btnAccept').onclick = async () => {
+    const inc = S.incoming;
+    if (!inc || !S.personal) return;
+    closeIncoming();
+    await inboxAnswer(CONFIG.WORKER_URL, S.personalRoom.topic, inc.ringId, 'accepted', {
+      devicePub: S.personal.devicePub,
+      sign: (t) => signWithDevice(t),
+    }).catch(() => {});
+    journalAdd('in', inc.payload?.name, 'accepted');
+    S.autoJoinPending = true;
+    const target = `k=${S.personal.secret}&d=${S.personal.fp}`;
+    if (location.hash.slice(1) === target) preJoin();
+    else location.hash = target;
+  });
+$('#btnDecline') &&
+  ($('#btnDecline').onclick = async () => {
+    const inc = S.incoming;
+    if (!inc || !S.personal) return;
+    closeIncoming();
+    await inboxAnswer(CONFIG.WORKER_URL, S.personalRoom.topic, inc.ringId, 'declined', {
+      devicePub: S.personal.devicePub,
+      sign: (t) => signWithDevice(t),
+    }).catch(() => {});
+    journalAdd('in', inc.payload?.name, 'declined');
+  });
+
+$('#btnCreatePersonal') &&
+  ($('#btnCreatePersonal').onclick = async () => {
+    await ensurePersonal(myName() || 'Владелец');
+    toast('Личная ссылка создана — отправьте её тем, кто должен вам звонить');
+    refreshPersonalUI().catch(() => {});
+  });
+$('#btnCopyPersonal') &&
+  ($('#btnCopyPersonal').onclick = () => S.personal && copy(personalLinkOf(S.personal)));
+$('#btnSharePersonal') &&
+  ($('#btnSharePersonal').onclick = () =>
+    S.personal &&
+    navigator
+      .share({ title: 'ZVONochek', text: 'Моя личная ссылка для звонков:', url: personalLinkOf(S.personal) })
+      .catch(() => {}));
+
+function updatePushUI() {
+  const b = $('#btnEnablePush');
+  if (!b) return;
+  if (!('PushManager' in window) || !CONFIG.VAPID_PUBLIC_KEY) {
+    b.disabled = true;
+    b.textContent = 'Уведомления недоступны на этом устройстве';
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    b.disabled = true;
+    b.textContent = 'Уведомления запрещены в настройках браузера';
+    return;
+  }
+  if (S.pushSub) {
+    b.disabled = true;
+    b.textContent = 'Уведомления о звонках включены';
+  }
+}
+$('#btnEnablePush') &&
+  ($('#btnEnablePush').onclick = async () => {
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') return toast('Разрешение на уведомления не дано');
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: b64u.dec(CONFIG.VAPID_PUBLIC_KEY),
+        });
+      }
+      const j = sub.toJSON();
+      S.pushSub = { endpoint: j.endpoint, keys: j.keys };
+      await inboxRegister(CONFIG.WORKER_URL, S.personalRoom.topic, S.personal, S.pushSub);
+      toast('Уведомления о звонках включены');
+      updatePushUI();
+    } catch (e) {
+      toast('Не удалось включить уведомления: ' + e.message);
+    }
+  });
+
+async function loadMissed() {
+  if (!S.personal || !S.personalRoom) return;
+  const r = await inboxMissed(CONFIG.WORKER_URL, S.personalRoom.topic, S.personal).catch(() => null);
+  const items = r?.data?.missed || [];
+  S.missedIds = items.map((m) => m.ring_id);
+  const box = $('#missedBox');
+  const list = $('#missedList');
+  if (!box || !list) return;
+  box.classList.toggle('hidden', items.length === 0);
+  list.replaceChildren();
+  for (const m of items) {
+    let name = 'Неизвестный';
+    try {
+      const pl = await openSealed(S.personalRoom.key, m.blob, S.personalRoom.topic);
+      if (pl?.name) name = pl.name;
+    } catch {}
+    const li = document.createElement('li');
+    li.textContent = `${name} · ${new Date(m.ts).toLocaleString()} · не ответил`;
+    list.append(li);
+  }
+}
+$('#btnMissedClear') &&
+  ($('#btnMissedClear').onclick = async () => {
+    if (S.missedIds?.length) {
+      await inboxMissedAck(CONFIG.WORKER_URL, S.personalRoom.topic, S.missedIds, S.personal).catch(() => {});
+    }
+    loadMissed().catch(() => {});
+  });
+
+// ---------- Исходящий дозвон владельцу личной ссылки ----------
+async function startOutgoingCall() {
+  if (S.outCall || !S.secret) return;
+  const room = await deriveRoom(S.secret);
+  let fromFp, fromDevicePub, signFn;
+  if (S.personal) {
+    fromFp = S.personal.fp;
+    fromDevicePub = S.personal.devicePub;
+    signFn = (t) => signWithDevice(t);
+  } else {
+    const pair = await crypto.subtle.generateKeyPair({ name: 'ECDSA', namedCurve: 'P-256' }, false, [
+      'sign',
+      'verify',
+    ]);
+    const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+    fromDevicePub = b64u.enc(raw);
+    fromFp = await fpOfPubRaw(raw);
+    signFn = (t) => signWithKey(pair.privateKey, t);
+  }
+  const ringId = crypto.randomUUID();
+  const payload = { v: 1, ringId, fromFp, fromDevicePub, name: myName(), call: 'video', ts: Date.now() };
+  const blob = await seal(room.key, payload, room.topic);
+  S.outCall = { ringId, topic: room.topic, signFn, fromDevicePub, poll: null };
+  $('#outgoingCall')?.classList.remove('hidden');
+  const r = await inboxRing(CONFIG.WORKER_URL, room.topic, { ringId, fromFp, fromDevicePub, blob }).catch(
+    () => null
+  );
+  if (!r || (r.status !== 201 && r.status !== 200)) {
+    toast('Не удалось дозвониться: сервер входящих недоступен. Можно просто подождать в комнате');
+    finishOutCall('failed', true);
+    return;
+  }
+  toast('Звоним владельцу…');
+  join(); // параллельно занимаем комнату — принявший владелец войдёт сюда же
+  S.outCall.poll = setInterval(pollOutCall, 2000);
+}
+async function pollOutCall() {
+  const oc = S.outCall;
+  if (!oc) return;
+  const r = await inboxRingState(CONFIG.WORKER_URL, oc.topic, oc.ringId).catch(() => null);
+  const st = r?.data?.state;
+  if (!st || st === 'ringing') return;
+  if (st === 'accepted') {
+    toast('Владелец принял звонок — подключаемся');
+    finishOutCall('accepted', true);
+  } else if (st === 'declined') {
+    toast('Владелец отклонил звонок');
+    journalAdd('out', 'Владелец ссылки', 'declined');
+    finishOutCall('declined', true);
+  } else if (st === 'expired') {
+    toast('Владелец не ответил — звонок попадёт ему в пропущенные');
+    journalAdd('out', 'Владелец ссылки', 'missed');
+    finishOutCall('expired', true);
+  } else if (st === 'cancelled') {
+    finishOutCall('cancelled', true);
+  }
+}
+function finishOutCall(reason, keepRoom = false) {
+  const oc = S.outCall;
+  if (!oc) return;
+  clearInterval(oc.poll);
+  S.outCall = null;
+  $('#outgoingCall')?.classList.add('hidden');
+}
+$('#btnCallOwner') && ($('#btnCallOwner').onclick = startOutgoingCall);
+
+// SW сообщает о пуше (приложение открыто) или о тапе по уведомлению:
+// активный ring всё равно придёт через listen-WS при подключении слушателя —
+// здесь просто будим слушателя, если главная ещё не открывалась.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type === 'incoming-ring-push') {
+      refreshPersonalUI().catch(() => {});
+    }
+  });
+}
+$('#btnCancelCall') &&
+  ($('#btnCancelCall').onclick = async () => {
+    const oc = S.outCall;
+    if (!oc) return;
+    await inboxCancel(CONFIG.WORKER_URL, oc.topic, oc.ringId, oc.signFn, oc.fromDevicePub).catch(() => {});
+    journalAdd('out', 'Владелец ссылки', 'cancelled');
+    finishOutCall('cancelled');
+    hangup();
+  });
 
 // ---------- Групповой режим (group.js): публичный интерфейс ----------
 function attachGroupAudio(track) {

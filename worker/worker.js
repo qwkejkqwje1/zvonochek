@@ -1,4 +1,9 @@
-// ZVONochek Worker v19 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
+// ZVONochek Worker v20 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
+// Коммуникатор: /inbox/:topic — Inbox Durable Object (worker/inbox.js): устройства,
+// ring-дозвон, пропущенные, Web Push (worker/push.js, RFC 8291/8292).
+import { Inbox } from './inbox.js';
+import { getVapid } from './push.js';
+export { Inbox };
 // Worker пересылает только зашифрованные сообщения (AES-256-GCM) и не знает ключей комнат.
 
 const JSON_HEADERS = {
@@ -86,7 +91,7 @@ export default {
         (env.METERED_DOMAIN && env.METERED_API_KEY) ||
         (env.TURN_URLS && env.TURN_USERNAME)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 19, turn: hasTurn, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 20, turn: hasTurn, inbox: !!env.INBOX, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {
@@ -108,6 +113,23 @@ export default {
       if (!checkRoomRateLimit(`${ip}|${room}|${req.method}`, limit)) {
         return json({ error: 'rate limited' }, 429, cors);
       }
+    }
+
+    // 0) Коммуникатор: Inbox личной комнаты (регистрация устройств, ring, listen-WS, пропущенные)
+    const inboxMatch = url.pathname.match(/^\/inbox\/([a-f0-9]{16,64})(\/.*)?$/);
+    if (inboxMatch) {
+      if (!env.INBOX) return json({ error: 'inbox not configured' }, 501, cors);
+      const stub = env.INBOX.get(env.INBOX.idFromName(inboxMatch[1]));
+      const resp = await stub.fetch(req);
+      if (resp.status === 101 || resp.webSocket) return resp; // WS-апгрейд возвращаем как есть
+      // CORS для ответов DO (сам DO заголовков не ставит)
+      const h = new Headers(resp.headers);
+      for (const [k, v] of Object.entries(cors)) h.set(k, v);
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h, webSocket: resp.webSocket });
+    }
+    if (url.pathname === '/push-key') {
+      const v = await getVapid(env);
+      return json({ public: v?.publicB64 || null }, 200, cors);
     }
 
     // 1) Выдача временных TURN-ключей (параллельный опрос с таймаутом 3.5 сек)

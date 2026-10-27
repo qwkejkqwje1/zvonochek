@@ -1,10 +1,14 @@
-// ZVONochek v16 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
+// ZVONochek v20 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
 export const CONFIG = {
   APP_NAME: 'ZVONochek',
 
   // Способ №2: адрес Cloudflare Worker (WebSocket + HTTP-поллинг + выдача временных TURN-ключей).
   // Пусто = работают публичные MQTT-брокеры и Nostr-реле.
   WORKER_URL: 'https://zvonochek.zerewgwe.workers.dev',
+
+  // Web Push (коммуникатор): публичный VAPID-ключ. Приватная часть — только
+  // секрет Worker VAPID_PRIVATE_JWK, в репозитории её нет и быть не должно.
+  VAPID_PUBLIC_KEY: 'BLVkM9lHGnDUlJ7P1CFZTRxaiiiD4QKqPLPnqAyWhnnTpZ-W0KuNT2LWFAxQD23idzUTdglnQEBJXajmS_JL_js',
 
   // Способ №1: публичные MQTT-брокеры (WSS). Подключаемся ко всем параллельно —
   // побеждает самый быстрый канал, дубли автоматически отбрасываются.

@@ -4,8 +4,8 @@
 //   3) Cloudflare Worker HTTP-поллинг + POST (работает даже при полной блокировке WebSocket)
 //   4) Публичные Nostr-реле поверх WSS (порт 443, подписанные эфемерные события)
 // Каждое сообщение сжимается и шифруется AES-256-GCM; дубли отсекаются по mid.
-import { seal, open } from './crypto.js?v=19';
-import { schnorr, utils } from './vendor/secp256k1.js?v=19';
+import { seal, open } from './crypto.js?v=20';
+import { schnorr, utils } from './vendor/secp256k1.js?v=20';
 
 const hexs = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 const NOSTR_KIND = 29333; // эфемерные события: реле их не хранят, только пересылают

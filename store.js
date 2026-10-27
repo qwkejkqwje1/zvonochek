@@ -1,0 +1,61 @@
+// ZVONochek — тонкая обёртка над IndexedDB для коммуникатора:
+// vault-ключ, идентичность, устройства, журнал звонков.
+// Все хранилища — с внешними ключами (put(value, key)).
+const DB_NAME = 'zvonochek';
+const DB_VERSION = 1;
+const STORES = ['vault', 'identity', 'devices', 'calls', 'missed'];
+
+let dbPromise = null;
+export function idb() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      for (const name of STORES) {
+        if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbPromise;
+}
+
+function tx(store, mode, fn) {
+  return idb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const t = db.transaction(store, mode);
+        const req = fn(t.objectStore(store));
+        if (req) {
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        } else {
+          t.oncomplete = () => resolve(undefined);
+          t.onerror = () => reject(t.error);
+        }
+      })
+  );
+}
+
+export const kvGet = (store, key) => tx(store, 'readonly', (s) => s.get(key));
+export const kvPut = (store, key, value) => tx(store, 'readwrite', (s) => s.put(value, key));
+export const kvDel = (store, key) => tx(store, 'readwrite', (s) => s.delete(key));
+export const kvAll = (store) =>
+  idb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const out = [];
+        const t = db.transaction(store, 'readonly');
+        const req = t.objectStore(store).openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (cur) {
+            out.push({ key: cur.key, value: cur.value });
+            cur.continue();
+          } else resolve(out);
+        };
+        req.onerror = () => reject(req.error);
+      })
+  );

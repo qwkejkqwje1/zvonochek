@@ -2106,3 +2106,44 @@ label.disabled select {
   .tiles { top: calc(64px + env(safe-area-inset-top)); right: 8px; }
   .tile { width: 104px; border-radius: 12px; }
 }
+
+/* ---------- v20: личный коммуникатор ---------- */
+.personal-box {
+  margin-top: 18px;
+  border: 1px solid var(--line-2);
+  border-radius: 16px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  text-align: left;
+}
+.personal-title { font: 700 15px var(--font); display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.personal-hint { color: var(--muted, #9aa3b2); font-size: 13.5px; line-height: 1.45; margin: 0 0 12px; }
+.personal-label { display: block; font-size: 12.5px; color: var(--muted, #9aa3b2); margin-bottom: 10px; }
+.personal-label input { width: 100%; margin-top: 6px; }
+.personal-status { font-size: 13px; margin: 10px 0; }
+.personal-box h4 { margin: 14px 0 6px; font-size: 13.5px; }
+.plain-list { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.plain-list li { padding: 5px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.08); }
+.call-modal {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(4, 5, 10, 0.72); backdrop-filter: blur(6px);
+}
+.call-modal.hidden { display: none; }
+.call-modal-card {
+  text-align: center; padding: 28px 26px; border-radius: 20px;
+  border: 1px solid var(--line-2); background: #101223; box-shadow: var(--shadow-sm);
+  max-width: min(92vw, 360px); width: 100%;
+}
+.big-avatar {
+  width: 76px; height: 76px; margin: 0 auto 14px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font: 700 30px var(--font); color: #fff;
+  background: linear-gradient(135deg, #6d5cff, #37b6ff);
+  animation: zv-pulse 1.15s ease-in-out infinite;
+}
+@keyframes zv-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+.call-modal-name { font: 700 20px var(--font); }
+.call-modal-meta { color: var(--muted, #9aa3b2); font-size: 13px; margin: 8px 0 18px; }
+.call-modal-row { display: flex; gap: 10px; justify-content: center; }
+#callOwnerBox { margin-bottom: 12px; }

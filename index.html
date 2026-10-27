@@ -17,7 +17,7 @@
 <link rel="icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=19">
+<link rel="stylesheet" href="style.css?v=20">
 </head>
 <body>
 
@@ -92,7 +92,7 @@
         <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use href="#i-logo"/></svg>
         <div class="brand-name">ZVON<span>ochek</span></div>
       </div>
-      <div class="hero-badge"><svg class="ic"><use href="#i-shield"/></svg> E2EE · P2P · <span data-ver>v19</span></div>
+      <div class="hero-badge"><svg class="ic"><use href="#i-shield"/></svg> E2EE · P2P · <span data-ver>v20</span></div>
       <h1>Звонки, которые<br><span class="grad">не заглушить</span></h1>
       <p class="sub">Аудио- и видеозвонки по ссылке. Без регистрации и установки — ключ шифрования живёт только в адресной строке.</p>
 
@@ -106,12 +106,40 @@
 
       <p id="homeMsg" class="msg"></p>
 
+      <div id="personalBox" class="personal-box">
+        <div class="personal-title"><svg class="ic"><use href="#i-bell"/></svg> Личный коммуникатор</div>
+        <div id="personalNone">
+          <p class="personal-hint">Создайте постоянную личную ссылку: по ней вам смогут звонить с дозвоном и рингтоном — как по обычному номеру, только без аккаунтов.</p>
+          <button id="btnCreatePersonal" class="btn primary"><svg class="ic"><use href="#i-bolt"/></svg><span>Создать мою ссылку для звонков</span></button>
+        </div>
+        <div id="personalMain" class="hidden">
+          <label class="personal-label">Моя ссылка для звонков
+            <input id="personalLink" readonly aria-label="Моя личная ссылка для звонков">
+          </label>
+          <div class="row">
+            <button id="btnCopyPersonal" class="btn"><svg class="ic"><use href="#i-copy"/></svg><span>Копировать</span></button>
+            <button id="btnSharePersonal" class="btn"><svg class="ic"><use href="#i-share"/></svg><span>Поделиться</span></button>
+          </div>
+          <p id="personalStatus" class="personal-status">Подключаемся к серверу входящих…</p>
+          <button id="btnEnablePush" class="btn small"><svg class="ic"><use href="#i-bell"/></svg><span>Включить уведомления о звонках</span></button>
+          <div id="missedBox" class="hidden">
+            <h4>Пропущенные звонки</h4>
+            <ul id="missedList" class="plain-list"></ul>
+            <button id="btnMissedClear" class="btn small ghost"><span>Очистить</span></button>
+          </div>
+          <div id="callsBox">
+            <h4>Недавние звонки</h4>
+            <ul id="callsList" class="plain-list"></ul>
+          </div>
+        </div>
+      </div>
+
       <div class="trust-row">
         <span><svg class="ic"><use href="#i-check"/></svg> Без регистрации</span>
         <span><svg class="ic"><use href="#i-lock"/></svg> Ключ не на сервере</span>
         <span><svg class="ic"><use href="#i-globe"/></svg> PWA / офлайн</span>
       </div>
-      <p class="home-ver">Версия разработки <b data-ver>v19</b> · сборка <span data-build>dev</span></p>
+      <p class="home-ver">Версия разработки <b data-ver>v20</b> · сборка <span data-build>dev</span></p>
     </div>
 
     <div class="feature-rail">
@@ -191,7 +219,7 @@
         <div class="brand small">
           <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use href="#i-logo"/></svg>
           <div class="brand-name">ZVON<span>ochek</span></div>
-          <span class="ver-tag" data-ver>v19</span>
+          <span class="ver-tag" data-ver>v20</span>
         </div>
         <button id="btnBackHome" class="btn ghost small" title="На главную"><svg class="ic"><use href="#i-arrow-left"/></svg><span class="lbl">Назад</span></button>
       </div>
@@ -217,6 +245,11 @@
             <button id="btnQr" class="btn"><svg class="ic"><use href="#i-qr"/></svg><span>QR-код</span></button>
           </div>
           <div id="qr" class="qr hidden"></div>
+        </div>
+
+        <div id="callOwnerBox" class="hidden">
+          <button id="btnCallOwner" class="btn primary big glow-btn"><svg class="ic"><use href="#i-bell"/></svg><span>Позвонить владельцу</span></button>
+          <p class="msg">Это личная ссылка: у владельца зазвонит телефон (или придёт уведомление), а не просто откроется комната.</p>
         </div>
 
         <button id="btnJoin" class="btn primary big glow-btn"><svg class="ic"><use href="#i-bell"/></svg><span>Войти в звонок</span></button>
@@ -250,7 +283,7 @@
         </div>
         <div class="bar"><i id="connBar"></i></div>
         <div id="connMethod" class="conn-method"></div>
-        <div class="conn-ver">ZVONochek · версия <span data-ver>v19</span></div>
+        <div class="conn-ver">ZVONochek · версия <span data-ver>v20</span></div>
         <div class="conn-actions">
           <button id="btnForceBridge" class="btn small accent-outline" title="Включить передачу голоса через сигнал без ожидания WebRTC/TURN"><svg class="ic"><use href="#i-shield"/></svg><span>Мост без TURN</span></button>
           <button id="btnDiag" class="btn small"><svg class="ic"><use href="#i-diag"/></svg><span>Диагностика</span></button>
@@ -443,7 +476,31 @@
 
 <script src="vendor/mqtt.min.js"></script>
 <script src="vendor/qrcode.js"></script>
-<script type="module" src="app.js?v=19"></script>
-<script type="module" src="group.js?v=19"></script>
+<script type="module" src="app.js?v=20"></script>
+<script type="module" src="group.js?v=20"></script>
+<!-- Входящий звонок (коммуникатор) -->
+<div id="incomingCall" class="call-modal hidden" role="dialog" aria-label="Входящий звонок">
+  <div class="call-modal-card">
+    <div class="avatar big-avatar" id="inAvatar">?</div>
+    <div class="call-modal-name" id="inName">Входящий звонок</div>
+    <div class="call-modal-meta" id="inMeta"></div>
+    <div class="call-modal-row">
+      <button id="btnDecline" class="btn danger"><span>Отклонить</span></button>
+      <button id="btnAccept" class="btn primary"><span>Принять</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- Исходящий дозвон (коммуникатор) -->
+<div id="outgoingCall" class="call-modal hidden" role="dialog" aria-label="Исходящий звонок">
+  <div class="call-modal-card">
+    <div class="call-modal-name">Звоним…</div>
+    <div class="call-modal-meta" id="outName">Владелец личной ссылки</div>
+    <div class="call-modal-row">
+      <button id="btnCancelCall" class="btn danger"><span>Отменить</span></button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>

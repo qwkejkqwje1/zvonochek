@@ -10,6 +10,14 @@ ALLOWED_ORIGINS = "https://qwkejkqwje1.github.io"
 name = "ROOMS"
 class_name = "Room"
 
+[[durable_objects.bindings]]
+name = "INBOX"
+class_name = "Inbox"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Inbox"]

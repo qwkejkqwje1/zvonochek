@@ -1,14 +1,17 @@
-// ZVONochek Service Worker v19 — мгновенный старт, офлайн-оболочка и безопасные обновления
-const CACHE_NAME = 'zvonochek-v19';
+// ZVONochek Service Worker v20 — мгновенный старт, офлайн-оболочка и безопасные обновления
+const CACHE_NAME = 'zvonochek-v20';
 const CORE = [
   './',
   './index.html',
-  './style.css?v=19',
-  './app.js?v=19',
-  './group.js?v=19',
-  './signaling.js?v=19',
-  './crypto.js?v=19',
-  './config.js?v=19',
+  './style.css?v=20',
+  './app.js?v=20',
+  './group.js?v=20',
+  './store.js?v=20',
+  './identity.js?v=20',
+  './inbox.js?v=20',
+  './signaling.js?v=20',
+  './crypto.js?v=20',
+  './config.js?v=20',
   './icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -17,7 +20,7 @@ const CORE = [
   './manifest.webmanifest',
   './vendor/mqtt.min.js',
   './vendor/qrcode.js',
-  './vendor/secp256k1.js?v=19',
+  './vendor/secp256k1.js?v=20',
 ];
 
 self.addEventListener('install', (e) => {
@@ -83,5 +86,65 @@ self.addEventListener('fetch', (e) => {
         .catch(() => cached);
       return cached || network;
     })
+  );
+});
+
+// ---------- v20: Web Push коммуникатора (payload — только {t, topic, ringId}) ----------
+self.addEventListener('push', (e) => {
+  let d = {};
+  try {
+    d = e.data ? e.data.json() : {};
+  } catch {}
+  if (d.t === 'ring') {
+    e.waitUntil(
+      (async () => {
+        const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+        const visible = wins.some((w) => w.visibilityState === 'visible');
+        for (const w of wins) {
+          w.postMessage({ type: 'incoming-ring-push', ringId: d.ringId, topic: d.topic });
+        }
+        if (!visible) {
+          await self.registration.showNotification('Входящий звонок ZVONochek', {
+            body: 'Кто-то звонит вам по личной ссылке',
+            tag: d.ringId,
+            icon: './icons/icon-192.png',
+            badge: './icons/icon-192.png',
+            requireInteraction: true,
+            renotify: false,
+            data: { ringId: d.ringId, topic: d.topic },
+          });
+        }
+      })()
+    );
+  } else if (d.t === 'ring-done') {
+    e.waitUntil(
+      self.registration
+        .getNotifications({ tag: d.ringId })
+        .then((ns) => ns.forEach((n) => n.close()))
+        .catch(() => {})
+    );
+  }
+});
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const ringId = e.notification.data?.ringId || '';
+  e.waitUntil(
+    (async () => {
+      const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const w of wins) {
+        await w.focus();
+        w.postMessage({ type: 'incoming-ring-push', ringId });
+        return;
+      }
+      await clients.openWindow('./' + (ringId ? `?ring=${encodeURIComponent(ringId)}` : ''));
+    })()
+  );
+});
+
+self.addEventListener('pushsubscriptionchange', (e) => {
+  // Страница при следующем старте сверит подписку и перерегистрируется в Inbox.
+  e.waitUntil(
+    caches.open('zvonochek-flags').then((c) => c.put('/push-resubscribe', new Response('1')))
   );
 });
