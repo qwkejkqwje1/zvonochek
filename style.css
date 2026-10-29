@@ -490,6 +490,20 @@ h1 {
   margin-top: 12px;
 }
 
+/* v22: баннер диагностики загрузки — заметная плашка поверх вёрстки */
+.zv-diag {
+  position: sticky;
+  top: 0;
+  z-index: 9999;
+  padding: 12px 16px;
+  background: var(--red-soft);
+  border-bottom: 2px solid var(--red);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 /* ---------- Поля ---------- */
 label {
   display: block;

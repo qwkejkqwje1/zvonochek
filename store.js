@@ -10,14 +10,45 @@ export function idb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+    let settled = false;
+    const fail = (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      dbPromise = null; // позволяем повторную попытку после закрытия чужих вкладок
+      reject(e);
+    };
+    // v22: апгрейд базы может молча висеть, если старая версия открыта в другой
+    // вкладке или в установленном PWA, — не висим молча дольше 10 секунд.
+    const timer = setTimeout(() => fail(new Error('База данных не отвечает (10 с)')), 10000);
     req.onupgradeneeded = () => {
       const db = req.result;
       for (const name of STORES) {
         if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onblocked = () =>
+      fail(
+        new Error(
+          'База данных заблокирована: закройте другие вкладки и установленное приложение ZVONochek, затем обновите страницу'
+        )
+      );
+    req.onsuccess = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const db = req.result;
+      // Если другая вкладка захочет поднять версию — отпускаем соединение,
+      // чтобы не блокировать её апгрейд (и не висеть самим в onblocked у неё).
+      db.onversionchange = () => {
+        try {
+          db.close();
+        } catch {}
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    req.onerror = () => fail(req.error);
   });
   return dbPromise;
 }

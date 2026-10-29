@@ -1,11 +1,11 @@
-import { CONFIG } from './config.js?v=21';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed } from './crypto.js?v=21';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=21';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=21';
-import { kvPut, kvAll } from './store.js?v=21';
-import { Signaling } from './signaling.js?v=21';
+import { CONFIG } from './config.js?v=22';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed } from './crypto.js?v=22';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=22';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=22';
+import { kvPut, kvAll } from './store.js?v=22';
+import { Signaling } from './signaling.js?v=22';
 
-export const APP_VERSION = 21;
+export const APP_VERSION = 22;
 export const APP_BUILD = '2026-10-30';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -20,7 +20,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=21').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=22').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -3096,7 +3096,15 @@ async function renderCalls() {
 
 async function refreshPersonalUI() {
   if (!$('#personalBox')) return;
-  const has = await hasPersonal();
+  let has;
+  try {
+    has = await hasPersonal();
+  } catch (e) {
+    // v22: не молчим — владелец должен видеть, что хранилище недоступно.
+    const hm = $('#homeMsg');
+    if (hm) hm.textContent = 'Не удалось открыть локальное хранилище: ' + (e?.message || e);
+    return;
+  }
   $('#personalNone')?.classList.toggle('hidden', has);
   $('#personalMain')?.classList.toggle('hidden', !has);
   if (!has) return;
@@ -3197,9 +3205,17 @@ $('#btnDecline') &&
 
 $('#btnCreatePersonal') &&
   ($('#btnCreatePersonal').onclick = async () => {
-    await ensurePersonal(myName() || 'Владелец');
-    toast('Личная ссылка создана — отправьте её тем, кто должен вам звонить');
-    refreshPersonalUI().catch(() => {});
+    try {
+      await ensurePersonal(myName() || 'Владелец');
+      toast('Личная ссылка создана — отправьте её тем, кто должен вам звонить');
+      refreshPersonalUI().catch(() => {});
+    } catch (e) {
+      // v22: раньше здесь не было try/catch — любая ошибка (например,
+      // заблокированная IndexedDB) умирала молча, кнопка «не работала».
+      const text = 'Не удалось создать ссылку: ' + (e?.message || e);
+      toast(text);
+      window.__zvShowDiag?.(text + ' Пришлите этот текст разработчику.');
+    }
   });
 $('#btnCopyPersonal') &&
   ($('#btnCopyPersonal').onclick = () => S.personal && copy(personalLinkOf(S.personal)));
@@ -3398,6 +3414,10 @@ window.ZVGroupAPI = {
     log('Групповой модуль подключён (mesh до ' + (MAX_REMOTE_PEERS + 1) + ' участников)');
   },
 };
+
+// v22: флаг успешной загрузки модуля для watchdog в zvdiag.js — выставляется
+// только здесь, в самом конце инициализации, после всех привязок обработчиков.
+window.__zvAppBooted = true;
 
 const action = new URLSearchParams(location.search).get('action');
 if (action === 'new' && !location.hash) {

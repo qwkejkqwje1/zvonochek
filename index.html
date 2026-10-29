@@ -17,9 +17,12 @@
 <link rel="icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=21">
+<link rel="stylesheet" href="style.css?v=22">
 </head>
 <body>
+
+<!-- v22: баннер диагностики загрузки (показывает zvdiag.js / window.__zvShowDiag) -->
+<div id="zvDiag" class="zv-diag hidden" role="alert"></div>
 
 <!-- Иконки: единый stroke-набор (24×24, currentColor) -->
 <svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
@@ -143,6 +146,7 @@
           <input id="chatLinkInput" placeholder="Ссылка на чат #chat=…" autocomplete="off" spellcheck="false">
           <button id="btnOpenChat" class="btn"><svg class="ic"><use href="#i-arrow-right"/></svg><span>В чат</span></button>
         </div>
+        <p id="chatHomeNote" class="msg"></p>
         <ul id="chatRoomsList" class="plain-list"></ul>
       </div>
 
@@ -519,9 +523,10 @@
 
 <script src="vendor/mqtt.min.js"></script>
 <script src="vendor/qrcode.js"></script>
-<script type="module" src="app.js?v=21"></script>
-<script type="module" src="group.js?v=21"></script>
-<script type="module" src="chat.js?v=21"></script>
+<script src="zvdiag.js?v=22"></script>
+<script type="module" src="app.js?v=22"></script>
+<script type="module" src="group.js?v=22"></script>
+<script type="module" src="chat.js?v=22"></script>
 <!-- Входящий звонок (коммуникатор) -->
 <div id="incomingCall" class="call-modal hidden" role="dialog" aria-label="Входящий звонок">
   <div class="call-modal-card">

@@ -4,7 +4,7 @@
 // Звонковый путь не затрагивается: кнопка «Позвонить» лишь создаёт обычную
 // звонковую комнату и постит приглашение служебным сообщением.
 // Техплан: ZVONochek-MESSENGER-TECHPLAN-v21.md.
-import { CONFIG } from './config.js?v=21';
+import { CONFIG } from './config.js?v=22';
 import {
   b64u,
   newSecret,
@@ -13,15 +13,15 @@ import {
   decryptChatMessage,
   hashChatBlob,
   newMsgId,
-} from './crypto.js?v=21';
-import { kvGet, kvPut, kvAll } from './store.js?v=21';
+} from './crypto.js?v=22';
+import { kvGet, kvPut, kvAll } from './store.js?v=22';
 import {
   getChatDevice,
   signChatText,
   verifyChatSig,
   encryptWithVault,
   decryptWithVault,
-} from './identity.js?v=21';
+} from './identity.js?v=22';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -83,6 +83,11 @@ async function roomMessages(roomId) {
 function note(text) {
   const n = $('#chatNote');
   if (n) n.textContent = text || '';
+  // v22: #chatNote находится внутри экрана комнаты — пока комната скрыта,
+  // дублируем текст в #chatHomeNote на главном экране, иначе ошибки и
+  // подсказки чата владелец не видит вообще (баг «кнопка молчит»).
+  const h = $('#chatHomeNote');
+  if (h && $('#chatroom')?.classList.contains('hidden')) h.textContent = text || '';
 }
 function status(text) {
   const s = $('#chatStatus');
@@ -92,6 +97,8 @@ function showChatScreen() {
   $('#home')?.classList.add('hidden');
   $('#prejoin')?.classList.add('hidden');
   $('#chatroom')?.classList.remove('hidden');
+  const h = $('#chatHomeNote');
+  if (h) h.textContent = ''; // v22: комната открыта — домашний дубль подсказок больше не нужен
 }
 function hideChatScreen() {
   $('#chatroom')?.classList.add('hidden');
@@ -377,9 +384,18 @@ function initChatUI() {
   const create = $('#btnCreateChat');
   if (create) {
     create.onclick = async () => {
-      const seed = newSecret();
-      await openRoomBySeed(seed);
-      note('Ссылка на чат — в адресной строке и по кнопке «Ссылка». Передайте её собеседнику вне этого чата.');
+      try {
+        const seed = newSecret();
+        await openRoomBySeed(seed);
+        note('Ссылка на чат — в адресной строке и по кнопке «Ссылка». Передайте её собеседнику вне этого чата.');
+      } catch (e) {
+        // v22: openRoomBySeed ловит свои ошибки сама (note теперь виден на
+        // главном экране); сюда долетают только сбои вне её — показываем
+        // и в note, и баннером, чтобы не было молчания.
+        const text = 'Не удалось создать чат: ' + (e?.message || e);
+        note(text);
+        window.__zvShowDiag?.(text + ' Пришлите этот текст разработчику.');
+      }
     };
   }
   const openBtn = $('#btnOpenChat');
@@ -466,6 +482,8 @@ function initChatUI() {
       note('Смена эпохи появится в фазе 3: новый ключ будет завёрнут на устройства оставленных участников (техплан v21, §6).');
   }
   renderRoomList().catch(() => {});
+  // v22: флаг успешной инициализации чата для watchdog в zvdiag.js.
+  window.__zvChatBooted = true;
 }
 
 function checkHash() {
