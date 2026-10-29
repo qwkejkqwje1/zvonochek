@@ -1,4 +1,4 @@
-// ZVONochek v22 — ранняя диагностика загрузки (классический скрипт, НЕ модуль).
+// ZVONochek v23 — ранняя диагностика загрузки (классический скрипт, НЕ модуль).
 // Подключается в index.html ПЕРЕД модульными скриптами, чтобы перехватить и их
 // ошибки загрузки. Отдельным файлом, а не inline: CSP страницы
 // (script-src 'self') запрещает inline-скрипты — inline-вариант молча не
@@ -6,6 +6,11 @@
 // Собирает window.__zvErrors (события error + unhandledrejection), дублирует
 // в localStorage 'zvLastErrors' (макс. 10) и показывает видимый баннер
 // #zvDiag при сбое загрузки модулей (watchdog, 9 с после DOMContentLoaded).
+// v23: проба окружения window.__zvProbe() — WebCrypto присутствует не всегда
+// полностью: у владельца v22 баннер показал «crypto.subtle.generateKeyPair
+// is not a function» при живом importKey/deriveKey (звонки работали, а
+// генерация ключей — нет). Поэтому окружение проверяется СРАЗУ при загрузке,
+// а не по нажатию кнопки, и его сводка дописывается к каждому баннеру.
 (function () {
   var MAX = 10;
   window.__zvErrors = [];
@@ -25,8 +30,46 @@
     var r = ev.reason;
     pushErr('unhandledrejection: ' + ((r && r.message) || r || 'unknown'), '');
   });
+  // ---------- Проба окружения (v23) ----------
+  window.__zvProbe = function () {
+    var s = null;
+    try {
+      s = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
+    } catch (x) {}
+    var ua = '';
+    try {
+      ua = String(navigator.userAgent || '').slice(0, 80);
+    } catch (x) {}
+    return {
+      ua: ua,
+      secure: !!window.isSecureContext,
+      subtle: typeof (window.crypto && window.crypto.subtle),
+      gen: s ? typeof s.generateKeyPair : 'undefined',
+      sign: s ? typeof s.sign : 'undefined',
+      imp: s ? typeof s.importKey : 'undefined',
+      enc: s ? typeof s.encrypt : 'undefined',
+    };
+  };
+  window.__zvEnvText = function () {
+    var p = window.__zvProbe();
+    return (
+      'secure=' + p.secure +
+      ', subtle=' + p.subtle +
+      ', generateKeyPair=' + p.gen +
+      ', sign=' + p.sign +
+      ', importKey=' + p.imp +
+      ', encrypt=' + p.enc +
+      ', UA: ' + p.ua
+    );
+  };
   window.__zvShowDiag = function (text) {
     try {
+      text = String(text);
+      if (text.indexOf('[окружение:') === -1) {
+        try {
+          text += ' [окружение: ' + window.__zvEnvText() + ']';
+        } catch (x) {}
+      }
       var d = document.getElementById('zvDiag');
       if (!d) {
         d = document.createElement('div');
@@ -34,7 +77,17 @@
         d.className = 'zv-diag';
         (document.body || document.documentElement).appendChild(d);
       }
-      d.textContent = text;
+      d.textContent = text + ' ✕';
+      // Закрытие по клику на баннер (обработчик вешается один раз на элемент).
+      if (!d.__zvCloseBound) {
+        d.__zvCloseBound = true;
+        d.addEventListener('click', function () {
+          try {
+            d.classList.add('hidden');
+            d.style.display = 'none';
+          } catch (x) {}
+        });
+      }
       d.classList.remove('hidden');
       d.style.display = 'block';
     } catch (x) {}
@@ -56,11 +109,27 @@
       missing.length === 2 ? 'Модули приложения и чата не загрузились' : 'Модуль ' + missing[0] + ' не загрузился';
     window.__zvShowDiag('ZVONochek: ' + what + '. Ошибки: ' + errorsText() + '. Пришлите этот текст разработчику.');
   }
+  // v23: проверка окружения при загрузке. Если WebCrypto нет или в нём нет
+  // generateKeyPair, личная ссылка и чаты не заработают в принципе (ключи
+  // генерируются на устройстве) — предупреждаем сразу, а не по нажатию.
+  // Звонки при этом могут работать: deriveRoom обходится importKey/deriveKey.
+  function envCheck() {
+    var p = window.__zvProbe();
+    if (p.subtle !== 'object' || p.gen !== 'function') {
+      window.__zvShowDiag(
+        'Этот браузер не даёт генерировать ключи шифрования (нет crypto.subtle.generateKeyPair) — ' +
+          'личная ссылка и чаты здесь не заработают, звонки могут работать. ' +
+          'Откройте сайт в актуальном Chrome/Firefox/Safari по https.'
+      );
+    }
+  }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () {
+      envCheck();
       setTimeout(watchdog, 9000);
     });
   } else {
+    envCheck();
     setTimeout(watchdog, 9000);
   }
 })();

@@ -1,19 +1,19 @@
-// ZVONochek Service Worker v22 — мгновенный старт, офлайн-оболочка и безопасные обновления
-const CACHE_NAME = 'zvonochek-v22';
+// ZVONochek Service Worker v23 — мгновенный старт, офлайн-оболочка и безопасные обновления
+const CACHE_NAME = 'zvonochek-v23';
 const CORE = [
   './',
   './index.html',
-  './style.css?v=22',
-  './app.js?v=22',
-  './group.js?v=22',
-  './store.js?v=22',
-  './identity.js?v=22',
-  './inbox.js?v=22',
-  './chat.js?v=22',
-  './signaling.js?v=22',
-  './crypto.js?v=22',
-  './config.js?v=22',
-  './zvdiag.js?v=22',
+  './style.css?v=23',
+  './app.js?v=23',
+  './group.js?v=23',
+  './store.js?v=23',
+  './identity.js?v=23',
+  './inbox.js?v=23',
+  './chat.js?v=23',
+  './signaling.js?v=23',
+  './crypto.js?v=23',
+  './config.js?v=23',
+  './zvdiag.js?v=23',
   './icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -22,7 +22,7 @@ const CORE = [
   './manifest.webmanifest',
   './vendor/mqtt.min.js',
   './vendor/qrcode.js',
-  './vendor/secp256k1.js?v=22',
+  './vendor/secp256k1.js?v=23',
 ];
 
 self.addEventListener('install', (e) => {

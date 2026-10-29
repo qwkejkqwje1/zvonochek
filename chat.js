@@ -4,7 +4,7 @@
 // Звонковый путь не затрагивается: кнопка «Позвонить» лишь создаёт обычную
 // звонковую комнату и постит приглашение служебным сообщением.
 // Техплан: ZVONochek-MESSENGER-TECHPLAN-v21.md.
-import { CONFIG } from './config.js?v=22';
+import { CONFIG } from './config.js?v=23';
 import {
   b64u,
   newSecret,
@@ -13,15 +13,15 @@ import {
   decryptChatMessage,
   hashChatBlob,
   newMsgId,
-} from './crypto.js?v=22';
-import { kvGet, kvPut, kvAll } from './store.js?v=22';
+} from './crypto.js?v=23';
+import { kvGet, kvPut, kvAll } from './store.js?v=23';
 import {
   getChatDevice,
   signChatText,
   verifyChatSig,
   encryptWithVault,
   decryptWithVault,
-} from './identity.js?v=22';
+} from './identity.js?v=23';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
