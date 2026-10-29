@@ -1,17 +1,18 @@
-// ZVONochek Service Worker v20 — мгновенный старт, офлайн-оболочка и безопасные обновления
-const CACHE_NAME = 'zvonochek-v20';
+// ZVONochek Service Worker v21 — мгновенный старт, офлайн-оболочка и безопасные обновления
+const CACHE_NAME = 'zvonochek-v21';
 const CORE = [
   './',
   './index.html',
-  './style.css?v=20',
-  './app.js?v=20',
-  './group.js?v=20',
-  './store.js?v=20',
-  './identity.js?v=20',
-  './inbox.js?v=20',
-  './signaling.js?v=20',
-  './crypto.js?v=20',
-  './config.js?v=20',
+  './style.css?v=21',
+  './app.js?v=21',
+  './group.js?v=21',
+  './store.js?v=21',
+  './identity.js?v=21',
+  './inbox.js?v=21',
+  './chat.js?v=21',
+  './signaling.js?v=21',
+  './crypto.js?v=21',
+  './config.js?v=21',
   './icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -20,7 +21,7 @@ const CORE = [
   './manifest.webmanifest',
   './vendor/mqtt.min.js',
   './vendor/qrcode.js',
-  './vendor/secp256k1.js?v=20',
+  './vendor/secp256k1.js?v=21',
 ];
 
 self.addEventListener('install', (e) => {
@@ -89,7 +90,7 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
-// ---------- v20: Web Push коммуникатора (payload — только {t, topic, ringId}) ----------
+// ---------- Web Push коммуникатора (payload — только {t, topic, ringId}) ----------
 self.addEventListener('push', (e) => {
   let d = {};
   try {
@@ -112,6 +113,25 @@ self.addEventListener('push', (e) => {
             requireInteraction: true,
             renotify: false,
             data: { ringId: d.ringId, topic: d.topic },
+          });
+        }
+      })()
+    );
+  } else if (d.t === 'chat') {
+    // v21: wake-up приватного чата. Payload несёт только хэш-префикс комнаты:
+    // ни текста, ни никнейма — уведомление принципиально пустое по смыслу.
+    e.waitUntil(
+      (async () => {
+        const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+        const visible = wins.some((w) => w.visibilityState === 'visible');
+        for (const w of wins) w.postMessage({ type: 'chat-push', room: d.room });
+        if (!visible) {
+          await self.registration.showNotification('Новое сообщение — ZVONochek', {
+            body: 'В приватном чате есть непрочитанное сообщение',
+            tag: 'chat-' + (d.room || ''),
+            icon: './icons/icon-192.png',
+            badge: './icons/icon-192.png',
+            data: { chat: d.room || '' },
           });
         }
       })()

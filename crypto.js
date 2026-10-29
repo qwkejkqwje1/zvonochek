@@ -123,3 +123,111 @@ export async function safetyCodeBridge(topic, idA, idB) {
   const digits = (((h[5] << 16) | (h[6] << 8) | h[7]) % 1000000).toString().padStart(6, '0');
   return { emoji, digits: digits.slice(0, 3) + ' ' + digits.slice(3) };
 }
+
+
+// =======================================================================
+// v21: приватный текстовый чат (комнаты по ссылке). Отдельный вывод ключей,
+// звонковый deriveRoom выше НЕ используется и не меняется.
+// Техплан: ZVONochek-MESSENGER-TECHPLAN-v21.md.
+//
+// Из seed (256 бит, живёт только во #фрагменте ссылки и в IndexedDB)
+// через HKDF-SHA256 с раздельными info-метками выводятся:
+//  - roomId:      публичный адрес Durable Object комнаты (hex, 64 символа)
+//  - roomKey:     AES-256-GCM ключ эпохи (невыгружаемый)
+//  - accessToken: клиент предъявляет серверу; сервер хранит только SHA-256
+// opts.epoch — фаза 3 (ротация), входит в метку ключа; фаза 1: 0.
+// opts.pinIkm — фаза 2 (PIN): результат медленного KDF, подмешивается в IKM.
+// =======================================================================
+export const CHAT_PT_SIZE = 4096; // размер plaintext-блока с паддингом
+export const CHAT_BLOB_SIZE = 12 + CHAT_PT_SIZE + 16; // nonce + ct + тег = 4124
+
+export async function sha256hex(data) {
+  const buf = typeof data === 'string' ? te.encode(data) : data;
+  const h = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+export function newMsgId() {
+  return crypto.randomUUID();
+}
+
+export async function deriveChatKeys(seedBytes, opts = {}) {
+  if (!(seedBytes instanceof Uint8Array) || seedBytes.length < 32) {
+    throw new Error('bad seed');
+  }
+  const epoch = Number(opts.epoch || 0);
+  let ikm = seedBytes;
+  if (opts.pinIkm) {
+    // Фаза 2: IKM = seed || pinIkm (pinIkm — выход PBKDF2 от PIN, 32 байта)
+    ikm = new Uint8Array(seedBytes.length + opts.pinIkm.length);
+    ikm.set(seedBytes, 0);
+    ikm.set(opts.pinIkm, seedBytes.length);
+  }
+  const base = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, [
+    'deriveBits',
+    'deriveKey',
+  ]);
+  const salt = te.encode('ZVONochek/chat/v1');
+  const hk = (info) => ({ name: 'HKDF', hash: 'SHA-256', salt, info: te.encode(info) });
+  const roomIdBits = await crypto.subtle.deriveBits(hk('chat/v1/room-id'), base, 256);
+  const roomKey = await crypto.subtle.deriveKey(
+    hk(`chat/v1/room-key/e${epoch}`),
+    base,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+  const tokenBits = await crypto.subtle.deriveBits(hk('chat/v1/access-token'), base, 256);
+  return {
+    roomId: hex(roomIdBits),
+    roomKey,
+    accessToken: b64u.enc(tokenBits),
+    epoch,
+  };
+}
+
+// Шифрование одного сообщения: plaintext доводится до ровно CHAT_PT_SIZE
+// байт (2 байта длины JSON + JSON + случайный паддинг), blob на проводе —
+// nonce(12) || ciphertext. Возвращает Uint8Array длиной CHAT_BLOB_SIZE.
+export async function encryptChatMessage(roomKey, msgObj) {
+  const json = te.encode(JSON.stringify(msgObj));
+  if (json.length > CHAT_PT_SIZE - 2) throw new Error('message too long');
+  const pt = new Uint8Array(CHAT_PT_SIZE);
+  new DataView(pt.buffer).setUint16(0, json.length, false);
+  pt.set(json, 2);
+  crypto.getRandomValues(pt.subarray(2 + json.length));
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, roomKey, pt)
+  );
+  const blob = new Uint8Array(CHAT_BLOB_SIZE);
+  blob.set(nonce, 0);
+  blob.set(ct, 12);
+  return blob;
+}
+
+// Обратное преобразование; при любом несоответствии (размер, тег AEAD,
+// длина, JSON) возвращает null — чужие и битые blob молча отбрасываются.
+export async function decryptChatMessage(roomKey, blob) {
+  if (!(blob instanceof Uint8Array) || blob.length !== CHAT_BLOB_SIZE) return null;
+  try {
+    const pt = new Uint8Array(
+      await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: blob.subarray(0, 12) },
+        roomKey,
+        blob.subarray(12)
+      )
+    );
+    const len = new DataView(pt.buffer, pt.byteOffset).getUint16(0, false);
+    if (len > CHAT_PT_SIZE - 2) return null;
+    return JSON.parse(td.decode(pt.subarray(2, 2 + len)));
+  } catch {
+    return null;
+  }
+}
+
+// Хэш шифротекста для дедупа (клиент и сервер считают одинаково — по
+// сырым байтам blob).
+export async function hashChatBlob(blob) {
+  return sha256hex(blob);
+}

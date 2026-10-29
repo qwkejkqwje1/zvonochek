@@ -1,12 +1,12 @@
-import { CONFIG } from './config.js?v=20';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed } from './crypto.js?v=20';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=20';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=20';
-import { kvPut, kvAll } from './store.js?v=20';
-import { Signaling } from './signaling.js?v=20';
+import { CONFIG } from './config.js?v=21';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed } from './crypto.js?v=21';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=21';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=21';
+import { kvPut, kvAll } from './store.js?v=21';
+import { Signaling } from './signaling.js?v=21';
 
-export const APP_VERSION = 20;
-export const APP_BUILD = '2026-10-27';
+export const APP_VERSION = 21;
+export const APP_BUILD = '2026-10-30';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
 for (const el of document.querySelectorAll('[data-ver]')) el.textContent = 'v' + APP_VERSION;
@@ -20,7 +20,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=20').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=21').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -260,6 +260,14 @@ function beep(freq = 880, dur = 0.14) {
 // ---------- Маршрутизация и Главный экран ----------
 function route() {
   const params = new URLSearchParams(location.hash.slice(1));
+  // v21: ссылка приватного чата (#chat=<seed>) — обрабатывает chat.js,
+  // звонковая маршрутизация ниже её не касается.
+  if (params.get('chat')) {
+    S.secret = null;
+    show('home');
+    window.ZVChat?.openFromHash?.();
+    return;
+  }
   const k = params.get('k');
   const d = params.get('d');
   S.linkFp = d && /^[a-f0-9]{32}$/.test(d) ? d : null;

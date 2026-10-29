@@ -3,8 +3,8 @@
 // IndexedDB) удостоверяет ключи устройств; секрет личной ссылки зашифрован
 // vault-ключом устройства. Личная ссылка: #k=<секрет>&d=<fp>, где fp — первые
 // 32 hex SHA-256 от X9.62-представления master-публичного ключа.
-import { b64u, newSecret } from './crypto.js?v=20';
-import { kvGet, kvPut } from './store.js?v=20';
+import { b64u, newSecret } from './crypto.js?v=21';
+import { kvGet, kvPut } from './store.js?v=21';
 
 const te = new TextEncoder();
 let cached = null; // {secret, masterPub, masterPriv, fp, devicePub, devicePriv, cert, label}
@@ -124,4 +124,81 @@ export async function signWithDevice(text) {
 export async function signWithKey(key, text) {
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, te.encode(text));
   return b64u.enc(sig);
+}
+
+
+// ---------- v21: чат — гостевое устройство, vault-хелперы, проверка подписей ----------
+// У гостя без личной идентичности создаётся локальная пара устройства
+// (без master-сертификата): сертификат в чате не требуется, закрепление
+// собеседника идёт по TOFU из intro-сообщения. Существующий API выше не меняется.
+export async function encryptWithVault(text) {
+  const vault = await getVaultKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, vault, te.encode(text));
+  return b64u.enc(new Uint8Array([...iv, ...new Uint8Array(ct)]));
+}
+
+export async function decryptWithVault(enc) {
+  const vault = await getVaultKey();
+  const raw = b64u.dec(enc);
+  const pt = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: raw.subarray(0, 12) },
+    vault,
+    raw.subarray(12)
+  );
+  return new TextDecoder().decode(pt);
+}
+
+export async function ensureGuestDevice(label = 'Гость') {
+  let dev = await kvGet('devices', 'guest');
+  if (dev?.devicePriv && dev?.devicePub) return dev;
+  const pair = await crypto.subtle.generateKeyPair({ name: 'ECDSA', namedCurve: 'P-256' }, false, [
+    'sign',
+    'verify',
+  ]);
+  const devicePub = b64u.enc(await crypto.subtle.exportKey('raw', pair.publicKey));
+  dev = { devicePub, devicePriv: pair.privateKey, cert: null, label, guest: true };
+  await kvPut('devices', 'guest', dev);
+  return dev;
+}
+
+// Устройство для подписи сообщений чата: личное, если идентичность есть,
+// иначе гостевое. Возвращает {devicePub, devicePriv, cert, guest}.
+export async function getChatDevice() {
+  const p = await getPersonal();
+  if (p) {
+    return { devicePub: p.devicePub, devicePriv: p.devicePriv, cert: p.cert, guest: false };
+  }
+  const g = await ensureGuestDevice();
+  return { devicePub: g.devicePub, devicePriv: g.devicePriv, cert: null, guest: true };
+}
+
+export async function signChatText(text) {
+  const d = await getChatDevice();
+  const sig = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    d.devicePriv,
+    te.encode(text)
+  );
+  return b64u.enc(sig);
+}
+
+export async function verifyChatSig(devicePubB64, sigB64, text) {
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      b64u.dec(devicePubB64),
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify']
+    );
+    return await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      key,
+      b64u.dec(sigB64),
+      te.encode(text)
+    );
+  } catch {
+    return false;
+  }
 }

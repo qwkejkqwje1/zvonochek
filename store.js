@@ -2,8 +2,8 @@
 // vault-ключ, идентичность, устройства, журнал звонков.
 // Все хранилища — с внешними ключами (put(value, key)).
 const DB_NAME = 'zvonochek';
-const DB_VERSION = 1;
-const STORES = ['vault', 'identity', 'devices', 'calls', 'missed'];
+const DB_VERSION = 2; // v21: добавлены сторы чата (rooms, messages); существующие данные не трогаются
+const STORES = ['vault', 'identity', 'devices', 'calls', 'missed', 'rooms', 'messages'];
 
 let dbPromise = null;
 export function idb() {

@@ -1,9 +1,10 @@
-// ZVONochek Worker v20 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
+// ZVONochek Worker v21 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
 // Коммуникатор: /inbox/:topic — Inbox Durable Object (worker/inbox.js): устройства,
 // ring-дозвон, пропущенные, Web Push (worker/push.js, RFC 8291/8292).
 import { Inbox } from './inbox.js';
+import { ChatRoom } from './chat-room.js';
 import { getVapid } from './push.js';
-export { Inbox };
+export { Inbox, ChatRoom };
 // Worker пересылает только зашифрованные сообщения (AES-256-GCM) и не знает ключей комнат.
 
 const JSON_HEADERS = {
@@ -75,7 +76,7 @@ export default {
         ? {
             'access-control-allow-origin': origin,
             'access-control-allow-methods': 'GET, POST, OPTIONS',
-            'access-control-allow-headers': 'Content-Type, Authorization',
+            'access-control-allow-headers': 'Content-Type, Authorization, X-Access-Token, X-Device',
             'access-control-max-age': '86400',
             vary: 'Origin',
           }
@@ -91,7 +92,7 @@ export default {
         (env.METERED_DOMAIN && env.METERED_API_KEY) ||
         (env.TURN_URLS && env.TURN_USERNAME)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 20, turn: hasTurn, inbox: !!env.INBOX, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 21, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {
@@ -123,6 +124,17 @@ export default {
       const resp = await stub.fetch(req);
       if (resp.status === 101 || resp.webSocket) return resp; // WS-апгрейд возвращаем как есть
       // CORS для ответов DO (сам DO заголовков не ставит)
+      const h = new Headers(resp.headers);
+      for (const [k, v] of Object.entries(cors)) h.set(k, v);
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h, webSocket: resp.webSocket });
+    }
+    // 0b) Мессенджер v21: ChatRoom Durable Object одной чат-комнаты (слепой релей шифротекста)
+    const chatMatch = url.pathname.match(/^\/chat\/([a-f0-9]{64})(\/.*)?$/);
+    if (chatMatch) {
+      if (!env.CHAT_ROOMS) return json({ error: 'chat not configured' }, 501, cors);
+      const stub = env.CHAT_ROOMS.get(env.CHAT_ROOMS.idFromName(chatMatch[1]));
+      const resp = await stub.fetch(req);
+      if (resp.status === 101 || resp.webSocket) return resp; // WS-апгрейд возвращаем как есть
       const h = new Headers(resp.headers);
       for (const [k, v] of Object.entries(cors)) h.set(k, v);
       return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h, webSocket: resp.webSocket });
