@@ -3,8 +3,8 @@
 // IndexedDB) удостоверяет ключи устройств; секрет личной ссылки зашифрован
 // vault-ключом устройства. Личная ссылка: #k=<секрет>&d=<fp>, где fp — первые
 // 32 hex SHA-256 от X9.62-представления master-публичного ключа.
-import { b64u, newSecret } from './crypto.js?v=23';
-import { kvGet, kvPut } from './store.js?v=23';
+import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=24';
+import { kvGet, kvPut } from './store.js?v=24';
 
 const te = new TextEncoder();
 let cached = null; // {secret, masterPub, masterPriv, fp, devicePub, devicePriv, cert, label}
@@ -37,10 +37,7 @@ export async function hasPersonal() {
 async function ensureDevice(masterPriv, label) {
   let dev = await kvGet('devices', 'self');
   if (dev?.devicePriv && dev?.cert) return dev;
-  const pair = await crypto.subtle.generateKeyPair({ name: 'ECDSA', namedCurve: 'P-256' }, false, [
-    'sign',
-    'verify',
-  ]);
+  const pair = await genP256KeyPair();
   const devicePub = b64u.enc(await crypto.subtle.exportKey('raw', pair.publicKey));
   const exp = Date.now() + 10 * 365 * 24 * 3600_000; // сертификат устройства на 10 лет
   const certText = `zv-device-v1|${devicePub}|${label}|${exp}`;
@@ -65,11 +62,7 @@ export async function ensurePersonal(label = 'Владелец') {
   const vault = await getVaultKey();
   let rec = await kvGet('identity', 'personal');
   if (!rec) {
-    const pair = await crypto.subtle.generateKeyPair(
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      false,
-      ['sign', 'verify']
-    );
+    const pair = await genP256KeyPair();
     const masterPub = b64u.enc(await crypto.subtle.exportKey('raw', pair.publicKey));
     const secret = newSecret();
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -152,10 +145,7 @@ export async function decryptWithVault(enc) {
 export async function ensureGuestDevice(label = 'Гость') {
   let dev = await kvGet('devices', 'guest');
   if (dev?.devicePriv && dev?.devicePub) return dev;
-  const pair = await crypto.subtle.generateKeyPair({ name: 'ECDSA', namedCurve: 'P-256' }, false, [
-    'sign',
-    'verify',
-  ]);
+  const pair = await genP256KeyPair();
   const devicePub = b64u.enc(await crypto.subtle.exportKey('raw', pair.publicKey));
   dev = { devicePub, devicePriv: pair.privateKey, cert: null, label, guest: true };
   await kvPut('devices', 'guest', dev);

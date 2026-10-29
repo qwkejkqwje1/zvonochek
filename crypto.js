@@ -231,3 +231,149 @@ export async function decryptChatMessage(roomKey, blob) {
 export async function hashChatBlob(blob) {
   return sha256hex(blob);
 }
+
+// =======================================================================
+// v24: fallback генерации пары ключей P-256 без subtle.generateKeyPair.
+// Диагноз (проба v23 у владельца): secure=true, subtle есть, sign /
+// importKey / encrypt / digest — функции, но generateKeyPair ===
+// undefined. Из-за этого падали ensurePersonal / ensureDevice /
+// ensureGuestDevice (identity.js) и гостевой ключ исходящего дозвона
+// (app.js); звонки при этом работали — generateKeyPair им не нужен.
+//
+// Конструкция: если нативная generateKeyPair есть — используется ОНА
+// (основной путь, поведение не меняется). Fallback включается только при
+// её отсутствии: приватный скаляр d — случайные 32 байта (rejection
+// sampling в [1, n-1]), публичная точка Q = d·G считается здесь на BigInt
+// (константы кривой — SEC 2 / FIPS 186-4), после чего обе половины пары
+// импортируются в обычные CryptoKey через subtle.importKey('jwk', …).
+// Результат неотличим для остального кода: те же CryptoKey, приватный
+// неэкспортируемый. Математика проверена тестом tests-v21/test-p256gen.mjs
+// на векторах openssl (d, x, y совпадают байт-в-байт).
+// Отдельным модулем не вынесено сознательно: по конвенциям проекта вся
+// криптография живёт в crypto.js, а новый файл потребовал бы ещё и
+// проводки через service worker (CORE) и ?v= импорты.
+// =======================================================================
+const P256 = {
+  p: 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffffn,
+  a: 0xffffffff00000001000000000000000000000000fffffffffffffffffffffffcn, // p - 3
+  b: 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bn,
+  gx: 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296n,
+  gy: 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5n,
+  n: 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n,
+};
+
+const bytesToBigInt = (bytes) => {
+  let v = 0n;
+  for (const b of bytes) v = (v << 8n) | BigInt(b);
+  return v;
+};
+const bigIntToBytes32 = (v) => {
+  const out = new Uint8Array(32);
+  for (let i = 31; i >= 0; i--) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
+};
+const modP = (v) => ((v % P256.p) + P256.p) % P256.p;
+
+// Обратный элемент по модулю p — расширенный алгоритм Евклида.
+function modInvP(v) {
+  let [oldR, r] = [modP(v), P256.p];
+  let [oldS, s] = [1n, 0n];
+  while (r !== 0n) {
+    const q = oldR / r;
+    [oldR, r] = [r, oldR - q * r];
+    [oldS, s] = [s, oldS - q * s];
+  }
+  if (oldR !== 1n) throw new Error('p256: not invertible');
+  return modP(oldS);
+}
+
+// Аффинные точки: {x, y} BigInt, точка на бесконечности — null.
+// Одна инверсия на сложение: для разовой генерации ключа это десятки
+// миллисекунд — приемлемо, fallback не на горячем пути.
+function p256PointAdd(Pt, Qt) {
+  if (Pt === null) return Qt;
+  if (Qt === null) return Pt;
+  const { p, a } = P256;
+  let lambda;
+  if (Pt.x === Qt.x) {
+    if (modP(Pt.y + Qt.y) === 0n) return null; // P + (-P), включая удвоение при y=0
+    lambda = modP((3n * Pt.x * Pt.x + a) * modInvP(2n * Pt.y)); // удвоение
+  } else {
+    lambda = modP((Qt.y - Pt.y) * modInvP(Qt.x - Pt.x));
+  }
+  const x = modP(lambda * lambda - Pt.x - Qt.x);
+  const y = modP(lambda * (Pt.x - x) - Pt.y);
+  return { x, y };
+}
+
+function p256PointMul(k) {
+  let result = null;
+  let addend = { x: P256.gx, y: P256.gy };
+  while (k > 0n) {
+    if (k & 1n) result = p256PointAdd(result, addend);
+    addend = p256PointAdd(addend, addend);
+    k >>= 1n;
+  }
+  return result;
+}
+
+// Чистая часть fallback (экспортируется для векторных тестов):
+// приватный скаляр (32 байта) → координаты публичной точки по 32 байта.
+export function p256PubFromPriv(dBytes) {
+  if (!(dBytes instanceof Uint8Array) || dBytes.length !== 32) {
+    throw new Error('p256: bad private scalar');
+  }
+  const d = bytesToBigInt(dBytes);
+  if (d < 1n || d >= P256.n) throw new Error('p256: scalar out of range');
+  const Q = p256PointMul(d);
+  return { x: bigIntToBytes32(Q.x), y: bigIntToBytes32(Q.y) };
+}
+
+// Fallback-пара из готового скаляра: JWK → subtle.importKey.
+// Usages разносятся по половинам, как у нативной пары: публичная —
+// ECDSA ['verify'] / ECDH [], приватная — вызывающие usages без
+// публичных операций (importKey приватного JWK с 'verify' отклоняется
+// WebCrypto: "Unsupported key usage").
+export async function p256KeyPairFromPriv(dBytes, usages = ['sign', 'verify'], algName = 'ECDSA') {
+  const { x, y } = p256PubFromPriv(dBytes);
+  const alg = { name: algName, namedCurve: 'P-256' };
+  const pubUsages = algName === 'ECDH' ? [] : ['verify'];
+  const privUsages =
+    algName === 'ECDH'
+      ? usages.filter((u) => u === 'deriveKey' || u === 'deriveBits')
+      : usages.filter((u) => u === 'sign');
+  const pubJwk = {
+    kty: 'EC',
+    crv: 'P-256',
+    x: b64u.enc(x),
+    y: b64u.enc(y),
+    ext: true,
+    key_ops: pubUsages,
+  };
+  const privJwk = { ...pubJwk, d: b64u.enc(dBytes), key_ops: privUsages };
+  // Публичный импортируется extractable=true: у нативной пары, созданной
+  // generateKeyPair(..., false, ...), публичная половина всё равно
+  // экспортируема (identity.js достаёт из неё raw) — повторяем семантику.
+  // Приватный — строго неэкспортируемый.
+  const publicKey = await crypto.subtle.importKey('jwk', pubJwk, alg, true, pubUsages);
+  const privateKey = await crypto.subtle.importKey('jwk', privJwk, alg, false, privUsages);
+  return { publicKey, privateKey };
+}
+
+// Генерация пары P-256: нативный generateKeyPair, если он есть; иначе
+// fallback выше. forceFallback — только для тестов.
+export async function genP256KeyPair(usages = ['sign', 'verify'], algName = 'ECDSA', forceFallback = false) {
+  if (!forceFallback && typeof crypto?.subtle?.generateKeyPair === 'function') {
+    return crypto.subtle.generateKeyPair({ name: algName, namedCurve: 'P-256' }, false, [
+      ...usages,
+    ]);
+  }
+  for (;;) {
+    const dBytes = crypto.getRandomValues(new Uint8Array(32));
+    const d = bytesToBigInt(dBytes);
+    if (d >= 1n && d < P256.n) return p256KeyPairFromPriv(dBytes, usages, algName);
+  }
+}

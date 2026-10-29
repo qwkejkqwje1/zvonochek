@@ -1,11 +1,11 @@
-import { CONFIG } from './config.js?v=23';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed } from './crypto.js?v=23';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=23';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=23';
-import { kvPut, kvAll } from './store.js?v=23';
-import { Signaling } from './signaling.js?v=23';
+import { CONFIG } from './config.js?v=24';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair } from './crypto.js?v=24';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=24';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=24';
+import { kvPut, kvAll } from './store.js?v=24';
+import { Signaling } from './signaling.js?v=24';
 
-export const APP_VERSION = 23;
+export const APP_VERSION = 24;
 export const APP_BUILD = '2026-10-30';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -20,7 +20,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=23').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=24').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -3306,10 +3306,7 @@ async function startOutgoingCall() {
     fromDevicePub = S.personal.devicePub;
     signFn = (t) => signWithDevice(t);
   } else {
-    const pair = await crypto.subtle.generateKeyPair({ name: 'ECDSA', namedCurve: 'P-256' }, false, [
-      'sign',
-      'verify',
-    ]);
+    const pair = await genP256KeyPair();
     const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
     fromDevicePub = b64u.enc(raw);
     fromFp = await fpOfPubRaw(raw);
