@@ -3067,3 +3067,859 @@ label.disabled select {
   border: 1px dashed var(--line, rgba(255, 255, 255, 0.14));
   box-shadow: none;
 }
+
+/* ==========================================================================
+   v32: Telegram Night Mode Redesign — Главный экран и Приватные чаты
+   ========================================================================== */
+
+:root {
+  --tg-bg: #0e1621;
+  --tg-panel: #17212b;
+  --tg-panel-2: #202b36;
+  --tg-hover: #202b36;
+  --tg-active: #2b5278;
+  --tg-bubble-in: #182533;
+  --tg-bubble-out: #2b5278;
+  --tg-accent: #5288c1;
+  --tg-accent-bright: #64b5ef;
+  --tg-border: rgba(255, 255, 255, 0.075);
+  --tg-text: #f5f5f5;
+  --tg-muted: #7f91a4;
+  --tg-green: #4dcd5e;
+}
+
+/* ---------- Главный экран в стиле Telegram Desktop / Mobile ---------- */
+#home.tg-home-screen {
+  padding: 0;
+  align-items: stretch;
+  justify-content: center;
+  background: var(--tg-bg);
+}
+
+#home .tg-app-shell {
+  max-width: 1440px;
+  width: 100%;
+  min-height: 100dvh;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  gap: 0;
+  align-items: stretch;
+  background: var(--tg-bg);
+  box-shadow: 0 0 60px rgba(0, 0, 0, 0.65);
+}
+
+#home .tg-main-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--tg-panel);
+  border-right: 1px solid var(--tg-border);
+  padding: 0;
+  height: 100dvh;
+  overflow: hidden;
+  animation: none;
+  text-align: left;
+}
+
+.tg-app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 10px;
+  background: var(--tg-panel);
+  border-bottom: 1px solid var(--tg-border);
+  flex: 0 0 auto;
+}
+
+.tg-brand {
+  gap: 11px;
+}
+.tg-brand .mark {
+  width: 38px;
+  height: 38px;
+  filter: none;
+}
+.tg-brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.tg-brand .brand-name {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.tg-brand .hero-badge {
+  margin: 0;
+  padding: 2px 8px;
+  font-size: 10px;
+  width: fit-content;
+  background: rgba(82, 136, 193, 0.16);
+  border-color: rgba(100, 181, 239, 0.28);
+  color: var(--tg-accent-bright);
+}
+
+.tg-icon-btn {
+  min-height: 36px;
+  width: 36px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tg-muted);
+  flex: 0 0 auto;
+}
+.tg-icon-btn:hover {
+  color: var(--tg-text);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* Вкладки разделов (Чаты / Звонки / Мой номер) */
+.tg-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  background: var(--tg-panel);
+  border-bottom: 1px solid var(--tg-border);
+  padding: 0 8px;
+  flex: 0 0 auto;
+}
+
+.tg-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 11px 6px;
+  background: transparent;
+  border: none;
+  color: var(--tg-muted);
+  font: 600 13.5px var(--font);
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+.tg-tab .ic {
+  width: 16px;
+  height: 16px;
+}
+.tg-tab:hover {
+  color: var(--tg-text);
+}
+.tg-tab.active {
+  color: var(--tg-accent-bright);
+}
+.tg-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 0;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--tg-accent-bright);
+}
+
+/* Панели вкладок на главной */
+#home .tg-pane {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 14px;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 10px;
+}
+#home .tg-pane.tab-active {
+  display: flex;
+}
+
+/* Панель поиска и создания чата */
+.tg-chat-list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.tg-search-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.tg-search-ic {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 15px;
+  height: 15px;
+  color: var(--tg-muted);
+  pointer-events: none;
+}
+.tg-search-wrap input {
+  margin: 0 !important;
+  min-height: 38px !important;
+  padding: 7px 12px 7px 35px !important;
+  border-radius: 20px !important;
+  background: #242f3d !important;
+  border: 1px solid transparent !important;
+  font-size: 13.5px !important;
+  color: var(--tg-text) !important;
+}
+.tg-search-wrap input:focus {
+  background: var(--tg-panel) !important;
+  border-color: var(--tg-accent-bright) !important;
+  box-shadow: none !important;
+}
+
+.tg-new-chat-btn {
+  min-height: 38px;
+  border-radius: 20px;
+  padding: 0 13px;
+  background: var(--tg-accent);
+  border-color: transparent;
+}
+.tg-new-chat-btn:hover {
+  background: #5d95d0;
+}
+
+.tg-drawer {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--tg-border);
+  border-radius: 14px;
+  padding: 12px;
+  flex: 0 0 auto;
+}
+.tg-drawer .personal-title {
+  font-size: 13.5px;
+  margin-bottom: 6px;
+  color: var(--tg-accent-bright);
+}
+.tg-full-join {
+  max-width: none;
+  width: 100%;
+  margin-top: 8px;
+}
+.tg-prefs-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+/* Список чатов в стиле Telegram */
+.tg-rooms-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0 -8px;
+  padding: 2px 8px;
+  list-style: none;
+}
+.tg-rooms-list li.tg-chat-li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  border-bottom: none;
+}
+.tg-chat-item {
+  flex: 1;
+  min-width: 0;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 12px !important;
+  padding: 9px 10px !important;
+  border-radius: 12px !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  text-align: left;
+  transition: background 0.14s ease;
+}
+.tg-chat-item:hover {
+  background: var(--tg-hover) !important;
+}
+.tg-chat-item.active {
+  background: var(--tg-active) !important;
+  border-color: transparent !important;
+}
+.tg-chat-item.active .chat-room-preview-text,
+.tg-chat-item.active .chat-room-when {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.tg-item-avatar {
+  position: relative;
+  width: 48px !important;
+  height: 48px !important;
+  border-radius: 50%;
+  font-size: 18px !important;
+  font-weight: 700;
+  flex: 0 0 48px;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2);
+}
+.tg-avatar-lock {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  font-size: 11px;
+  background: var(--tg-panel);
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tg-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tg-item-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--tg-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tg-draft-prefix {
+  color: #ef5b5b;
+  font-weight: 600;
+}
+
+.tg-empty-rooms {
+  border: none !important;
+  padding: 28px 12px !important;
+}
+.tg-empty-rooms-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  color: var(--tg-muted);
+  font-size: 13px;
+}
+.tg-empty-rooms-ic {
+  font-size: 36px;
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+.tg-empty-rooms-box b {
+  color: var(--tg-text);
+  font-size: 14.5px;
+}
+
+/* Вкладка Звонки */
+.tg-call-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 4px;
+}
+.tg-call-hero h1 {
+  font-size: clamp(26px, 3vw, 34px);
+  line-height: 1.12;
+}
+.tg-call-hero .sub {
+  margin: 0;
+  font-size: 14px;
+  color: var(--tg-muted);
+}
+
+.tg-home-footer {
+  padding: 10px 16px;
+  border-top: 1px solid var(--tg-border);
+  background: var(--tg-panel);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+.tg-home-footer .trust-row {
+  margin: 0;
+  font-size: 11.5px;
+  gap: 10px;
+}
+.tg-home-footer .home-ver {
+  margin: 0;
+  font-size: 11px;
+}
+
+/* Правая обзорная колонка на ПК */
+.tg-home-right-pane {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: clamp(28px, 4vw, 56px);
+  background:
+    radial-gradient(circle at 20% 20%, rgba(82, 136, 193, 0.08), transparent 45%),
+    radial-gradient(circle at 80% 80%, rgba(45, 212, 191, 0.06), transparent 45%),
+    var(--tg-bg);
+  gap: 24px;
+  animation: none;
+}
+.tg-right-hero {
+  max-width: 560px;
+}
+.tg-right-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: rgba(82, 136, 193, 0.14);
+  color: var(--tg-accent-bright);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.tg-right-hero h2 {
+  font-size: clamp(24px, 2.6vw, 32px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 8px;
+}
+.tg-right-hero p {
+  color: var(--tg-muted);
+  font-size: 15px;
+  line-height: 1.55;
+}
+.tg-feat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  max-width: 680px;
+}
+.tg-feat-grid .feat-card {
+  background: var(--tg-panel);
+  border-color: var(--tg-border);
+}
+
+/* ---------- Экран Чата (#chatroom) в стиле Telegram ---------- */
+#chatroom.tg-chat-screen {
+  padding: 0;
+  align-items: stretch;
+  justify-content: stretch;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  background: var(--tg-bg);
+}
+
+#chatroom .tg-chat-layout {
+  display: flex;
+  width: 100%;
+  max-width: 1680px;
+  height: 100dvh;
+  margin: 0 auto;
+  overflow: hidden;
+  background: var(--tg-bg);
+}
+
+/* Левый сайдбар в чате (виден на экранах ≥920px) */
+#chatroom .tg-sidebar {
+  display: none;
+  flex-direction: column;
+  flex: 0 0 360px;
+  width: 360px;
+  height: 100dvh;
+  background: var(--tg-panel);
+  border-right: 1px solid var(--tg-border);
+  min-height: 0;
+}
+.tg-sidebar-head {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--tg-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tg-sidebar-toprow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tg-sidebar-toprow b {
+  font-size: 16px;
+  flex: 1;
+}
+.tg-sidebar-new {
+  border-radius: 18px;
+  padding: 5px 11px;
+  background: var(--tg-accent);
+  border-color: transparent;
+}
+
+/* Правая панель чата: строго flex-column на 100dvh */
+#chatroom .tg-chat-main {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+  height: 100dvh;
+  padding: 0 !important;
+  margin: 0 !important;
+  display: flex !important;
+  flex-direction: column;
+  overflow: hidden !important;
+  background: var(--tg-bg);
+}
+
+#chatroom .tg-chat-card {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: none;
+}
+
+/* Верхняя панель чата (Telegram Topbar) */
+.tg-chat-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  min-height: 56px;
+  background: var(--tg-panel);
+  border-bottom: 1px solid var(--tg-border);
+  z-index: 15;
+}
+
+.tg-chat-header .chat-room-avatar {
+  width: 40px;
+  height: 40px;
+  font-size: 16px;
+}
+
+.tg-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+#chatRoomTitle {
+  font-size: 15.5px;
+  font-weight: 700;
+  color: var(--tg-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tg-status-pill {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--tg-muted);
+  margin: 0;
+  white-space: nowrap;
+}
+
+.tg-chat-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.tg-hdr-call {
+  border-radius: 18px;
+  padding: 6px 12px;
+}
+
+/* Компактные инфо-бары под шапкой */
+#chatroom .chat-pinbar,
+#chatroom .chat-gcallbar,
+#chatroom .chat-searchbar {
+  flex: 0 0 auto;
+  margin: 0;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  border-bottom: 1px solid var(--tg-border);
+  padding: 6px 14px;
+  background: var(--tg-panel);
+  z-index: 14;
+}
+#chatroom .chat-gcallbar {
+  background: rgba(52, 211, 153, 0.14);
+}
+
+/* Всплывающие поповеры над лентой сообщений */
+.tg-room-popovers {
+  position: relative;
+  z-index: 25;
+  flex: 0 0 auto;
+}
+.tg-popover {
+  position: absolute;
+  top: 6px;
+  right: 14px;
+  left: 14px;
+  max-width: 480px;
+  margin-left: auto !important;
+  margin-right: 0 !important;
+  background: var(--tg-panel) !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  border-radius: 16px !important;
+  padding: 14px !important;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.65) !important;
+  max-height: 70dvh;
+  overflow-y: auto;
+  text-align: left !important;
+}
+.tg-menu-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.tg-menu-grid .btn {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+/* Ворота ввода никнейма */
+.tg-nick-gate {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.tg-nick-card {
+  max-width: 380px;
+  width: 100%;
+  background: var(--tg-panel);
+  border: 1px solid var(--tg-border);
+  border-radius: 20px;
+  padding: 24px 22px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
+.tg-nick-icon {
+  font-size: 40px;
+  margin-bottom: 8px;
+}
+.tg-nick-card h3 {
+  font-size: 18px;
+  margin-bottom: 6px;
+}
+.tg-nick-card .personal-label {
+  text-align: left;
+  margin-top: 14px;
+}
+
+/* Лента сообщений в стиле Telegram */
+#chatroom .tg-messages {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  padding: 14px clamp(12px, 4vw, 48px) !important;
+  overflow-y: auto;
+  background-color: var(--tg-bg);
+  background-image:
+    radial-gradient(circle at 18% 22%, rgba(82, 136, 193, 0.06) 0 2px, transparent 3px),
+    radial-gradient(circle at 78% 66%, rgba(100, 181, 239, 0.05) 0 2px, transparent 3px);
+  background-size: 120px 120px, 160px 160px;
+}
+
+.tg-chat-welcome {
+  margin: auto;
+  padding: 24px 12px;
+  display: flex;
+  justify-content: center;
+}
+.tg-chat-welcome-card {
+  max-width: 340px;
+  background: rgba(23, 33, 43, 0.88);
+  border: 1px solid var(--tg-border);
+  border-radius: 16px;
+  padding: 18px 20px;
+  text-align: center;
+  backdrop-filter: blur(8px);
+}
+.tg-chat-welcome-icon {
+  font-size: 32px;
+  margin-bottom: 6px;
+}
+.tg-chat-welcome-card b {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 6px;
+  color: var(--tg-text);
+}
+.tg-chat-welcome-card p {
+  font-size: 12.5px;
+  color: var(--tg-muted);
+  line-height: 1.45;
+}
+
+/* Пузыри сообщений Telegram */
+#chatroom .chat-msg {
+  background: var(--tg-bubble-in);
+  border: none;
+  border-radius: 15px 15px 15px 4px;
+  padding: 7px 12px 5px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  max-width: min(74%, 620px);
+}
+#chatroom .chat-msg.mine {
+  background: var(--tg-bubble-out);
+  border-radius: 15px 15px 4px 15px;
+}
+#chatroom .chat-msg-row:not(.mine) .chat-msg.tail::after {
+  border-color: transparent transparent var(--tg-bubble-in) transparent;
+}
+#chatroom .chat-msg-row.mine .chat-msg.tail::after {
+  border-color: transparent transparent transparent var(--tg-bubble-out);
+}
+#chatroom .chat-msg.mine .chat-receipt.st-read {
+  color: #64b5ef;
+}
+#chatroom .chat-msg-head {
+  color: var(--tg-accent-bright);
+  font-size: 12px;
+}
+#chatroom .chat-date-chip {
+  background: rgba(23, 33, 43, 0.85);
+  border: none;
+  color: #fff;
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+
+/* Нижняя панель ввода (Telegram Composer) */
+.tg-composer-wrap {
+  flex: 0 0 auto;
+  background: var(--tg-panel);
+  border-top: 1px solid var(--tg-border);
+  padding: 8px clamp(10px, 3vw, 28px);
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  z-index: 15;
+}
+
+#chatroom .tg-input-bar {
+  max-width: none !important;
+  margin: 0 !important;
+  background: #242f3d !important;
+  border: 1px solid transparent !important;
+  border-radius: 24px !important;
+  padding: 3px 5px !important;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#chatroom .tg-input-bar:focus-within {
+  border-color: rgba(100, 181, 239, 0.45) !important;
+}
+#chatroom .tg-input-bar input {
+  margin: 0 !important;
+  min-height: 38px !important;
+  padding: 6px 8px !important;
+  background: transparent !important;
+  border: none !important;
+  font-size: 15px !important;
+}
+.tg-send-circle {
+  width: 38px !important;
+  height: 38px !important;
+  min-height: 38px !important;
+  padding: 0 !important;
+  border-radius: 50% !important;
+  background: var(--tg-accent) !important;
+  border: none !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 38px !important;
+}
+.tg-send-circle:hover {
+  background: #5d95d0 !important;
+}
+
+.tg-chat-note {
+  margin: 0;
+  min-height: 0;
+  font-size: 12px;
+  color: var(--tg-accent-bright);
+  padding-top: 2px;
+}
+.tg-chat-note:empty {
+  display: none;
+}
+
+/* Десктоп ≥920px: двухпанельный режим чата */
+@media (min-width: 920px) {
+  #chatroom .tg-sidebar {
+    display: flex;
+  }
+  #chatroom #chatBack {
+    display: none;
+  }
+  #chatroom.chat-no-room .tg-chat-card {
+    display: none;
+  }
+  #chatroom.chat-no-room .chat-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+  }
+}
+
+/* Мобильные и планшеты <920px */
+@media (max-width: 919px) {
+  #home .tg-app-shell {
+    grid-template-columns: 1fr;
+    max-width: none;
+  }
+  .tg-home-right-pane {
+    display: none;
+  }
+  .tg-hdr-lbl {
+    display: none;
+  }
+  .tg-hdr-call {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    border-radius: 50%;
+  }
+  .tg-menu-grid {
+    grid-template-columns: 1fr;
+  }
+  .tg-popover {
+    left: 8px;
+    right: 8px;
+    max-width: none;
+  }
+  #chatroom .chat-msg {
+    max-width: 84%;
+  }
+}

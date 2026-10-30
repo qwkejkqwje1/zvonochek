@@ -99,7 +99,7 @@ export class Pairing {
     this.sql.exec(`INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)`, k, v);
   }
   dropPair() {
-    this.sql.exec(`DELETE FROM meta`);
+    this.sql.exec(`DELETE FROM meta WHERE k NOT LIKE 'bk_%'`);
   }
 
   async ensureAlarm(exp) {

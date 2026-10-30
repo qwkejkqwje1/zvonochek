@@ -93,7 +93,7 @@ export default {
         (env.METERED_DOMAIN && env.METERED_API_KEY) ||
         (env.TURN_URLS && env.TURN_USERNAME)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 31, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 32, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {

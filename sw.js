@@ -1,21 +1,21 @@
 // ZVONochek Service Worker v28 — мгновенный старт, офлайн-оболочка и безопасные обновления
-const CACHE_NAME = 'zvonochek-v31';
+const CACHE_NAME = 'zvonochek-v32';
 const CORE = [
   './',
   './index.html',
-  './style.css?v=31',
-  './app.js?v=31',
-  './group.js?v=31',
-  './store.js?v=31',
-  './identity.js?v=31',
-  './inbox.js?v=31',
-  './chat.js?v=31',
-  './chat-transport.js?v=31',
-  './backup.js?v=31',
-  './signaling.js?v=31',
-  './crypto.js?v=31',
-  './config.js?v=31',
-  './zvdiag.js?v=31',
+  './style.css?v=32',
+  './app.js?v=32',
+  './group.js?v=32',
+  './store.js?v=32',
+  './identity.js?v=32',
+  './inbox.js?v=32',
+  './chat.js?v=32',
+  './chat-transport.js?v=32',
+  './backup.js?v=32',
+  './signaling.js?v=32',
+  './crypto.js?v=32',
+  './config.js?v=32',
+  './zvdiag.js?v=32',
   './icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -24,7 +24,7 @@ const CORE = [
   './manifest.webmanifest',
   './vendor/mqtt.min.js',
   './vendor/qrcode.js',
-  './vendor/secp256k1.js?v=31',
+  './vendor/secp256k1.js?v=32',
 ];
 
 self.addEventListener('install', (e) => {
@@ -155,7 +155,7 @@ self.addEventListener('notificationclick', (e) => {
   // v28: уведомления о сообщениях чата (data.chatRoom) — фокус приложения;
   // комнату по seed откроет сама страница из списка комнат (seed в
   // уведомление не кладём: это носитель доступа к комнате).
-  const chatRoom = e.notification.data?.chatRoom || '';
+  const chatRoom = e.notification.data?.chatRoom || e.notification.data?.chat || '';
   e.waitUntil(
     (async () => {
       const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });

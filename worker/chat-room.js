@@ -415,26 +415,19 @@ export class ChatRoom {
     if (path === '/fetch' && req.method === 'GET') {
       let after = Number(url.searchParams.get('after') || 0);
       if (!Number.isFinite(after) || after < 0) after = 0;
-      let rows = this.all(
-        `SELECT seq, blob, ts FROM messages WHERE seq>? ORDER BY seq ASC LIMIT 500`,
-        after
-      );
-      // v27: истёкшие исчезающие сообщения не отдаём даже до alarm-чистки.
-      // Запрос сроков — отдельным guarded-вызовом: если колонки нет (старая
-      // БД), просто отдаём всё по старым правилам.
+      let rows;
       try {
-        const expRows = this.all(
-          `SELECT seq, expires_at FROM messages WHERE expires_at IS NOT NULL`
+        rows = this.all(
+          `SELECT seq, blob, ts FROM messages WHERE seq>? AND (expires_at IS NULL OR expires_at>?) ORDER BY seq ASC LIMIT 500`,
+          after,
+          Date.now()
         );
-        if (expRows.length) {
-          const expMap = new Map(expRows.map((r) => [r.seq, r.expires_at]));
-          const nowMs = Date.now();
-          rows = rows.filter((r) => {
-            const e = expMap.get(r.seq);
-            return !e || e > nowMs;
-          });
-        }
-      } catch {}
+      } catch {
+        rows = this.all(
+          `SELECT seq, blob, ts FROM messages WHERE seq>? ORDER BY seq ASC LIMIT 500`,
+          after
+        );
+      }
       return json({ messages: rows, lastSeq: rows.length ? rows[rows.length - 1].seq : after });
     }
 

@@ -61,7 +61,7 @@
 //     цепочки — транзитом через 'drx'); при живой DR-сессии контент не
 //     в режиме d1 от собеседника не принимается (анти-downgrade);
 //   · сообщения ≤v30 расшифровываются статичными ключами, как раньше.
-import { CONFIG, getWorkerBase } from './config.js?v=31';
+import { CONFIG, getWorkerBase } from './config.js?v=32';
 import {
   b64u,
   newSecret,
@@ -123,8 +123,8 @@ import {
   DR_CONTENT_TYPES,
   drDowngradeBlocked,
   genP256KeyPair,
-} from './crypto.js?v=31';
-import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=31';
+} from './crypto.js?v=32';
+import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=32';
 import {
   getChatDevice,
   getChatDeviceEcdh,
@@ -133,7 +133,7 @@ import {
   verifyChatSig,
   encryptWithVault,
   decryptWithVault,
-} from './identity.js?v=31';
+} from './identity.js?v=32';
 import {
   ChatTransportManager,
   FallbackTransport,
@@ -147,7 +147,7 @@ import {
   aggregateGcallState,
   gcallEventsFromEntries,
   shouldSweepRoom,
-} from './chat-transport.js?v=31';
+} from './chat-transport.js?v=32';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -256,7 +256,16 @@ function hideChatScreen() {
 // Серверный push с закрытым приложением сознательно не трогаем (VAPID
 // отложен владельцем). Здесь: внутриприложенческий тост, системное
 // уведомление через SW при скрытой вкладке и опциональный звук.
-const roomTitleOf = (roomId) => `Чат ${String(roomId || '').slice(0, 8)}…`;
+const roomTitleOf = (roomId, rec = null) => {
+  if (rec && rec.members && typeof rec.members === 'object') {
+    const names = Object.values(rec.members)
+      .filter((m) => m && !m.left && m.nick)
+      .map((m) => m.nick);
+    if (names.length === 1) return names[0];
+    if (names.length > 1) return names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2}` : '');
+  }
+  return `Чат ${String(roomId || '').slice(0, 8)}…`;
+};
 const notifyTextOn = () => {
   try {
     return localStorage.getItem('zvNotifyText') === '1';
@@ -447,22 +456,51 @@ function unreadOf(rec, msgs) {
 // между рендерами: каждый рендер пересоздаёт узлы целиком.
 function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
   const li = document.createElement('li');
+  li.className = 'tg-chat-li';
   const btn = document.createElement('button');
-  btn.className = 'btn small chat-room-item';
-  if (sidebar && cur && cur.rec.roomId === r.roomId) btn.classList.add('active');
+  btn.className = 'btn small chat-room-item tg-chat-item';
+  if (cur && cur.rec.roomId === r.roomId) btn.classList.add('active');
+
+  const displayTitle = roomTitleOf(r.roomId, r);
+  const av = document.createElement('span');
+  av.className = 'chat-avatar tg-item-avatar';
+  av.style.background = `linear-gradient(135deg, hsl(${hueOf(r.roomId)} 70% 52%), hsl(${(hueOf(r.roomId) + 38) % 360} 68% 40%))`;
+  const firstChar = displayTitle.replace(/^Чат\s+/i, '').trim()[0] || '💬';
+  av.textContent = firstChar.toUpperCase();
+  if (r.pinProtected) {
+    const lockBadge = document.createElement('span');
+    lockBadge.className = 'tg-avatar-lock';
+    lockBadge.textContent = '🔒';
+    lockBadge.title = 'Защищён PIN-кодом';
+    av.append(lockBadge);
+  }
+
+  const body = document.createElement('span');
+  body.className = 'tg-item-body';
+
   const top = document.createElement('span');
   top.className = 'chat-room-top';
   const title = document.createElement('b');
-  title.textContent = (r.keepForever ? '★ ' : '') + `Чат ${r.roomId.slice(0, 8)}…`;
+  title.className = 'tg-item-title';
+  title.textContent = (r.keepForever ? '★ ' : '') + displayTitle;
   const when = document.createElement('span');
   when.className = 'chat-room-when';
   when.textContent = last ? fmtDayTime(last.msg.ts) : '';
   top.append(title, when);
+
   const bottom = document.createElement('span');
   bottom.className = 'chat-room-preview';
   const pv = document.createElement('span');
   pv.className = 'chat-room-preview-text';
-  pv.textContent = last ? previewOf(last.msg) : 'Нет сообщений';
+  if (r.draft && (!cur || cur.rec.roomId !== r.roomId)) {
+    const draftSpan = document.createElement('span');
+    draftSpan.className = 'tg-draft-prefix';
+    draftSpan.textContent = 'Черновик: ';
+    pv.append(draftSpan, document.createTextNode(r.draft));
+  } else {
+    const senderPrefix = last && last.mine ? 'Вы: ' : (last && last.msg?.nick && last.msg.type === 'text' ? `${last.msg.nick}: ` : '');
+    pv.textContent = last ? senderPrefix + previewOf(last.msg) : 'Нет сообщений · нажмите, чтобы открыть';
+  }
   bottom.append(pv);
   if (unread > 0) {
     const badge = document.createElement('span');
@@ -470,7 +508,8 @@ function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
     badge.textContent = String(unread);
     bottom.append(badge);
   }
-  btn.append(top, bottom);
+  body.append(top, bottom);
+  btn.append(av, body);
   btn.onclick = async () => {
     const seed = await decryptWithVault(r.seedEnc);
     openRoomBySeed(seed);
@@ -487,19 +526,29 @@ function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
     openRoomListMenu(r, menuBtn).catch(() => {});
   };
   li.append(btn, menuBtn);
-  // v30: текст для фильтра поиска по сайдбару (название + превью).
-  li.dataset.search = (title.textContent + ' ' + pv.textContent).toLowerCase();
+  // v30: текст для фильтра поиска по сайдбару и главной (название + ID + превью).
+  li.dataset.search = (title.textContent + ' ' + r.roomId.slice(0, 8) + ' ' + pv.textContent).toLowerCase();
   return li;
 }
 
 // v30: фильтр сайдбара по уже отрендеренным пунктам (без перерендера).
 let sidebarQuery = '';
+let homeChatQuery = '';
 function applySidebarFilter() {
   const side = $('#chatRoomsSidebar');
-  if (!side) return;
-  const q = sidebarQuery.trim().toLowerCase();
-  for (const li of side.children) {
-    li.style.display = !q || (li.dataset.search || '').includes(q) ? '' : 'none';
+  if (side) {
+    const q = sidebarQuery.trim().toLowerCase();
+    for (const li of side.children) {
+      li.style.display = !q || (li.dataset.search || '').includes(q) ? '' : 'none';
+    }
+  }
+  const homeList = $('#chatRoomsList');
+  if (homeList) {
+    const qh = homeChatQuery.trim().toLowerCase();
+    for (const li of homeList.children) {
+      if (li.classList.contains('tg-empty-rooms')) continue;
+      li.style.display = !qh || (li.dataset.search || '').includes(qh) ? '' : 'none';
+    }
   }
 }
 
@@ -523,14 +572,35 @@ async function renderRoomList() {
     return { r, last, unread: unreadOf(r, visible), lastTs: last ? last.msg.ts : r.createdAt || 0 };
   });
   enriched.sort((a, b) => b.lastTs - a.lastTs);
+  const totalUnread = enriched.reduce((acc, x) => acc + (x.unread || 0), 0);
+  const tabUnread = $('#homeTabUnread');
+  if (tabUnread) {
+    tabUnread.textContent = totalUnread > 0 ? String(totalUnread) : '';
+    tabUnread.classList.toggle('hidden', totalUnread <= 0);
+  }
   if (list) {
     list.replaceChildren();
-    for (const e of enriched) list.append(buildRoomListItem(e));
+    if (!enriched.length) {
+      const emptyLi = document.createElement('li');
+      emptyLi.className = 'tg-empty-rooms';
+      emptyLi.innerHTML = '<div class="tg-empty-rooms-box"><span class="tg-empty-rooms-ic">💬</span><b>Пока нет активных чатов</b><span>Создайте новый приватный чат или войдите по ссылке, коду или кодовой фразе выше.</span></div>';
+      list.append(emptyLi);
+    } else {
+      for (const e of enriched) list.append(buildRoomListItem(e));
+    }
+    applySidebarFilter();
   }
   // v30: тот же список — в десктопный сайдбар экрана чата.
   if (side) {
     side.replaceChildren();
-    for (const e of enriched) side.append(buildRoomListItem(e, { sidebar: true }));
+    if (!enriched.length) {
+      const emptyLi = document.createElement('li');
+      emptyLi.className = 'tg-empty-rooms';
+      emptyLi.innerHTML = '<div class="tg-empty-rooms-box"><span class="tg-empty-rooms-ic">💬</span><b>Список чатов пуст</b><span>Нажмите «+ Новый чат» выше</span></div>';
+      side.append(emptyLi);
+    } else {
+      for (const e of enriched) side.append(buildRoomListItem(e, { sidebar: true }));
+    }
     applySidebarFilter();
   }
   syncChatEmpty();
@@ -1253,7 +1323,13 @@ async function openRoomBySeed(seedStr, opts = {}) {
       // WS в этот момент ещё не подключён (connectWs ниже).
       draftInput.dispatchEvent(new Event('input'));
     }
-    $('#chatRoomTitle').textContent = `Чат ${keys.roomId.slice(0, 8)}…`;
+    const dispTitle = roomTitleOf(keys.roomId, rec);
+    $('#chatRoomTitle').textContent = dispTitle;
+    const roomAv = $('#chatRoomAvatar');
+    if (roomAv) {
+      roomAv.style.background = `linear-gradient(135deg, hsl(${hueOf(keys.roomId)} 70% 52%), hsl(${(hueOf(keys.roomId) + 38) % 360} 68% 40%))`;
+      roomAv.textContent = (dispTitle.replace(/^Чат\s+/i, '').trim()[0] || '💬').toUpperCase();
+    }
     history.replaceState(
       null,
       '',
@@ -1338,6 +1414,16 @@ async function openRoomBySeed(seedStr, opts = {}) {
 function closeCurrent(hideScreen = true) {
   if (cur) {
     cur.closed = true;
+    for (const st of fileState.values()) {
+      if (st?.url) {
+        try { URL.revokeObjectURL(st.url); } catch {}
+      }
+    }
+    fileState.clear();
+    for (const a of voiceAudio.values()) {
+      try { a.pause(); } catch {}
+    }
+    voiceAudio.clear();
     if (cur.typingTimer) clearTimeout(cur.typingTimer);
     if (cur.expireTimer) clearInterval(cur.expireTimer);
     if (cur.draftTimer) clearTimeout(cur.draftTimer);
@@ -3073,6 +3159,15 @@ function knownMembers() {
 function renderPresence() {
   const line = $('#chatPresence');
   if (!line || !cur) return;
+  const titleEl = $('#chatRoomTitle');
+  if (titleEl) {
+    const dt = roomTitleOf(cur.rec.roomId, cur.rec);
+    titleEl.textContent = dt;
+    const roomAv = $('#chatRoomAvatar');
+    if (roomAv) {
+      roomAv.textContent = (dt.replace(/^Чат\s+/i, '').trim()[0] || '💬').toUpperCase();
+    }
+  }
   const members = knownMembers();
   const others = members.filter((d) => d !== cur.device.devicePub);
   const onlineCount = others.filter((d) => cur.online.has(d)).length;
@@ -3363,6 +3458,13 @@ async function renderMessages() {
   });
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
   box.replaceChildren();
+  const hasVisibleItems = items.some((it) => !CONTROL_TYPES.has(it.msg.type) && it.msg.type !== 'ecdh' && it.msg.type !== 'room-meta');
+  if (!hasVisibleItems) {
+    const emptyWelcome = document.createElement('div');
+    emptyWelcome.className = 'tg-chat-welcome';
+    emptyWelcome.innerHTML = `<div class="tg-chat-welcome-card"><div class="tg-chat-welcome-icon">🔒</div><b>Сквозное шифрование (E2EE + Ratchet)</b><p>Сообщений пока нет. Напишите первое сообщение, отправьте голосовое или пригласите собеседника по ссылке или коду.</p></div>`;
+    box.append(emptyWelcome);
+  }
   let lastDayKey = '';
   for (const it of items) {
     const m = it.msg;
@@ -3670,6 +3772,21 @@ async function renderMessages() {
         openMsgMenu(it, mb);
       };
       foot.append(mb);
+      div.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openMsgMenu(it, mb);
+      });
+      div.addEventListener('dblclick', (e) => {
+        if (window.getSelection()?.toString()) return;
+        e.preventDefault();
+        if (!cur) return;
+        cur.replyTo = { hash: it.hash, name: it.msg.nick || 'Участник', excerpt: excerptOf(it) };
+        cur.editing = null;
+        renderEditBar();
+        renderReplyBar();
+        $('#chatroom #chatInput')?.focus();
+      });
     }
     div.append(foot);
     rowEl.append(div);
@@ -3895,6 +4012,61 @@ function initChatUI() {
       applySidebarFilter();
     };
   }
+  const homeSearch = $('#homeChatSearch');
+  if (homeSearch) {
+    homeSearch.oninput = () => {
+      homeChatQuery = homeSearch.value || '';
+      applySidebarFilter();
+    };
+  }
+  const sideNewChat = $('#chatSidebarNewBtn');
+  if (sideNewChat) {
+    sideNewChat.onclick = () => $('#btnCreateChat')?.click();
+  }
+  const sideHomeBtn = $('#chatSidebarHomeBtn');
+  if (sideHomeBtn) {
+    sideHomeBtn.onclick = () => $('#chatBack')?.click();
+  }
+  // Home segmented tabs (Чаты / Звонки / Личный номер)
+  document.querySelectorAll('[data-home-tab]').forEach((tabBtn) => {
+    tabBtn.onclick = () => {
+      const target = tabBtn.dataset.homeTab;
+      document.querySelectorAll('[data-home-tab]').forEach((b) => b.classList.toggle('active', b === tabBtn));
+      document.querySelectorAll('[data-home-pane]').forEach((pane) => {
+        pane.classList.toggle('tab-active', pane.dataset.homePane === target);
+      });
+      try { localStorage.setItem('zvHomeTab', target); } catch {}
+    };
+  });
+  try {
+    const savedTab = localStorage.getItem('zvHomeTab');
+    if (savedTab) {
+      const btn = document.querySelector(`[data-home-tab="${savedTab}"]`);
+      if (btn) btn.click();
+    }
+  } catch {}
+  // Toggle collapsible create/join drawer in home chat pane
+  const toggleJoinDrawer = $('#btnToggleJoinChat');
+  if (toggleJoinDrawer) {
+    toggleJoinDrawer.onclick = () => {
+      $('#homeChatJoinDrawer')?.classList.toggle('hidden');
+      $('#chatLinkInput')?.focus();
+    };
+  }
+  const toggleChatSettings = $('#btnToggleChatPrefs');
+  if (toggleChatSettings) {
+    toggleChatSettings.onclick = () => {
+      $('#homeChatPrefsDrawer')?.classList.toggle('hidden');
+    };
+  }
+  // Close room panels on Escape
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      hideMsgMenu();
+      hideRoomListMenu();
+      ['#chatRoomMenuBox', '#chatTtlBox', '#chatAliasBox', '#chatWordBox', '#chatEpochBox', '#chatGreetBox', '#chatMembersList'].forEach((sel) => $(sel)?.classList.add('hidden'));
+    }
+  });
   // v30: блок «Доступ по кодовому слову» в меню комнаты.
   const roomActWord = $('#roomActWord');
   if (roomActWord) {
@@ -4112,7 +4284,9 @@ function initChatUI() {
     aliasBtn.onclick = () => {
       const box = $('#chatAliasBox');
       if (!box) return;
-      if (box.classList.contains('hidden')) renderAliasBox().catch(() => {});
+      const willShow = box.classList.contains('hidden');
+      closeRoomPopovers('chatAliasBox');
+      if (willShow) renderAliasBox().catch(() => {});
       else box.classList.add('hidden');
     };
   }
@@ -4232,13 +4406,20 @@ function initChatUI() {
     gcallLeave.onclick = () => leaveGcall().catch(() => {});
   }
   // ---------- v29: управление комнатой (меню внутри комнаты) ----------
+  const closeRoomPopovers = (exceptId = '') => {
+    for (const id of ['chatRoomMenuBox', 'chatTtlBox', 'chatAliasBox', 'chatWordBox', 'chatEpochBox', 'chatGreetBox', 'chatMembersList']) {
+      if (id !== exceptId) $('#' + id)?.classList.add('hidden');
+    }
+  };
   const roomMenuBtn = $('#chatRoomMenuBtn');
   if (roomMenuBtn) {
-    roomMenuBtn.onclick = () => {
+    roomMenuBtn.onclick = (e) => {
+      e.stopPropagation();
       const box = $('#chatRoomMenuBox');
       if (!box) return;
       const willShow = box.classList.contains('hidden');
-      box.classList.toggle('hidden');
+      closeRoomPopovers('chatRoomMenuBox');
+      box.classList.toggle('hidden', !willShow);
       if (willShow) renderRoomMenuState();
     };
   }

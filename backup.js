@@ -21,7 +21,7 @@
 // воскрешает комнату, чей tombstone новее её записи в бэкапе; локальный
 // источник tombstones — тот же localStorage-ключ 'zvDeletedRooms',
 // который ведёт chat.js при удалении.
-import { CONFIG, getWorkerBase } from './config.js?v=31';
+import { CONFIG, getWorkerBase } from './config.js?v=32';
 import {
   b64u,
   newSecret,
@@ -34,9 +34,9 @@ import {
   sealBackup,
   openBackup,
   backupIdHash,
-} from './crypto.js?v=31';
-import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=31';
-import { isRoomTombstoned } from './chat-transport.js?v=31';
+} from './crypto.js?v=32';
+import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=32';
+import { isRoomTombstoned } from './chat-transport.js?v=32';
 import {
   getPersonal,
   ensurePersonal,
@@ -48,7 +48,7 @@ import {
   fpOfPubRaw,
   getRecoveryState,
   saveRecoveryState,
-} from './identity.js?v=31';
+} from './identity.js?v=32';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -102,7 +102,7 @@ async function collectBackupData() {
     } catch {}
   }
   return {
-    v: 31,
+    v: 32,
     nickname: personal?.label || '',
     masterPub: personal?.masterPub || '',
     rooms,

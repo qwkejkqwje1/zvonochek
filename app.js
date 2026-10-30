@@ -1,11 +1,11 @@
-import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=31';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=31';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh } from './identity.js?v=31';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=31';
-import { kvPut, kvAll } from './store.js?v=31';
-import { Signaling } from './signaling.js?v=31';
+import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=32';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=32';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh } from './identity.js?v=32';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=32';
+import { kvPut, kvAll } from './store.js?v=32';
+import { Signaling } from './signaling.js?v=32';
 
-export const APP_VERSION = 31;
+export const APP_VERSION = 32;
 export const APP_BUILD = '2026-10-30';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -20,7 +20,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=31').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=32').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -154,7 +154,7 @@ const S = {
   fileCh: null,
   sendQueue: [],
   sending: false,
-  incoming: null,
+  incomingFile: null,
   restartTimer: null,
   statsTimer: null,
   helloTimer: null,
@@ -1816,9 +1816,9 @@ function createPC() {
   S.ctrl.onmessage = (e) => onCtrl(e.data);
   S.fileCh.onmessage = (e) => onFileData(e.data);
   S.fileCh.onclose = () => {
-    if (S.incoming) {
-      S.incoming.el.querySelector('.who').textContent = 'Передача прервана';
-      S.incoming = null;
+    if (S.incomingFile) {
+      S.incomingFile.el.querySelector('.who').textContent = 'Передача прервана';
+      S.incomingFile = null;
     }
   };
 
@@ -2570,7 +2570,7 @@ function onCtrl(raw) {
   }
 }
 function hideChatEmpty() {
-  $('#chatEmpty')?.remove();
+  ($('#callChatEmpty') || $('#call #chatEmpty'))?.remove();
 }
 function addMsg(who, text, me) {
   hideChatEmpty();
@@ -2596,13 +2596,14 @@ function sysMsg(text) {
 }
 $('#chatForm').onsubmit = (e) => {
   e.preventDefault();
-  const v = $('#chatInput').value.trim();
+  const inp = $('#callChatInput') || $('#call #chatInput');
+  const v = (inp?.value || '').trim();
   if (!v) return;
   if (rosterCount() > 1 && S.sig) {
     // Групповой чат: одно сообщение всем участникам через E2EE-сигналинг.
     S.sig.send({ type: 'g_chat', text: v, name: myName() });
     addMsg('Вы', v, true);
-    $('#chatInput').value = '';
+    if (inp) inp.value = '';
     return;
   }
   if (S.ctrl?.readyState === 'open') {
@@ -2614,7 +2615,7 @@ $('#chatForm').onsubmit = (e) => {
     return toast('Собеседник ещё не вошёл в комнату');
   }
   addMsg('Вы', v, true);
-  $('#chatInput').value = '';
+  if (inp) inp.value = '';
 };
 
 $('#fileInput').onchange = (e) => {
@@ -2693,11 +2694,11 @@ function onFileData(d) {
       const name = String(m.name || 'file').slice(0, 200),
         size = Number(m.size) || 0;
       if (size > MAX_FILE_BYTES) {
-        S.incoming = null;
+        S.incomingFile = null;
         sysMsg(`Собеседник пытался отправить файл больше ${fmtSize(MAX_FILE_BYTES)}`);
         return;
       }
-      S.incoming = {
+      S.incomingFile = {
         name,
         size,
         mime: String(m.mime || ''),
@@ -2705,9 +2706,9 @@ function onFileData(d) {
         got: 0,
         el: fileBubble(S.peer?.name || 'Собеседник', name, size, false),
       };
-    } else if (m.t === 'end' && S.incoming) {
-      const f = S.incoming;
-      S.incoming = null;
+    } else if (m.t === 'end' && S.incomingFile) {
+      const f = S.incomingFile;
+      S.incomingFile = null;
       if (f.got !== f.size) {
         f.el.querySelector('.who').textContent = 'Передача прервана';
         return;
@@ -2728,15 +2729,15 @@ function onFileData(d) {
         beep();
       }
     }
-  } else if (S.incoming) {
-    if (S.incoming.got + d.byteLength > S.incoming.size + 1024) {
-      S.incoming.el.querySelector('.who').textContent = 'Передача прервана';
-      S.incoming = null;
+  } else if (S.incomingFile) {
+    if (S.incomingFile.got + d.byteLength > S.incomingFile.size + 1024) {
+      S.incomingFile.el.querySelector('.who').textContent = 'Передача прервана';
+      S.incomingFile = null;
       return;
     }
-    S.incoming.parts.push(d);
-    S.incoming.got += d.byteLength;
-    setProg(S.incoming.el, S.incoming.got / (S.incoming.size || 1));
+    S.incomingFile.parts.push(d);
+    S.incomingFile.got += d.byteLength;
+    setProg(S.incomingFile.el, S.incomingFile.got / (S.incomingFile.size || 1));
   }
 }
 
@@ -2750,7 +2751,7 @@ $('#cChat').onclick = () => {
   syncChatOpen();
   S.unread = 0;
   $('#unread').classList.add('hidden');
-  if (!$('#chat').classList.contains('hidden')) $('#chatInput').focus();
+  if (!$('#chat').classList.contains('hidden')) ($('#callChatInput') || $('#call #chatInput'))?.focus();
 };
 $('#cInvite').onclick = () => {
   const b = openModal('#tplInvite');
@@ -3017,6 +3018,7 @@ async function openSettingsModal() {
   updateStatus();
 }
 $('#cSettings').onclick = openSettingsModal;
+$('#btnHomeSettings') && ($('#btnHomeSettings').onclick = openSettingsModal);
 
 $('#unmuteHint').onclick = () => {
   ensureAudioEngine();
