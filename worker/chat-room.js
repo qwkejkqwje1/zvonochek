@@ -13,8 +13,17 @@
 //   POST /init  {sub?}            — установить хэш токена (идемпотентно), push-подписка
 //   POST /msg   {blob, dev}       — добавить сообщение → {seq} / {seq, dup:true}
 //   GET  /fetch?after=<seq>       — пропущенные сообщения по возрастанию seq
-//   POST /ack   {seqs:[…]}        — подтвердить доставку
-//   WS   /listen                  — hibernation; auth первым сообщением {type:'auth', token}
+//   POST /ack   {seqs:[…], dev?, read?} — подтвердить доставку/прочтение (v25)
+//   GET  /state                   — сводка v25: members_state + online (presence)
+//   POST /file  {fileId, idx, total, blob} — чанк зашифрованного файла (v25)
+//   GET  /file?fileId=&idx=       — отдать чанк файла (v25)
+//   WS   /listen                  — hibernation; auth первым сообщением {type:'auth', token, dev}
+//
+// v25: сервер по-прежнему слеп к содержимому, но теперь видит МЕТАДАННЫЕ,
+// которых у v21 не было: кто из устройств онлайн (presence по факту WS-подключений),
+// до какого seq каждый участник дочитал (members_state) и размер файлов
+// (число чанков file_chunks). Это осознанный компромисс ради «прочитано»,
+// «онлайн» и файлов — зафиксирован в AUDIT-v25.
 import { sendPush, b64u } from './push.js';
 
 const te = new TextEncoder();
@@ -23,6 +32,11 @@ const RATE_PER_MIN = 60;
 const ACK_RETENTION_MS = 7 * 24 * 3600_000;
 const HARD_RETENTION_MS = 30 * 24 * 3600_000;
 const MAX_SUBS = 16;
+// v25: файлы чанками (клиент режет по 256 КиБ открытого текста; шифротекст
+// чанка ~256 КиБ + nonce/тег → base64 укладывается в лимит ниже).
+const FILE_MAX_BLOB_B64 = 512 * 1024;
+const FILE_MAX_CHUNKS = 40; // 40 × 256 КиБ = 10 МиБ — лимит файла на клиенте
+const FILE_RATE_PER_MIN = 600;
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), {
@@ -47,6 +61,15 @@ export class ChatRoom {
     );
     this.sql.exec(
       `CREATE TABLE IF NOT EXISTS subs (endpoint TEXT PRIMARY KEY, device TEXT, p256dh TEXT, auth TEXT, created INTEGER)`
+    );
+    // v25: состояние чтения по устройствам (только номера seq, не содержимое)
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS members_state (dev TEXT PRIMARY KEY, delivered_seq INTEGER, read_seq INTEGER, updated INTEGER)`
+    );
+    // v25: чанки зашифрованных файлов; содержимое — шифротекст файловым ключом,
+    // ключ живёт только внутри зашифрованного сообщения-метаданных комнаты.
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS file_chunks (file_id TEXT, idx INTEGER, blob TEXT, ts INTEGER, PRIMARY KEY (file_id, idx))`
     );
     this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
   }
@@ -90,6 +113,34 @@ export class ChatRoom {
         ws.send(msg);
       } catch {}
     }
+  }
+
+  // v25: presence выводится из живых WS-сокетов (Hibernation: состояние не
+  // храним в памяти DO, а пересчитываем из getWebSockets() + attachments —
+  // после гибернации список восстанавливается сам).
+  onlineDevices() {
+    const out = new Set();
+    for (const ws of this.state.getWebSockets()) {
+      const att = ws.deserializeAttachment() || {};
+      if (att.authed && att.device) out.add(att.device);
+    }
+    return [...out];
+  }
+
+  broadcastPresence(dev, online) {
+    if (!dev) return;
+    this.broadcast({ type: 'presence', dev, online, ts: Date.now() }, dev);
+  }
+
+  memberStateRows() {
+    return this.all(
+      `SELECT dev, delivered_seq, read_seq, updated FROM members_state ORDER BY dev ASC`
+    ).map((r) => ({
+      dev: r.dev,
+      delivered: r.delivered_seq || 0,
+      read: r.read_seq || 0,
+      updated: r.updated || 0,
+    }));
   }
 
   async pushWake(exceptDevice = null) {
@@ -230,18 +281,88 @@ export class ChatRoom {
       return json({ messages: rows, lastSeq: rows.length ? rows[rows.length - 1].seq : after });
     }
 
-    // ---------- Подтверждения доставки ----------
+    // ---------- Подтверждения доставки / прочтения ----------
     if (path === '/ack' && req.method === 'POST') {
       const seqs = Array.isArray(body.seqs) ? body.seqs.slice(0, 200) : [];
       const now = Date.now();
+      let maxSeq = 0;
       for (const s of seqs) {
+        const n = Number(s);
+        if (!Number.isFinite(n) || n <= 0) continue;
+        if (n > maxSeq) maxSeq = n;
         this.sql.exec(
           `UPDATE messages SET acked_at=? WHERE seq=? AND acked_at IS NULL`,
           now,
-          Number(s)
+          n
         );
       }
+      // v25: состояние чтения устройства — монотонные максимумы delivered/read.
+      // Клиент v21 шлёт ack без dev — тогда ведём себя как раньше (только retention).
+      const dev = typeof body.dev === 'string' && body.dev ? body.dev.slice(0, 128) : null;
+      if (dev && maxSeq > 0) {
+        const prev =
+          this.one(`SELECT delivered_seq, read_seq FROM members_state WHERE dev=?`, dev) || {};
+        const delivered = Math.max(prev.delivered_seq || 0, maxSeq);
+        const read = body.read === true ? Math.max(prev.read_seq || 0, maxSeq) : prev.read_seq || 0;
+        this.sql.exec(
+          `INSERT OR REPLACE INTO members_state (dev, delivered_seq, read_seq, updated) VALUES (?,?,?,?)`,
+          dev,
+          delivered,
+          read,
+          now
+        );
+        this.broadcast({ type: 'receipt', dev, delivered, read }, dev);
+      }
       return json({ ok: true });
+    }
+
+    // ---------- v25: сводка состояния комнаты (receipts + presence) ----------
+    if (path === '/state' && req.method === 'GET') {
+      return json({ members: this.memberStateRows(), online: this.onlineDevices() });
+    }
+
+    // ---------- v25: чанки зашифрованных файлов ----------
+    if (path === '/file' && req.method === 'POST') {
+      const { fileId, idx, total, blob } = body;
+      if (typeof fileId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(fileId)) {
+        return json({ error: 'bad fileId' }, 400);
+      }
+      const nIdx = Number(idx);
+      const nTotal = Number(total);
+      if (!Number.isInteger(nIdx) || !Number.isInteger(nTotal) || nTotal < 1 || nTotal > FILE_MAX_CHUNKS || nIdx < 0 || nIdx >= nTotal) {
+        return json({ error: 'bad chunk index' }, 400);
+      }
+      if (typeof blob !== 'string' || blob.length === 0 || blob.length > FILE_MAX_BLOB_B64) {
+        return json({ error: 'bad chunk size' }, 400);
+      }
+      let raw;
+      try {
+        raw = b64u.dec(blob);
+      } catch {
+        return json({ error: 'bad blob' }, 400);
+      }
+      if (raw.length === 0 || raw.length > 384 * 1024) return json({ error: 'bad chunk size' }, 400);
+      const now = Date.now();
+      const recent = this.one(`SELECT COUNT(*) AS c FROM file_chunks WHERE ts>?`, now - 60_000).c;
+      if (recent >= FILE_RATE_PER_MIN) return json({ error: 'rate limited' }, 429);
+      this.sql.exec(
+        `INSERT OR REPLACE INTO file_chunks (file_id, idx, blob, ts) VALUES (?,?,?,?)`,
+        fileId,
+        nIdx,
+        blob,
+        now
+      );
+      return json({ ok: true, idx: nIdx }, 201);
+    }
+    if (path === '/file' && req.method === 'GET') {
+      const fileId = url.searchParams.get('fileId') || '';
+      const idx = Number(url.searchParams.get('idx'));
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(fileId) || !Number.isInteger(idx) || idx < 0) {
+        return json({ error: 'bad params' }, 400);
+      }
+      const row = this.one(`SELECT blob FROM file_chunks WHERE file_id=? AND idx=?`, fileId, idx);
+      if (!row) return json({ error: 'not found' }, 404);
+      return json({ blob: row.blob });
     }
 
     return json({ error: 'not found' }, 404);
@@ -254,6 +375,10 @@ export class ChatRoom {
       now - ACK_RETENTION_MS,
       now - HARD_RETENTION_MS
     );
+    // v25: чанки файлов живут не дольше жёсткого потолка сообщений (30 дней)
+    try {
+      this.sql.exec(`DELETE FROM file_chunks WHERE ts<?`, now - HARD_RETENTION_MS);
+    } catch {}
     try {
       await this.state.storage.setAlarm(now + 24 * 3600_000);
     } catch {}
@@ -267,7 +392,14 @@ export class ChatRoom {
       return;
     }
     const att = ws.deserializeAttachment() || {};
-    if (att.authed) return; // после auth клиент по WS ничего не шлёт
+    if (att.authed) {
+      // v25: после auth по WS живёт только эфемерный typing — ретранслируем
+      // остальным без хранения. Сообщения по-прежнему идут HTTP POST /msg.
+      if (m?.type === 'typing' && att.device) {
+        this.broadcast({ type: 'typing', dev: att.device, ts: Date.now() }, att.device);
+      }
+      return;
+    }
     if (m?.type !== 'auth' || !m.token) {
       try {
         ws.close(1008, 'auth required');
@@ -284,11 +416,30 @@ export class ChatRoom {
     ws.serializeAttachment({ authed: true, device: m.dev || null });
     const last = this.one(`SELECT MAX(seq) AS m FROM messages`);
     try {
-      ws.send(JSON.stringify({ type: 'ready', lastSeq: last?.m || 0 }));
+      ws.send(
+        JSON.stringify({
+          type: 'ready',
+          lastSeq: last?.m || 0,
+          online: this.onlineDevices(),
+          members: this.memberStateRows(),
+        })
+      );
     } catch {}
+    // v25: оповестить остальных, что устройство теперь онлайн
+    if (m.dev) this.broadcastPresence(String(m.dev), true);
   }
 
   async webSocketClose(ws) {
+    // v25: если это был последний сокет устройства — оно ушло в офлайн
+    try {
+      const att = ws.deserializeAttachment() || {};
+      if (att.authed && att.device) {
+        const stillOnline = this.state
+          .getWebSockets()
+          .some((s) => s !== ws && (s.deserializeAttachment() || {}).device === att.device);
+        if (!stillOnline) this.broadcastPresence(att.device, false);
+      }
+    } catch {}
     try {
       ws.close();
     } catch {}

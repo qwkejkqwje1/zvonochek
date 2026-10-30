@@ -3,8 +3,9 @@
 // ring-дозвон, пропущенные, Web Push (worker/push.js, RFC 8291/8292).
 import { Inbox } from './inbox.js';
 import { ChatRoom } from './chat-room.js';
+import { Pairing } from './pairing.js';
 import { getVapid } from './push.js';
-export { Inbox, ChatRoom };
+export { Inbox, ChatRoom, Pairing };
 // Worker пересылает только зашифрованные сообщения (AES-256-GCM) и не знает ключей комнат.
 
 const JSON_HEADERS = {
@@ -92,7 +93,7 @@ export default {
         (env.METERED_DOMAIN && env.METERED_API_KEY) ||
         (env.TURN_URLS && env.TURN_USERNAME)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 21, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 25, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {
@@ -138,6 +139,24 @@ export default {
       const h = new Headers(resp.headers);
       for (const [k, v] of Object.entries(cors)) h.set(k, v);
       return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h, webSocket: resp.webSocket });
+    }
+    // 0c) v25: пары приветствия — одноразовый короткий код быстрого подключения
+    // к чату. DO адресуется SHA-256 хэшем кода из тела запроса; blob внутри —
+    // шифротекст, ключа у сервера нет (worker/pairing.js).
+    if (url.pathname === '/pair/create' || url.pathname === '/pair/claim') {
+      if (!env.PAIRING) return json({ error: 'pairing not configured' }, 501, cors);
+      if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405, cors);
+      let pairBody = null;
+      try {
+        pairBody = await req.clone().json();
+      } catch {}
+      const codeHash = pairBody && typeof pairBody.codeHash === 'string' ? pairBody.codeHash : '';
+      if (!/^[a-f0-9]{64}$/.test(codeHash)) return json({ error: 'bad codeHash' }, 400, cors);
+      const stub = env.PAIRING.get(env.PAIRING.idFromName(codeHash));
+      const resp = await stub.fetch(req);
+      const h = new Headers(resp.headers);
+      for (const [k, v] of Object.entries(cors)) h.set(k, v);
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
     }
     if (url.pathname === '/push-key') {
       const v = await getVapid(env);

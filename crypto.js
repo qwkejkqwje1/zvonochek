@@ -377,3 +377,118 @@ export async function genP256KeyPair(usages = ['sign', 'verify'], algName = 'ECD
     if (d >= 1n && d < P256.n) return p256KeyPairFromPriv(dBytes, usages, algName);
   }
 }
+
+// =======================================================================
+// v25: файлы в чате и коды приветствия.
+//
+// ФАЙЛЫ. Файл шифруется отдельным случайным ключом (32 байта, живёт только
+// внутри зашифрованного ключом комнаты сообщения-метаданных type:'file').
+// Чанки по 256 КиБ открытого текста; nonce чанка строится детерминированно:
+// 4 байта случайной соли файла || 8 байт big-endian индекса. Уникальность
+// пары (ключ, nonce) гарантирована: ключ одноразовый на файл, индекс не
+// повторяется внутри файла. Сервер видит число чанков и их размер — в
+// отличие от текста, файлы паддинг до фиксированного размера НЕ получают
+// (осознанный компромисс, AUDIT-v25).
+// =======================================================================
+export const FILE_CHUNK_PT = 256 * 1024;
+export const FILE_MAX_BYTES = 10 * 1024 * 1024;
+
+export async function importFileKey(rawBytes) {
+  if (!(rawBytes instanceof Uint8Array) || rawBytes.length !== 32) {
+    throw new Error('bad file key');
+  }
+  return crypto.subtle.importKey('raw', rawBytes, { name: 'AES-GCM' }, false, [
+    'encrypt',
+    'decrypt',
+  ]);
+}
+
+function fileChunkNonce(salt, idx) {
+  const nonce = new Uint8Array(12);
+  nonce.set(salt.subarray(0, 4), 0);
+  new DataView(nonce.buffer).setBigUint64(4, BigInt(idx), false);
+  return nonce;
+}
+
+export async function encryptFileChunk(fileKey, salt, idx, ptBytes) {
+  const ct = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: fileChunkNonce(salt, idx) },
+    fileKey,
+    ptBytes
+  );
+  return new Uint8Array(ct);
+}
+
+export async function decryptFileChunk(fileKey, salt, idx, ctBytes) {
+  const pt = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: fileChunkNonce(salt, idx) },
+    fileKey,
+    ctBytes
+  );
+  return new Uint8Array(pt);
+}
+
+// =======================================================================
+// КОД ПРИВЕТСТВИЯ (быстрое подключение, техплан v21 §6). Код — 9 символов
+// base64url (~54 бита). Ключ пары: PBKDF2-HMAC-SHA256(код, соль GREET_SALT,
+// 200 000). Соль фиксированная строковая, а НЕ roomId: гость roomId не
+// знает — он и есть полезная нагрузка blob ({seed, roomId} внутри
+// шифротекста). Адрес пары на сервере: codeHash = SHA-256(GREET_SALT||код),
+// сам код и seed сервер не получает. Защита: энтропия кода + медленный KDF +
+// TTL 15 минут + одноразовость и лимит попыток claim на сервере.
+// =======================================================================
+export const GREET_SALT = 'zv-greet-v1';
+export const GREET_CODE_LEN = 9;
+const GREET_PBKDF2_ITER = 200_000;
+
+export function newGreetCode() {
+  // 54 бита: 7 случайных байт → 10 base64url-символов, берём первые 9 (54 бита)
+  return b64u.enc(crypto.getRandomValues(new Uint8Array(7))).slice(0, GREET_CODE_LEN);
+}
+
+export async function greetCodeHash(code) {
+  return sha256hex(GREET_SALT + String(code).trim());
+}
+
+async function deriveGreetKey(code) {
+  const base = await crypto.subtle.importKey('raw', te.encode(String(code).trim()), 'PBKDF2', false, [
+    'deriveKey',
+  ]);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: te.encode(GREET_SALT), iterations: GREET_PBKDF2_ITER, hash: 'SHA-256' },
+    base,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+// Запечатать {seed, roomId} под ключом из кода → base64url(nonce||ct).
+export async function sealGreetPayload(code, payloadObj) {
+  const key = await deriveGreetKey(code);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(JSON.stringify(payloadObj)))
+  );
+  const out = new Uint8Array(iv.length + ct.length);
+  out.set(iv, 0);
+  out.set(ct, iv.length);
+  return b64u.enc(out);
+}
+
+// Открыть payload кодом; неверный код/битый blob → null.
+export async function openGreetPayload(code, blobB64) {
+  try {
+    const key = await deriveGreetKey(code);
+    const raw = b64u.dec(blobB64);
+    if (raw.length < 13) return null;
+    const pt = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: raw.subarray(0, 12) },
+      key,
+      raw.subarray(12)
+    );
+    return JSON.parse(td.decode(pt));
+  } catch {
+    return null;
+  }
+}

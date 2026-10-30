@@ -29,3 +29,11 @@ new_sqlite_classes = ["Inbox"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["ChatRoom"]
+
+[[durable_objects.bindings]]
+name = "PAIRING"
+class_name = "Pairing"
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["Pairing"]
