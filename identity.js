@@ -3,8 +3,8 @@
 // IndexedDB) удостоверяет ключи устройств; секрет личной ссылки зашифрован
 // vault-ключом устройства. Личная ссылка: #k=<секрет>&d=<fp>, где fp — первые
 // 32 hex SHA-256 от X9.62-представления master-публичного ключа.
-import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=25';
-import { kvGet, kvPut } from './store.js?v=25';
+import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=27';
+import { kvGet, kvPut } from './store.js?v=27';
 
 const te = new TextEncoder();
 let cached = null; // {secret, masterPub, masterPriv, fp, devicePub, devicePriv, cert, label}
@@ -34,22 +34,41 @@ export async function hasPersonal() {
   }
 }
 
+// Канонический текст сертификата устройства и его выпуск произвольным
+// issuer-ключом (v27 вынесено из ensureDevice: тот же формат и та же подпись
+// нужны для recovery-сертификата и для устройств восстановленной личности).
+export function deviceCertText(devicePub, label, exp) {
+  return `zv-device-v1|${devicePub}|${label}|${exp}`;
+}
+
+export async function signDeviceCert(privKey, devicePub, label, exp) {
+  const sig = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    privKey,
+    te.encode(deviceCertText(devicePub, label, exp))
+  );
+  return { sig: b64u.enc(sig), label, exp };
+}
+
 async function ensureDevice(masterPriv, label) {
   let dev = await kvGet('devices', 'self');
   if (dev?.devicePriv && dev?.cert) return dev;
+  if (!masterPriv) {
+    // v27, восстановленная личность: master-приватника на этом устройстве
+    // нет и не появится (он невыгружаем и остался на потерянном устройстве).
+    // Устройство с сертификатом от recovery-ключа создаёт поток
+    // восстановления (backup.js) ДО первого ensurePersonal; здесь его
+    // отсутствие — ошибка состояния, а не повод падать молча.
+    throw new Error('Восстановленная личность без устройства: сначала завершите восстановление по фразе');
+  }
   const pair = await genP256KeyPair();
   const devicePub = b64u.enc(await crypto.subtle.exportKey('raw', pair.publicKey));
   const exp = Date.now() + 10 * 365 * 24 * 3600_000; // сертификат устройства на 10 лет
-  const certText = `zv-device-v1|${devicePub}|${label}|${exp}`;
-  const sig = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: 'SHA-256' },
-    masterPriv,
-    te.encode(certText)
-  );
+  const cert = await signDeviceCert(masterPriv, devicePub, label, exp);
   dev = {
     devicePub,
     devicePriv: pair.privateKey,
-    cert: { sig: b64u.enc(sig), label, exp },
+    cert,
     label,
   };
   await kvPut('devices', 'self', dev);
@@ -88,6 +107,10 @@ export async function ensurePersonal(label = 'Владелец') {
     devicePub: dev.devicePub,
     devicePriv: dev.devicePriv,
     cert: dev.cert,
+    // v27: у восстановленной личности устройство удостоверено цепочкой
+    // master → recovery → device; chain уходит в inboxRegister как есть.
+    chain: dev.chain || null,
+    restored: !!rec.restored,
     label: dev.label,
   };
   return cached;
@@ -100,6 +123,25 @@ export async function getPersonal() {
 
 export function personalLinkOf(bundle) {
   return `${location.origin}${location.pathname}#k=${bundle.secret}&d=${bundle.fp}`;
+}
+
+// ---------- v27: состояние бэкапа личности (фраза восстановления) ----------
+// Запись identity/recovery: {seedEnc, pub, cert, enabled, updatedAt}.
+// seedEnc — seed фразы, зашифрованный vault-ключом устройства (как seed
+// комнат): сама фраза на устройстве НЕ хранится, но seed нужен, чтобы
+// подписывать обновления серверного бэкапа recovery-ключом без повторного
+// ввода фразы. cert — публичный сертификат recovery-ключа от master
+// (label 'recovery'), секретом не является.
+export async function getRecoveryState() {
+  try {
+    return await kvGet('identity', 'recovery');
+  } catch {
+    return null;
+  }
+}
+
+export async function saveRecoveryState(rec) {
+  await kvPut('identity', 'recovery', rec);
 }
 
 export async function signWithDevice(text) {
@@ -161,6 +203,23 @@ export async function getChatDevice() {
   }
   const g = await ensureGuestDevice();
   return { devicePub: g.devicePub, devicePriv: g.devicePriv, cert: null, guest: true };
+}
+
+// v26, фаза 3: отдельная ECDH-пара устройства для обмена эпохами. Подписной
+// ECDSA-ключ для ECDH не годится (другие usages), поэтому у устройства две
+// пары: ECDSA (подписи, как раньше) и ECDH (завёртка секретов эпох на это
+// устройство). Публичная половина публикуется в комнату служебным сообщением
+// type:'ecdh'; приватная — невыгружаемый CryptoKey в IndexedDB, как остальные.
+export async function getChatDeviceEcdh() {
+  const p = await getPersonal();
+  const storeKey = p ? 'self-ecdh' : 'guest-ecdh';
+  let dev = await kvGet('devices', storeKey);
+  if (dev?.ecdhPriv && dev?.ecdhPub) return dev;
+  const pair = await genP256KeyPair(['deriveBits'], 'ECDH');
+  const ecdhPub = b64u.enc(await crypto.subtle.exportKey('raw', pair.publicKey));
+  dev = { ecdhPub, ecdhPriv: pair.privateKey };
+  await kvPut('devices', storeKey, dev);
+  return dev;
 }
 
 export async function signChatText(text) {

@@ -2437,3 +2437,318 @@ label.disabled select {
   align-items: center;
   justify-content: center;
 }
+
+/* ---------- v26: PIN, эпохи, короткая ссылка, голосовые ---------- */
+.chat-pin-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  margin: 8px 0;
+  cursor: pointer;
+}
+#chatPinInput {
+  width: 100%;
+  margin-bottom: 8px;
+}
+.chat-phrase {
+  font-size: 12.5px;
+  color: var(--muted);
+  padding: 4px 2px 8px;
+  border-bottom: 1px solid var(--surface-2);
+  margin-bottom: 6px;
+}
+.chat-epoch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 2px;
+  cursor: pointer;
+}
+.chat-epoch-warn {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: #e0a355;
+}
+.chat-file-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+  margin-top: 6px;
+}
+.chat-file-bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent, #6c6cff);
+  transition: width 0.15s ease;
+}
+.chat-voice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 180px;
+}
+.chat-voice-play {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  padding: 0;
+}
+.chat-voice-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  overflow: hidden;
+  cursor: pointer;
+}
+.chat-voice-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent, #6c6cff);
+}
+.chat-voice-time {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.chat-rec-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 2px;
+}
+.chat-rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #e04545;
+  animation: chat-rec-pulse 1.1s ease-in-out infinite;
+}
+@keyframes chat-rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.chat-rec-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.chat-rec-label {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.chat-mic {
+  flex: 0 0 auto;
+}
+
+/* ---------- v27: реакции, цитаты, правки, закреп, поиск, бэкап ---------- */
+.chat-act-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  letter-spacing: 1px;
+}
+.chat-act-btn:hover {
+  color: var(--text, #e8e8f2);
+}
+.chat-edited {
+  font-style: italic;
+  opacity: 0.75;
+}
+.chat-deleted {
+  font-style: italic;
+  color: var(--muted);
+}
+.chat-quote {
+  border-left: 3px solid var(--accent, #6c6cff);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin-bottom: 5px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 100%;
+}
+.chat-quote b {
+  font-size: 12px;
+  color: var(--accent-2, #9d9dff);
+}
+.chat-quote span {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.chat-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 3px 2px 0;
+}
+.chat-msg-row.mine .chat-reactions {
+  justify-content: flex-end;
+}
+.chat-chip {
+  border: 1px solid var(--surface-2);
+  background: var(--surface, #1b1b2a);
+  color: inherit;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.chat-chip.mine {
+  border-color: var(--accent, #6c6cff);
+  background: rgba(108, 108, 255, 0.18);
+}
+.chat-msg-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 180px;
+  background: var(--surface, #1b1b2a);
+  border: 1px solid var(--surface-2);
+  border-radius: 12px;
+  padding: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-menu-item {
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  padding: 7px 9px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.chat-menu-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.chat-menu-item.danger {
+  color: #e06565;
+}
+.chat-react-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--surface-2);
+  margin-bottom: 4px;
+}
+.chat-react-emoji {
+  background: none;
+  border: none;
+  font-size: 19px;
+  cursor: pointer;
+  padding: 2px;
+  line-height: 1;
+}
+.chat-react-emoji:hover {
+  transform: scale(1.2);
+}
+.chat-pinbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(108, 108, 255, 0.1);
+  border: 1px solid var(--surface-2);
+  border-radius: 10px;
+  padding: 5px 8px;
+  margin: 6px 0;
+}
+.chat-pinbar-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.chat-pinbar-text {
+  flex: 1;
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0;
+}
+.chat-searchbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+}
+.chat-searchbar input {
+  flex: 1;
+}
+.chat-search-count {
+  font-size: 12.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: center;
+}
+.chat-messages mark {
+  background: rgba(255, 213, 79, 0.45);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.chat-flash {
+  animation: chat-flash-anim 1.25s ease;
+}
+@keyframes chat-flash-anim {
+  0%, 60% { background: rgba(255, 213, 79, 0.28); }
+  100% { background: transparent; }
+}
+.chat-replybar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-left: 3px solid var(--accent, #6c6cff);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  padding: 5px 8px;
+  margin-top: 6px;
+}
+.chat-replybar-text {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#chatTtlBox select {
+  width: 100%;
+  margin-top: 4px;
+}
+.backup-words {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 4px 12px;
+  margin: 10px 0;
+  padding-left: 22px;
+  font-size: 14.5px;
+}
+#restorePhrase {
+  width: 100%;
+  margin: 6px 0;
+}

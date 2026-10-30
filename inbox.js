@@ -2,7 +2,7 @@
 // слушатель входящих по WebSocket, ответы и пропущенные. Протокол и подписи —
 // см. worker/inbox.js. Ring идёт ТОЛЬКО через Worker (не через публичные
 // транспорты — иначе «кому звонят» узнали бы все наблюдатели сигналинга).
-import { signWithDevice } from './identity.js?v=25';
+import { signWithDevice } from './identity.js?v=27';
 
 const base = (workerUrl, topic) => `${workerUrl.replace(/\/$/, '')}/inbox/${topic}`;
 
@@ -27,6 +27,9 @@ export async function inboxRegister(workerUrl, topic, bundle, sub = null) {
     fp: bundle.fp,
     devicePub: bundle.devicePub,
     cert: bundle.cert,
+    // v27: восстановленная личность — цепочка master → recovery → device.
+    // У обычной личности chain отсутствует, тело запроса не меняется.
+    ...(bundle.chain ? { chain: bundle.chain } : {}),
     label: bundle.label,
     sub: sub
       ? {

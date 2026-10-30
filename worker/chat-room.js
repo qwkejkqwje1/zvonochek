@@ -11,7 +11,8 @@
 //
 // API (путь внутри DO — после /chat/<roomId>):
 //   POST /init  {sub?}            — установить хэш токена (идемпотентно), push-подписка
-//   POST /msg   {blob, dev}       — добавить сообщение → {seq} / {seq, dup:true}
+//   POST /msg   {blob, dev, ttlSec?} — добавить сообщение → {seq} / {seq, dup:true}
+//                      (v27: ttlSec — исчезающее сообщение, сервер хранит expires_at)
 //   GET  /fetch?after=<seq>       — пропущенные сообщения по возрастанию seq
 //   POST /ack   {seqs:[…], dev?, read?} — подтвердить доставку/прочтение (v25)
 //   GET  /state                   — сводка v25: members_state + online (presence)
@@ -35,7 +36,7 @@ const MAX_SUBS = 16;
 // v25: файлы чанками (клиент режет по 256 КиБ открытого текста; шифротекст
 // чанка ~256 КиБ + nonce/тег → base64 укладывается в лимит ниже).
 const FILE_MAX_BLOB_B64 = 512 * 1024;
-const FILE_MAX_CHUNKS = 40; // 40 × 256 КиБ = 10 МиБ — лимит файла на клиенте
+const FILE_MAX_CHUNKS = 100; // v27: 100 × 256 КиБ = 25 МиБ — лимит файла на клиенте (был 40 / 10 МиБ)
 const FILE_RATE_PER_MIN = 600;
 
 const json = (obj, status = 200) =>
@@ -71,6 +72,13 @@ export class ChatRoom {
     this.sql.exec(
       `CREATE TABLE IF NOT EXISTS file_chunks (file_id TEXT, idx INTEGER, blob TEXT, ts INTEGER, PRIMARY KEY (file_id, idx))`
     );
+    // v27: исчезающие сообщения — срок жизни на уровне строки. Колонка
+    // добавляется аддитивно; повторный ALTER (колонка уже есть) и окружения
+    // без поддержки ALTER ловятся и игнорируются — комната продолжает
+    // работать по старым правилам retention.
+    try {
+      this.sql.exec(`ALTER TABLE messages ADD COLUMN expires_at INTEGER`);
+    } catch {}
     this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
   }
 
@@ -264,6 +272,19 @@ export class ChatRoom {
         blob,
         now
       );
+      // v27: исчезающее сообщение — отправитель передаёт ttlSec ВНЕ
+      // шифротекста (и дублирует внутри). Сервер видит только срок жизни,
+      // не содержимое; expires_at не может выйти за жёсткий потолок retention.
+      const ttlSec = Number(body.ttlSec);
+      if (Number.isFinite(ttlSec) && ttlSec > 0) {
+        try {
+          this.sql.exec(
+            `UPDATE messages SET expires_at=? WHERE hash=?`,
+            Math.min(now + Math.floor(ttlSec) * 1000, now + HARD_RETENTION_MS),
+            hash
+          );
+        } catch {}
+      }
       const row = this.one(`SELECT seq FROM messages WHERE hash=?`, hash);
       this.broadcast({ type: 'msg', seq: row.seq, blob, ts: now }, dev || null);
       this.state.waitUntil(this.pushWake(dev || null));
@@ -274,10 +295,26 @@ export class ChatRoom {
     if (path === '/fetch' && req.method === 'GET') {
       let after = Number(url.searchParams.get('after') || 0);
       if (!Number.isFinite(after) || after < 0) after = 0;
-      const rows = this.all(
+      let rows = this.all(
         `SELECT seq, blob, ts FROM messages WHERE seq>? ORDER BY seq ASC LIMIT 500`,
         after
       );
+      // v27: истёкшие исчезающие сообщения не отдаём даже до alarm-чистки.
+      // Запрос сроков — отдельным guarded-вызовом: если колонки нет (старая
+      // БД), просто отдаём всё по старым правилам.
+      try {
+        const expRows = this.all(
+          `SELECT seq, expires_at FROM messages WHERE expires_at IS NOT NULL`
+        );
+        if (expRows.length) {
+          const expMap = new Map(expRows.map((r) => [r.seq, r.expires_at]));
+          const nowMs = Date.now();
+          rows = rows.filter((r) => {
+            const e = expMap.get(r.seq);
+            return !e || e > nowMs;
+          });
+        }
+      } catch {}
       return json({ messages: rows, lastSeq: rows.length ? rows[rows.length - 1].seq : after });
     }
 
@@ -370,6 +407,11 @@ export class ChatRoom {
 
   async alarm() {
     const now = Date.now();
+    // v27: исчезающие сообщения удаляются по своему expires_at независимо
+    // от ack и раньше общего retention (guarded: колонки может не быть).
+    try {
+      this.sql.exec(`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at<=?`, now);
+    } catch {}
     this.sql.exec(
       `DELETE FROM messages WHERE (acked_at IS NOT NULL AND acked_at<?) OR ts<?`,
       now - ACK_RETENTION_MS,

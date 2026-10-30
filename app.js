@@ -1,11 +1,11 @@
-import { CONFIG } from './config.js?v=25';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair } from './crypto.js?v=25';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=25';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=25';
-import { kvPut, kvAll } from './store.js?v=25';
-import { Signaling } from './signaling.js?v=25';
+import { CONFIG } from './config.js?v=27';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair } from './crypto.js?v=27';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw } from './identity.js?v=27';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=27';
+import { kvPut, kvAll } from './store.js?v=27';
+import { Signaling } from './signaling.js?v=27';
 
-export const APP_VERSION = 25;
+export const APP_VERSION = 27;
 export const APP_BUILD = '2026-10-30';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -20,7 +20,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=25').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=27').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.

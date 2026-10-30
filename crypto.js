@@ -151,6 +151,32 @@ export function newMsgId() {
   return crypto.randomUUID();
 }
 
+// Контрольная фраза комнаты (фаза 2, техплан §5): слова из фиксированного
+// списка в клиенте. Техплан предлагал список из 2048 слов × 3 слова (33 бита
+// отпечатка); здесь — 256 слов × 4 слова (32 бита): сопоставимая энтропия
+// при списке, который можно держать в одном файле без внешней зависимости.
+// Слова выводятся из ключа комнаты отдельной HKDF-меткой (см. deriveChatKeys),
+// поэтому у собеседников с одинаковым seed+PIN фраза совпадает, а при разном
+// PIN — различается: это и ловит ошибку ввода PIN при устной сверке.
+export const CHAT_WORDS = [
+  'able','acid','aged','also','area','army','atom','aunt','auto','baby','back','bait','bake','bald','ball','band',
+  'bank','bare','bark','barn','base','bath','bead','beam','bean','bear','beat','beef','beer','bell','belt','bend',
+  'bent','best','bike','bill','bird','bite','blow','blue','boat','body','boil','bold','bolt','bomb','bond','bone',
+  'book','boot','bore','born','boss','both','bowl','bulk','bull','burn','bury','bush','busy','cage','cake','calm',
+  'came','camp','cane','cape','card','care','carp','cart','case','cash','cast','cave','cell','cent','chef','chin',
+  'chip','city','clad','claw','clay','clip','club','clue','coal','coat','code','coil','coin','cold','colt','comb',
+  'come','cook','cool','cope','copy','cord','core','corn','cost','cozy','crab','crew','crib','crop','crow','cube',
+  'cure','curl','cute','dawn','days','dead','deal','dear','debt','deck','deed','deem','deep','deer','desk','dial',
+  'dice','diet','dirt','dish','disk','dive','dock','doll','dome','done','doom','door','dose','dots','dove','down',
+  'drag','draw','drip','drop','drum','duck','duct','dude','duel','dull','dump','dune','dusk','dust','duty','each',
+  'earl','earn','ease','east','easy','echo','edge','edit','eggs','else','emit','epic','even','ever','exam','exit',
+  'face','fact','fade','fail','fair','fake','fame','farm','fast','fate','fear','feed','feel','feet','fell','felt',
+  'fern','file','fill','film','find','fine','fire','firm','fish','fist','fits','five','flag','flat','flaw','fled',
+  'flex','flip','flow','foam','foil','fold','folk','fond','font','food','fool','foot','ford','fork','form','fort',
+  'foul','four','free','frog','from','fuel','full','fund','funk','gain','gala','game','gasp','gate','gave','gaze',
+  'gear','gems','germ','gift','girl','give','glad','glow','glue','goat','gold','golf','gone','gong','good','gray',
+];
+
 export async function deriveChatKeys(seedBytes, opts = {}) {
   if (!(seedBytes instanceof Uint8Array) || seedBytes.length < 32) {
     throw new Error('bad seed');
@@ -178,12 +204,149 @@ export async function deriveChatKeys(seedBytes, opts = {}) {
     ['encrypt', 'decrypt']
   );
   const tokenBits = await crypto.subtle.deriveBits(hk('chat/v1/access-token'), base, 256);
+  // Контрольная фраза: отдельная метка, НЕ зависит от эпохи — фраза у комнаты
+  // одна на всю жизнь; зависит от seed и PIN (через общий IKM).
+  const phraseBits = new Uint8Array(await crypto.subtle.deriveBits(hk('chat/v1/phrase'), base, 32));
+  const phrase = [...phraseBits].map((b) => CHAT_WORDS[b]).join(' ');
   return {
     roomId: hex(roomIdBits),
     roomKey,
     accessToken: b64u.enc(tokenBits),
     epoch,
+    phrase,
   };
+}
+
+// =======================================================================
+// v26, фаза 2 (техплан §5): PIN входа. PIN → PBKDF2-HMAC-SHA256, 600 000
+// итераций, соль = 'ZVONochek/chat/pin/v1' || Room_ID-кандидат из seed-only
+// вывода. Результат (pinIkm, 32 байта) подмешивается в IKM deriveChatKeys:
+// без PIN выводятся ДРУГИЕ Room_ID, ключ и токен — сервер такую комнату
+// «не знает», PIN в ссылке не передаётся и на устройстве хранится только
+// зашифрованным vault-ключом (как seed).
+// =======================================================================
+export const PIN_PBKDF2_ITER = 600_000;
+export const PIN_SALT_PREFIX = 'ZVONochek/chat/pin/v1';
+
+export async function derivePinIkm(pin, seedBytes) {
+  const cand = await deriveChatKeys(seedBytes); // seed-only кандидат Room_ID
+  const salt = new Uint8Array([
+    ...te.encode(PIN_SALT_PREFIX),
+    ...te.encode(cand.roomId),
+  ]);
+  const base = await crypto.subtle.importKey('raw', te.encode(String(pin)), 'PBKDF2', false, [
+    'deriveBits',
+  ]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: PIN_PBKDF2_ITER, hash: 'SHA-256' },
+    base,
+    256
+  );
+  return new Uint8Array(bits);
+}
+
+// =======================================================================
+// v26, фаза 3 (техплан §6): эпохи. Секрет эпохи — случайные 256 бит, НЕ
+// выводится из seed: ключ эпохи = HKDF(seed ‖ pinIkm? ‖ epochSecret) с
+// меткой chat/v1/room-key/e<N>. Room_ID и access-token при ротации НЕ
+// меняются (выводятся из seed+PIN, как в эпохе 0): серверная комната та же,
+// меняется только ключ шифрования сообщений. У кого нет секрета эпохи —
+// новые сообщения не расшифровываются (AEAD), старая история при этом
+// остаётся читаемой ключами прошлых эпох.
+// =======================================================================
+export async function deriveEpochRoomKey(seedBytes, epochSecret, epoch, opts = {}) {
+  if (!(epochSecret instanceof Uint8Array) || epochSecret.length !== 32) {
+    throw new Error('bad epoch secret');
+  }
+  const parts = [seedBytes];
+  if (opts.pinIkm) parts.push(opts.pinIkm);
+  parts.push(epochSecret);
+  const ikm = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+  let off = 0;
+  for (const p of parts) {
+    ikm.set(p, off);
+    off += p.length;
+  }
+  const base = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveKey']);
+  const salt = te.encode('ZVONochek/chat/v1');
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt,
+      info: te.encode(`chat/v1/room-key/e${Number(epoch)}`),
+    },
+    base,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+// Завёртка секрета эпохи на ECDH-ключ устройства участника: эфемерная пара
+// отправителя → ECDH → HKDF → AES-256-GCM. В сообщение 'epoch' кладётся
+// {eph, iv, ct} (base64url) на каждого оставленного участника.
+async function epochWrapKey(sharedBits, roomId, epoch) {
+  const base = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: te.encode('ZVONochek/chat/v1'),
+      info: te.encode(`chat/v1/epoch-wrap|${roomId}|${Number(epoch)}`),
+    },
+    base,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+export async function wrapEpochSecret(myEcdhPriv, peerEcdhPubRaw, secretBytes, roomId, epoch) {
+  const eph = await genP256KeyPair(['deriveBits'], 'ECDH');
+  const ephRaw = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+  const peerKey = await crypto.subtle.importKey(
+    'raw',
+    peerEcdhPubRaw,
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    []
+  );
+  const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerKey }, eph.privateKey, 256);
+  const wk = await epochWrapKey(shared, roomId, epoch);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, wk, secretBytes));
+  return { eph: b64u.enc(ephRaw), iv: b64u.enc(iv), ct: b64u.enc(ct) };
+}
+
+// Обратная операция на стороне получателя; любая ошибка (не его завёртка,
+// битые данные) → null, без исключений наружу.
+export async function unwrapEpochSecret(myEcdhPriv, wrap, roomId, epoch) {
+  try {
+    if (!wrap?.eph || !wrap?.iv || !wrap?.ct) return null;
+    const ephKey = await crypto.subtle.importKey(
+      'raw',
+      b64u.dec(wrap.eph),
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      []
+    );
+    const shared = await crypto.subtle.deriveBits(
+      { name: 'ECDH', public: ephKey },
+      myEcdhPriv,
+      256
+    );
+    const wk = await epochWrapKey(shared, roomId, epoch);
+    const pt = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: b64u.dec(wrap.iv) },
+      wk,
+      b64u.dec(wrap.ct)
+    );
+    const out = new Uint8Array(pt);
+    return out.length === 32 ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 // Шифрование одного сообщения: plaintext доводится до ровно CHAT_PT_SIZE
@@ -391,7 +554,12 @@ export async function genP256KeyPair(usages = ['sign', 'verify'], algName = 'ECD
 // (осознанный компромисс, AUDIT-v25).
 // =======================================================================
 export const FILE_CHUNK_PT = 256 * 1024;
-export const FILE_MAX_BYTES = 10 * 1024 * 1024;
+// v27: лимит файла поднят с 10 до 25 МБ. Потолок задаёт не код, а бесплатный
+// тариф Cloudflare: хранилище Durable Object (SQLite) на free-плане — общий
+// объём по аккаунту, и 25 МБ × разумное число комнат укладывается в него с
+// запасом; дальше упираемся в квоту, а не в протокол (чанки те же 256 КиБ).
+export const FILE_MAX_BYTES = 25 * 1024 * 1024;
+export const FILE_MAX_CHUNKS = 100; // 100 × 256 КиБ = 25 МиБ — синхронно с ChatRoom DO
 
 export async function importFileKey(rawBytes) {
   if (!(rawBytes instanceof Uint8Array) || rawBytes.length !== 32) {
@@ -450,12 +618,12 @@ export async function greetCodeHash(code) {
   return sha256hex(GREET_SALT + String(code).trim());
 }
 
-async function deriveGreetKey(code) {
+async function deriveCodeKey(code, salt, iterations) {
   const base = await crypto.subtle.importKey('raw', te.encode(String(code).trim()), 'PBKDF2', false, [
     'deriveKey',
   ]);
   return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: te.encode(GREET_SALT), iterations: GREET_PBKDF2_ITER, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt: te.encode(salt), iterations, hash: 'SHA-256' },
     base,
     { name: 'AES-GCM', length: 256 },
     false,
@@ -463,9 +631,8 @@ async function deriveGreetKey(code) {
   );
 }
 
-// Запечатать {seed, roomId} под ключом из кода → base64url(nonce||ct).
-export async function sealGreetPayload(code, payloadObj) {
-  const key = await deriveGreetKey(code);
+async function sealCodePayload(code, salt, iterations, payloadObj) {
+  const key = await deriveCodeKey(code, salt, iterations);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(
     await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(JSON.stringify(payloadObj)))
@@ -476,10 +643,9 @@ export async function sealGreetPayload(code, payloadObj) {
   return b64u.enc(out);
 }
 
-// Открыть payload кодом; неверный код/битый blob → null.
-export async function openGreetPayload(code, blobB64) {
+async function openCodePayload(code, salt, iterations, blobB64) {
   try {
-    const key = await deriveGreetKey(code);
+    const key = await deriveCodeKey(code, salt, iterations);
     const raw = b64u.dec(blobB64);
     if (raw.length < 13) return null;
     const pt = await crypto.subtle.decrypt(
@@ -491,4 +657,252 @@ export async function openGreetPayload(code, blobB64) {
   } catch {
     return null;
   }
+}
+
+// Запечатать {seed, roomId} под ключом из кода → base64url(nonce||ct).
+export async function sealGreetPayload(code, payloadObj) {
+  return sealCodePayload(code, GREET_SALT, GREET_PBKDF2_ITER, payloadObj);
+}
+
+// Открыть payload кодом; неверный код/битый blob → null.
+export async function openGreetPayload(code, blobB64) {
+  return openCodePayload(code, GREET_SALT, GREET_PBKDF2_ITER, blobB64);
+}
+
+// =======================================================================
+// v26: ПОСТОЯННАЯ КОРОТКАЯ ССЫЛКА (#join=<код>) — режим алиаса PairingDO.
+// Тот же приём, что код приветствия (PBKDF2 → AES-GCM blob {seed, roomId}),
+// но: отдельное пространство (соль 'zv-alias-v1' — greet-код алиас не
+// откроет и наоборот), пара НЕ одноразовая и без TTL, зато отзываемая
+// (revoke по admin-секрету владельца) и с rate-limit выдач на сервере.
+// Честная рамка: ≈54 бита энтропии кода против 256 бит длинной ссылки;
+// компенсации — медленный KDF, rate-limit, отзываемость и комбинация с PIN
+// (фаза 2). Длинная ссылка остаётся главным ключом комнаты.
+// =======================================================================
+export const ALIAS_SALT = 'zv-alias-v1';
+const ALIAS_PBKDF2_ITER = 200_000;
+
+export function newJoinCode() {
+  return newGreetCode(); // тот же формат: 9 символов base64url, ~54 бита
+}
+
+export async function aliasCodeHash(code) {
+  return sha256hex(ALIAS_SALT + String(code).trim());
+}
+
+export async function sealAliasPayload(code, payloadObj) {
+  return sealCodePayload(code, ALIAS_SALT, ALIAS_PBKDF2_ITER, payloadObj);
+}
+
+export async function openAliasPayload(code, blobB64) {
+  return openCodePayload(code, ALIAS_SALT, ALIAS_PBKDF2_ITER, blobB64);
+}
+
+// =======================================================================
+// v27: мессенджерные управляющие сообщения (реакции, правки, удаление,
+// закреп) — ЧИСТЫЕ функции состояния. Живут здесь, потому что chat.js при
+// импорте трогает DOM и в Node-тестах не поднимается; вся логика применения
+// управляющих сообщений вынесена в тестируемые чистые функции, а chat.js
+// только вызывает их при ingest и при собственной отправке.
+//
+// Модель: управляющие сообщения — обычные подписанные сообщения чата
+// (type 'react' | 'edit' | 'del' | 'pin' | 'unpin' | 'ttl'), цель — по
+// хэшу blob целевого сообщения (entry.hash в локальном хранилище).
+// =======================================================================
+export const REACT_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮'];
+
+// Состояние реакций одного сообщения: {emoji: [devPub, ...]}.
+// Возвращает СЛЕДУЮЩУЮ операцию для dev: если dev уже ставил этот emoji —
+// 'remove' (toggle), иначе 'add'. Неизвестный emoji → null (нельзя отправить).
+export function nextReactionOp(reactions, dev, emoji) {
+  if (!REACT_EMOJIS.includes(emoji) || !dev) return null;
+  const list = reactions?.[emoji] || [];
+  return list.includes(dev) ? 'remove' : 'add';
+}
+
+// Применение одной реакции к состоянию. Чистая: возвращает новый объект,
+// входной не мутирует. Чужие/неизвестные emoji и пустые dev игнорируются.
+export function applyReactionState(reactions, dev, emoji, op) {
+  const out = {};
+  for (const [k, v] of Object.entries(reactions || {})) {
+    if (Array.isArray(v) && v.length) out[k] = [...v];
+  }
+  if (!REACT_EMOJIS.includes(emoji) || !dev || (op !== 'add' && op !== 'remove')) return out;
+  const list = out[emoji] || [];
+  const has = list.includes(dev);
+  if (op === 'add' && !has) list.push(dev);
+  if (op === 'remove' && has) list.splice(list.indexOf(dev), 1);
+  if (list.length) out[emoji] = list;
+  else delete out[emoji];
+  return out;
+}
+
+// Применение 'edit'/'del' к локальной записи сообщения (entry = {msg, ...}).
+// Правила: подпись обязана быть валидна (sigOk посчитан вызывающим через
+// verifyChatSig), автор управляющего сообщения обязан совпадать с автором
+// оригинала, удалённое сообщение больше не редактируется и не удаляется
+// повторно. Мутирует entry.msg при успехе; возвращает true, если применено.
+export function applyEditOrDelete(entry, ctrlMsg, sigOk) {
+  if (!entry?.msg || !ctrlMsg || !sigOk) return false;
+  if (ctrlMsg.devPub !== entry.msg.devPub) return false; // только автор оригинала
+  if (entry.msg.deleted) return false;
+  if (ctrlMsg.type === 'edit') {
+    let text = null;
+    try {
+      text = JSON.parse(ctrlMsg.text || '')?.text;
+    } catch {}
+    if (typeof text !== 'string' || !text) return false;
+    entry.msg.text = text;
+    entry.msg.edited = true;
+    return true;
+  }
+  if (ctrlMsg.type === 'del') {
+    entry.msg.deleted = true;
+    entry.msg.text = '';
+    return true;
+  }
+  return false;
+}
+
+// Применение 'pin'/'unpin': активен один закреп, последний побеждает.
+// Возвращает новое значение pinned (или undefined — «без изменений», если
+// подпись невалидна). pinned: {hash, by, ts} | null.
+export function applyPinState(current, ctrlMsg, sigOk) {
+  if (!ctrlMsg || !sigOk) return undefined;
+  if (ctrlMsg.type === 'pin') {
+    let target = null;
+    try {
+      target = JSON.parse(ctrlMsg.text || '')?.target;
+    } catch {}
+    if (typeof target !== 'string' || !target) return undefined;
+    return { hash: target, by: ctrlMsg.devPub, ts: ctrlMsg.ts || 0 };
+  }
+  if (ctrlMsg.type === 'unpin') return null;
+  return undefined;
+}
+
+// =======================================================================
+// v27: фраза восстановления личности и серверный бэкап (этап 4 техплана
+// v15, адаптированный под серверное хранение в PairingDO).
+//
+// Seed бэкапа — 128 бит. Кодировка фразы: seed (16 байт) + первый байт
+// SHA-256(seed) = 17 байт; каждый байт — одно слово из CHAT_WORDS (256
+// слов, тот же список, что у контрольной фразы комнаты). Итого 17 слов:
+// 16 слов данных + 1 контрольное. Ошибка в любом слове ловится контрольной
+// суммой при вводе (decode бросает понятную ошибку), неизвестное слово —
+// тоже. Фраза = полная власть над личностью: по ней выводятся И ключ
+// бэкапа (шифрование списка комнат), И recovery-пара (подпись бэкапа и
+// сертификатов новых устройств).
+// =======================================================================
+export const RECOVERY_WORDS_COUNT = 17;
+export const RECOVERY_SEED_BYTES = 16;
+
+export async function mnemonicEncode(seedBytes) {
+  if (!(seedBytes instanceof Uint8Array) || seedBytes.length !== RECOVERY_SEED_BYTES) {
+    throw new Error('mnemonic: нужен seed ровно 16 байт');
+  }
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', seedBytes));
+  const all = new Uint8Array(RECOVERY_SEED_BYTES + 1);
+  all.set(seedBytes, 0);
+  all[RECOVERY_SEED_BYTES] = h[0];
+  return [...all].map((b) => CHAT_WORDS[b]).join(' ');
+}
+
+export async function mnemonicDecode(phrase) {
+  const words = String(phrase || '')
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length !== RECOVERY_WORDS_COUNT) {
+    throw new Error(`Фраза восстановления — ${RECOVERY_WORDS_COUNT} слов, получено ${words.length}`);
+  }
+  const bytes = new Uint8Array(RECOVERY_WORDS_COUNT);
+  for (let i = 0; i < words.length; i++) {
+    const idx = CHAT_WORDS.indexOf(words[i]);
+    if (idx < 0) throw new Error(`Слова «${words[i]}» нет в списке слов ZVONochek`);
+    bytes[i] = idx;
+  }
+  const seed = bytes.subarray(0, RECOVERY_SEED_BYTES);
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', seed));
+  if (bytes[RECOVERY_SEED_BYTES] !== h[0]) {
+    throw new Error('Контрольная сумма фразы не сошлась: где-то ошибка в словах');
+  }
+  return new Uint8Array(seed);
+}
+
+// Recovery-пара из seed: скаляр = HKDF(seed, 'zv-recovery-v1'), публичная
+// точка — существующей механикой p256KeyPairFromPriv (v24). Вывод
+// детерминирован: одна фраза → одна пара на любом устройстве.
+export async function deriveRecoveryPair(seedBytes) {
+  if (!(seedBytes instanceof Uint8Array) || seedBytes.length !== RECOVERY_SEED_BYTES) {
+    throw new Error('recovery: нужен seed 16 байт');
+  }
+  const base = await crypto.subtle.importKey('raw', seedBytes, 'HKDF', false, ['deriveBits']);
+  for (let counter = 0; ; counter++) {
+    const info = counter === 0 ? 'zv-recovery-v1' : `zv-recovery-v1/${counter}`;
+    const bits = new Uint8Array(
+      await crypto.subtle.deriveBits(
+        { name: 'HKDF', hash: 'SHA-256', salt: te.encode('ZVONochek/v27'), info: te.encode(info) },
+        base,
+        256
+      )
+    );
+    try {
+      const pair = await p256KeyPairFromPriv(bits, ['sign'], 'ECDSA');
+      const pubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+      return { publicKey: pair.publicKey, privateKey: pair.privateKey, pubRaw, pubB64: b64u.enc(pubRaw) };
+    } catch {
+      // Скаляр вне [1, n-1] — шанс ~2^-128, но вывод обязан быть тотальным:
+      // следующая попытка с другим info даёт независимый скаляр.
+      continue;
+    }
+  }
+}
+
+async function deriveBackupKey(seedBytes) {
+  const base = await crypto.subtle.importKey('raw', seedBytes, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: te.encode('ZVONochek/v27'), info: te.encode('zv-backup-v1') },
+    base,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+// Запечатать объект бэкапа ключом из seed → base64url(iv || ct).
+export async function sealBackup(seedBytes, obj) {
+  const key = await deriveBackupKey(seedBytes);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(JSON.stringify(obj)))
+  );
+  const out = new Uint8Array(iv.length + ct.length);
+  out.set(iv, 0);
+  out.set(ct, iv.length);
+  return b64u.enc(out);
+}
+
+// Открыть бэкап; неверный seed / битый blob → null (не исключение).
+export async function openBackup(seedBytes, blobB64) {
+  try {
+    const key = await deriveBackupKey(seedBytes);
+    const raw = b64u.dec(blobB64);
+    if (raw.length < 13) return null;
+    const pt = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: raw.subarray(0, 12) },
+      key,
+      raw.subarray(12)
+    );
+    return JSON.parse(td.decode(pt));
+  } catch {
+    return null;
+  }
+}
+
+// Адрес серверного бэкапа: SHA-256 от сырого (65 байт) recovery-публичного
+// ключа, hex — совпадает с проверкой на стороне PairingDO.
+export async function backupIdHash(pubRaw) {
+  return sha256hex(pubRaw);
 }

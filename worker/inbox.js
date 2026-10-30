@@ -56,6 +56,30 @@ async function verifySig(pubB64, sigB64, text) {
 }
 const freshTs = (ts) => Math.abs(Date.now() - Number(ts || 0)) < SIG_SKEW_MS;
 
+// ---------- Сертификаты устройств (v20) и цепочка восстановления (v27) ----------
+// Канонический текст сертификата устройства: issuer подписывает
+// `zv-device-v1|<devicePub>|<label>|<exp>`.
+export function deviceCertText(devicePub, label, exp) {
+  return `zv-device-v1|${devicePub}|${label || ''}|${exp}`;
+}
+
+// Прямая проверка: cert устройства подписан issuerPub (обычно master).
+export async function verifyDeviceCert(issuerPub, devicePub, cert) {
+  if (!issuerPub || !devicePub || !cert?.sig) return false;
+  return verifySig(issuerPub, cert.sig, deviceCertText(devicePub, cert.label, cert.exp));
+}
+
+// v27: цепочка глубиной 2 для восстановленной личности:
+// master → recovery (отдельный cert с label 'recovery', выпускается master
+// при настройке бэкапа) → новое устройство (cert подписан recovery-ключом).
+// Существующий путь master → device этой функцией НЕ заменяется.
+export async function verifyDeviceChain(masterPub, recoveryPub, recoveryCert, devicePub, cert) {
+  if (!recoveryPub || !recoveryCert?.sig) return false;
+  if (recoveryCert.label !== 'recovery') return false; // kind-флаг recovery-сертификата
+  if (!(await verifyDeviceCert(masterPub, recoveryPub, recoveryCert))) return false;
+  return verifyDeviceCert(recoveryPub, devicePub, cert);
+}
+
 export class Inbox {
   constructor(state, env) {
     this.state = state;
@@ -151,13 +175,28 @@ export class Inbox {
 
     // ---------- Регистрация устройства владельца (+ push-подписка) ----------
     if (path === '/register' && req.method === 'POST') {
-      const { masterPub, fp, devicePub, cert, sub, label, ts, sig } = body;
+      const { masterPub, fp, devicePub, cert, sub, label, ts, sig, chain } = body;
       if (!masterPub || !devicePub || !cert?.sig || !sig || !freshTs(ts)) {
         return json({ error: 'bad register' }, 400);
       }
       if ((await fpOfPub(masterPub)) !== fp) return json({ error: 'fp mismatch' }, 403);
-      const certText = `zv-device-v1|${devicePub}|${cert.label || ''}|${cert.exp}`;
-      if (!(await verifySig(masterPub, cert.sig, certText))) {
+      // v27: два пути доверия. Обычный — cert подписан master напрямую.
+      // Восстановленная личность — цепочка master → recovery → device:
+      // cert устройства подписан recovery-ключом, а сам recovery удостоверен
+      // master заранее (при настройке бэкапа). Хранится тот же формат строки
+      // devices; recovery-cert кладём внутрь JSON сертификата для аудита.
+      let storedCert = cert;
+      if (chain?.recoveryPub && chain?.recoveryCert) {
+        if (
+          !(await verifyDeviceChain(masterPub, chain.recoveryPub, chain.recoveryCert, devicePub, cert))
+        ) {
+          return json({ error: 'bad cert chain' }, 403);
+        }
+        storedCert = {
+          ...cert,
+          recovery: { pub: chain.recoveryPub, cert: chain.recoveryCert },
+        };
+      } else if (!(await verifyDeviceCert(masterPub, devicePub, cert))) {
         return json({ error: 'bad cert' }, 403);
       }
       if (!(await verifySig(devicePub, sig, `register|${topic}|${devicePub}|${ts}`))) {
@@ -167,7 +206,7 @@ export class Inbox {
         `INSERT INTO devices (device_pub, cert, label, exp, revoked) VALUES (?,?,?,?,0)
          ON CONFLICT(device_pub) DO UPDATE SET cert=excluded.cert, label=excluded.label, exp=excluded.exp`,
         devicePub,
-        JSON.stringify(cert),
+        JSON.stringify(storedCert),
         String(label || cert.label || ''),
         Number(cert.exp || 0)
       );
