@@ -17,7 +17,7 @@
 <link rel="icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=28">
+<link rel="stylesheet" href="style.css?v=31">
 </head>
 <body>
 
@@ -178,13 +178,14 @@
           <button id="chatNotifyBtn" class="btn small" title="Системные уведомления о сообщениях, пока приложение открыто"><span>🔔 Уведомления</span></button>
           <label class="chat-pin-check" title="По умолчанию в уведомлении только «Новое сообщение» — без текста сообщения"><input type="checkbox" id="chatNotifyText"> Текст в уведомлениях</label>
           <label class="chat-pin-check" title="Короткий звук при сообщении в неактивной комнате"><input type="checkbox" id="chatNotifySound"> Звук сообщений</label>
+          <label class="chat-pin-check" title="Чаты без сообщений дольше 30 дней удаляются с устройства (и с сервера). Отдельный чат можно сохранить звёздочкой в его меню (···)."><input type="checkbox" id="chatAutoDelToggle" checked> Автоудаление неактивных чатов (30 дней)</label>
         </div>
         <button id="btnCreateChat" class="btn primary"><svg class="ic"><use href="#i-chat"/></svg><span>Создать приватный чат</span></button>
         <label class="chat-pin-check"><input type="checkbox" id="chatPinProtect"> Защитить новый чат PIN-кодом (ссылка без PIN бесполезна)</label>
         <input id="chatPinInput" class="hidden" placeholder="PIN или слово/фраза круга — минимум 4 символа" autocomplete="off" spellcheck="false">
         <div class="join-box">
           <label class="sr-only" for="chatLinkInput">Ссылка на чат</label>
-          <input id="chatLinkInput" placeholder="Ссылка на чат #chat=… или код из 9 символов" autocomplete="off" spellcheck="false">
+          <input id="chatLinkInput" placeholder="Ссылка #chat=…, код из 9 символов или кодовая фраза (3+ слова)" autocomplete="off" spellcheck="false">
           <button id="btnOpenChat" class="btn"><svg class="ic"><use href="#i-arrow-right"/></svg><span>В чат</span></button>
         </div>
         <div id="chatPinBox" class="hidden">
@@ -197,6 +198,12 @@
         </div>
         <p id="chatHomeNote" class="msg"></p>
         <ul id="chatRoomsList" class="plain-list"></ul>
+        <div id="chatListMenu" class="chat-msg-menu hidden">
+          <button id="roomListOpen" class="chat-menu-item"><span>Открыть</span></button>
+          <button id="roomListKeep" class="chat-menu-item"><span>★ Сохранить от автоудаления</span></button>
+          <button id="roomListDelSelf" class="chat-menu-item danger"><span>Удалить у себя</span></button>
+          <button id="roomListDelAll" class="chat-menu-item danger"><span>Удалить для всех</span></button>
+        </div>
       </div>
 
       <div class="trust-row">
@@ -235,7 +242,17 @@
 
 <!-- Приватный чат: комната по ссылке #chat= (v21), мессенджерный слой v25 -->
 <section id="chatroom" class="screen hidden">
-  <div class="home-wrap">
+  <div class="chat-layout">
+    <!-- v30: сайдбар списка чатов — виден только на широком экране (≥1024px),
+         на телефоне экран комнаты работает как раньше, список — на главной. -->
+    <aside class="chat-sidebar" aria-label="Список чатов">
+      <div class="chat-sidebar-head">
+        <b>Чаты</b>
+        <input id="chatSidebarSearch" placeholder="Поиск чатов…" autocomplete="off" spellcheck="false">
+      </div>
+      <ul id="chatRoomsSidebar" class="plain-list chat-rooms-side"></ul>
+    </aside>
+    <div class="home-wrap chat-main">
     <div class="hero-card chat-card">
       <div class="row">
         <button id="chatBack" class="btn small ghost"><svg class="ic"><use href="#i-arrow-left"/></svg><span>Назад</span></button>
@@ -251,6 +268,11 @@
         <span class="chat-pinbar-label">📌 Закреп</span>
         <button id="chatPinText" class="chat-pinbar-text" title="Перейти к закреплённому сообщению"></button>
         <button id="chatPinUnpin" class="btn small ghost" title="Снять закреп" aria-label="Снять закреп"><svg class="ic"><use href="#i-close"/></svg></button>
+      </div>
+      <div id="chatGcallBar" class="chat-gcallbar hidden">
+        <span id="chatGcallText" class="chat-gcallbar-text">📞 Идёт групповой звонок</span>
+        <button id="chatGcallJoin" class="btn small primary"><span>Войти</span></button>
+        <button id="chatGcallLeave" class="btn small ghost hidden"><span>Вы в звонке · Выйти</span></button>
       </div>
       <div id="chatSearchBar" class="chat-searchbar hidden">
         <label class="sr-only" for="chatSearchInput">Поиск по переписке</label>
@@ -270,6 +292,19 @@
         <button id="chatEpochBtn" class="btn small ghost"><svg class="ic"><use href="#i-lock"/></svg><span>Сменить эпоху</span></button>
         <button id="chatSearchBtn" class="btn small ghost"><svg class="ic"><use href="#i-search"/></svg><span>Поиск</span></button>
         <button id="chatTtlBtn" class="btn small ghost"><svg class="ic"><use href="#i-clock"/></svg><span>Исчезновение</span></button>
+        <button id="chatRoomMenuBtn" class="btn small ghost"><span>Комната ···</span></button>
+      </div>
+      <div id="chatRoomMenuBox" class="chat-greet hidden">
+        <div class="chat-greet-title">Управление комнатой</div>
+        <div class="join-box">
+          <button id="roomActKeep" class="btn small"><span>★ Сохранить от автоудаления</span></button>
+          <button id="roomActDeleteSelf" class="btn small"><span>Удалить у себя</span></button>
+          <button id="roomActDeleteAll" class="btn small danger hidden"><span>Удалить для всех</span></button>
+          <button id="roomActWord" class="btn small"><span>Доступ по кодовому слову</span></button>
+          <button id="roomActClose" class="btn small ghost"><span>Закрыть</span></button>
+        </div>
+        <p id="roomMenuNote" class="chat-greet-note"></p>
+        <p class="chat-greet-note">«Удалить у себя» стирает чат только на этом устройстве (остальным уйдёт отметка о выходе). «Удалить для всех» доступно создателю: участники потеряют чат при следующем заходе, серверная копия вычищается по подписи создателя. Неактивные чаты (30 дней без сообщений) удаляются автоматически и с устройств, и с сервера.</p>
       </div>
       <div id="chatTtlBox" class="chat-greet hidden">
         <div class="chat-greet-title">Исчезающие сообщения</div>
@@ -296,6 +331,19 @@
         </div>
         <p id="aliasState" class="chat-greet-note"></p>
         <p class="chat-greet-note">Короткий код — примерно 54 бита против 256 у длинной ссылки: её защищает медленный вывод ключа, лимит подключений и возможность отзыва. Для самого важного используйте длинную ссылку, при желании — вместе с PIN.</p>
+      </div>
+      <div id="chatWordBox" class="chat-greet hidden">
+        <div class="chat-greet-title">Доступ по кодовому слову — собеседник впишет фразу на главном экране и попадёт в этот чат</div>
+        <div class="join-box">
+          <label class="sr-only" for="wordPhraseInput">Кодовая фраза (минимум 3 слова)</label>
+          <input id="wordPhraseInput" placeholder="Например: тихий синий кран" autocomplete="off" spellcheck="false">
+          <button id="wordEnable" class="btn small primary"><span>Включить</span></button>
+          <button id="wordDisable" class="btn small ghost"><span>Отключить</span></button>
+          <button id="wordClose" class="btn small ghost"><span>Закрыть</span></button>
+        </div>
+        <p id="wordPhraseHint" class="chat-greet-note">Минимум 3 слова. Регистр, лишние пробелы и буква ё не важны.</p>
+        <p id="wordState" class="chat-greet-note"></p>
+        <p class="chat-greet-note">Встреча одноразовая и живёт 24 часа: фраза — только точка встречи, дальше работает настоящий ключ комнаты (256 бит). Не используйте фразу, которую легко угадать, и не одну на все чаты.</p>
       </div>
       <div id="chatEpochBox" class="chat-greet hidden">
         <div class="chat-greet-title">Смена эпохи — новый ключ получат только отмеченные участники</div>
@@ -353,6 +401,14 @@
         <button id="chatMic" class="btn primary chat-mic" title="Голосовое сообщение" aria-label="Записать голосовое сообщение"><svg class="ic"><use href="#i-mic"/></svg></button>
       </div>
       <p id="chatNote" class="msg"></p>
+    </div>
+    <!-- v30: заглушка правой панели на десктопе, пока ни один чат не выбран -->
+    <div id="chatEmpty" class="chat-empty" aria-hidden="true">
+      <div class="chat-empty-inner">
+        <div class="chat-empty-icon">💬</div>
+        <p>Выберите чат слева, чтобы продолжить переписку.</p>
+      </div>
+    </div>
     </div>
   </div>
   <!-- v27: меню действий сообщения (ответить, реакция, закрепить, изменить, удалить) -->
@@ -694,11 +750,11 @@
 
 <script src="vendor/mqtt.min.js"></script>
 <script src="vendor/qrcode.js"></script>
-<script src="zvdiag.js?v=28"></script>
-<script type="module" src="app.js?v=28"></script>
-<script type="module" src="group.js?v=28"></script>
-<script type="module" src="chat.js?v=28"></script>
-<script type="module" src="backup.js?v=28"></script>
+<script src="zvdiag.js?v=31"></script>
+<script type="module" src="app.js?v=31"></script>
+<script type="module" src="group.js?v=31"></script>
+<script type="module" src="chat.js?v=31"></script>
+<script type="module" src="backup.js?v=31"></script>
 <!-- Входящий звонок (коммуникатор) -->
 <div id="incomingCall" class="call-modal hidden" role="dialog" aria-label="Входящий звонок">
   <div class="call-modal-card">

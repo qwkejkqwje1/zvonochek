@@ -9,13 +9,19 @@
 // устройство как устройство ТОЙ ЖЕ личности.
 //
 // Серверный бэкап (PairingDO, режим backup): blob = AES-GCM(HKDF(seed))
-// от {v, nickname, masterPub, rooms:[{seed, name, pinProtected, pin}]} —
-// история сообщений в бэкап НЕ входит (докачивается с сервера в пределах
-// retention). Запись на сервер подписывается recovery-ключом; адрес —
-// SHA-256(recoveryPub). Личная ссылка при восстановлении перевыпускается:
-// секрет ссылки создаётся заново (старый остался на потерянном устройстве),
-// topic и ссылка меняются, master-личность — та же.
-import { CONFIG, getWorkerBase } from './config.js?v=28';
+// от {v, nickname, masterPub, rooms:[{seed, name, pinProtected, pin, ts}],
+// deletedRooms:[{roomId, ts}]} — история сообщений в бэкап НЕ входит
+// (докачивается с сервера в пределах retention). Запись на сервер
+// подписывается recovery-ключом; адрес — SHA-256(recoveryPub). Личная
+// ссылка при восстановлении перевыпускается: секрет ссылки создаётся
+// заново (старый остался на потерянном устройстве), topic и ссылка
+// меняются, master-личность — та же.
+//
+// v29: deletedRooms — tombstones удалённых чатов. Восстановление не
+// воскрешает комнату, чей tombstone новее её записи в бэкапе; локальный
+// источник tombstones — тот же localStorage-ключ 'zvDeletedRooms',
+// который ведёт chat.js при удалении.
+import { CONFIG, getWorkerBase } from './config.js?v=31';
 import {
   b64u,
   newSecret,
@@ -28,8 +34,9 @@ import {
   sealBackup,
   openBackup,
   backupIdHash,
-} from './crypto.js?v=28';
-import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=28';
+} from './crypto.js?v=31';
+import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=31';
+import { isRoomTombstoned } from './chat-transport.js?v=31';
 import {
   getPersonal,
   ensurePersonal,
@@ -41,7 +48,7 @@ import {
   fpOfPubRaw,
   getRecoveryState,
   saveRecoveryState,
-} from './identity.js?v=28';
+} from './identity.js?v=31';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -59,6 +66,18 @@ function bkNote(text) {
 }
 
 // ---------- Данные бэкапа ----------
+// v29: локальные tombstones удалённых комнат (ключ ведёт chat.js).
+function loadLocalTombstones() {
+  try {
+    const arr = JSON.parse(localStorage.getItem('zvDeletedRooms') || '[]');
+    return Array.isArray(arr)
+      ? arr.filter((t) => t && typeof t.roomId === 'string' && Number.isFinite(t.ts))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 async function collectBackupData() {
   const personal = await getPersonal();
   const rooms = [];
@@ -77,14 +96,18 @@ async function collectBackupData() {
         name: `Чат ${String(rec.roomId || '').slice(0, 8)}`,
         pinProtected: !!rec.pinProtected,
         pin,
+        // v29: метка записи для сравнения с tombstone при восстановлении.
+        ts: rec.createdAt || 0,
       });
     } catch {}
   }
   return {
-    v: 27,
+    v: 31,
     nickname: personal?.label || '',
     masterPub: personal?.masterPub || '',
     rooms,
+    // v29: tombstones — чтобы восстановление не воскрешало удалённые чаты.
+    deletedRooms: loadLocalTombstones(),
   };
 }
 
@@ -295,15 +318,35 @@ async function restoreFromPhrase() {
       enabled: true,
       updatedAt: Date.now(),
     });
+    // v29: tombstones из бэкапа + локальные объединяются (по комнате —
+    // новейший) и сохраняются локально: удалённые чаты не воскресают ни
+    // при этом восстановлении, ни при следующих.
+    const tombByRoom = new Map();
+    for (const t of [...loadLocalTombstones(), ...(backup.deletedRooms || [])]) {
+      if (!t || typeof t.roomId !== 'string' || !Number.isFinite(t.ts)) continue;
+      if (!tombByRoom.has(t.roomId) || tombByRoom.get(t.roomId) < t.ts) {
+        tombByRoom.set(t.roomId, t.ts);
+      }
+    }
+    const mergedTombstones = [...tombByRoom.entries()].map(([roomId, ts]) => ({ roomId, ts }));
+    try {
+      localStorage.setItem('zvDeletedRooms', JSON.stringify(mergedTombstones.slice(-200)));
+    } catch {}
     // Комнаты: записи восстанавливаются локально; история докачается с
     // сервера в пределах retention при первом открытии каждой комнаты.
     let restoredRooms = 0;
+    let skippedDeleted = 0;
     for (const room of backup.rooms) {
       try {
         const seedBytes = b64u.dec(room.seed);
         if (seedBytes.length !== 32) continue;
         const pinIkm = room.pin ? await derivePinIkm(room.pin, seedBytes) : null;
         const keys = await deriveChatKeys(seedBytes, { pinIkm });
+        // v29: tombstone новее записи комнаты — комната была удалена.
+        if (isRoomTombstoned(keys.roomId, room.ts || 0, mergedTombstones)) {
+          skippedDeleted++;
+          continue;
+        }
         if (await kvGet('rooms', keys.roomId)) continue; // уже есть локально — не затираем
         const rec = normalizeRoomRecord({
           roomId: keys.roomId,
@@ -328,7 +371,9 @@ async function restoreFromPhrase() {
     if (linkEl) linkEl.value = link;
     $('#restoreDone')?.classList.remove('hidden');
     bkNote(
-      `Личность восстановлена, комнат восстановлено: ${restoredRooms}. Ваша личная ссылка — НОВАЯ (выше): старая осталась на потерянном устройстве, раздайте эту заново. Обновите страницу, чтобы коммуникатор подхватил личность.`
+      `Личность восстановлена, комнат восстановлено: ${restoredRooms}` +
+        (skippedDeleted ? `, удалённых ранее пропущено: ${skippedDeleted}` : '') +
+        `. Ваша личная ссылка — НОВАЯ (выше): старая осталась на потерянном устройстве, раздайте эту заново. Обновите страницу, чтобы коммуникатор подхватил личность.`
     );
   } catch (e) {
     bkNote('Не удалось восстановить: ' + (e?.message || e));

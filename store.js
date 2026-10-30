@@ -97,6 +97,25 @@ export function normalizeRoomRecord(rec) {
   if (!rec.seenDevices || typeof rec.seenDevices !== 'object') rec.seenDevices = {};
   if (typeof rec.fallbackSince !== 'number' || rec.fallbackSince < 0) rec.fallbackSince = 0;
   if (typeof rec.dialInfoSent !== 'boolean') rec.dialInfoSent = false;
+  // v29: удаление чатов. creatorPub — создатель из подписанного room-meta
+  // (null, пока не известен: комнаты до v29 и чужие комнаты до первого
+  // room-meta); createdByMe — эта запись создана локальным «Создать чат»;
+  // metaSent — room-meta уже опубликован этим устройством; keepForever —
+  // «сохранить от автоудаления» (флаг списка комнат, не сообщение-закреп).
+  if (!('creatorPub' in rec)) rec.creatorPub = null;
+  if (typeof rec.createdByMe !== 'boolean') rec.createdByMe = false;
+  if (typeof rec.metaSent !== 'boolean') rec.metaSent = false;
+  if (typeof rec.keepForever !== 'boolean') rec.keepForever = false;
+  // v30: доступ по кодовому слову (rendezvous). word = {phraseEnc, adminEnc,
+  // exp} | null — фраза и admin встречи хранятся только vault-зашифрованными
+  // в записи комнаты создателя; на сервере — хэш адреса и шифротекст blob.
+  if (!('word' in rec)) rec.word = null;
+  // v31: состояние храповика (forward secrecy). ratchet = {send: {epoch:
+  // {ck, n}}, recv: {epoch: {dev: {ck, nextN, skipped, pruned?}}},
+  // dr: <состояние Double Ratchet | null>} — всё JSON-безопасное (ключи —
+  // base64-строки; приватный скаляр текущей отправляющей ratchet-пары DR —
+  // vault-зашифрован в dr.send.privEnc). null — храповик не инициализирован.
+  if (!('ratchet' in rec)) rec.ratchet = null;
   return rec;
 }
 

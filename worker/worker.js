@@ -93,7 +93,7 @@ export default {
         (env.METERED_DOMAIN && env.METERED_API_KEY) ||
         (env.TURN_URLS && env.TURN_USERNAME)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 27, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 31, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {
@@ -140,6 +140,33 @@ export default {
       for (const [k, v] of Object.entries(cors)) h.set(k, v);
       return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h, webSocket: resp.webSocket });
     }
+    // 0e) v29: удаление чат-комнаты создателем — POST /room/delete
+    // {roomId, creatorPub, sig}. Пробрасываем в ChatRoom DO (внутренний путь
+    // /room-delete): проверка подписи и wipe — внутри DO (chat-room.js).
+    if (url.pathname === '/room/delete') {
+      if (!env.CHAT_ROOMS) return json({ error: 'chat not configured' }, 501, cors);
+      if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405, cors);
+      let delBodyText = '';
+      try {
+        delBodyText = await req.text();
+      } catch {}
+      let delRoomId = '';
+      try {
+        delRoomId = JSON.parse(delBodyText)?.roomId || '';
+      } catch {}
+      if (!/^[a-f0-9]{64}$/.test(delRoomId)) return json({ error: 'bad roomId' }, 400, cors);
+      const stub = env.CHAT_ROOMS.get(env.CHAT_ROOMS.idFromName(delRoomId));
+      const resp = await stub.fetch(
+        new Request(`https://do/chat/${delRoomId}/room-delete`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: delBodyText,
+        })
+      );
+      const h = new Headers(resp.headers);
+      for (const [k, v] of Object.entries(cors)) h.set(k, v);
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+    }
     // 0d) v27: серверный бэкап личности в том же PairingDO (без новых
     // биндингов). DO адресуется idHash = SHA-256(recoveryPub): для PUT — из
     // тела, для GET — из query. Blob — шифротекст ключом из фразы
@@ -166,7 +193,7 @@ export default {
     // 0c) v25: пары приветствия — одноразовый короткий код быстрого подключения
     // к чату. DO адресуется SHA-256 хэшем кода из тела запроса; blob внутри —
     // шифротекст, ключа у сервера нет (worker/pairing.js).
-    if (url.pathname === '/pair/create' || url.pathname === '/pair/claim' || url.pathname === '/pair/alias' || url.pathname === '/pair/revoke') {
+    if (url.pathname === '/pair/create' || url.pathname === '/pair/claim' || url.pathname === '/pair/alias' || url.pathname === '/pair/revoke' || url.pathname === '/pair/word') {
       if (!env.PAIRING) return json({ error: 'pairing not configured' }, 501, cors);
       if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405, cors);
       let pairBody = null;

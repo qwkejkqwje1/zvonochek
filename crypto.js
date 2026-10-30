@@ -699,6 +699,42 @@ export async function openAliasPayload(code, blobB64) {
 }
 
 // =======================================================================
+// v30: ДОСТУП ПО КОДОВОМУ СЛОВУ (rendezvous — «найти чат по фразе»).
+// Владелец задаёт фразу из 3+ слов, собеседник вписывает её — и попадает
+// в комнату: та же механика, что код приветствия (PBKDF2 → AES-GCM blob
+// {seed, roomId} в PairingDO), но адрес и ключ выводятся из фразы, а не
+// из случайного кода. Фраза — СЛАБЫЙ ключ, поэтому компенсации жёстче,
+// чем у кодов: PBKDF2 600 000 итераций (втрое дороже greet), TTL встречи
+// 24 часа, выдача одноразовая, сервер сжигает запись после 5 неудачных
+// попыток claim. Постоянным доступом фраза не является: свою работу она
+// делает один раз, дальше рулит 256-битный seed комнаты.
+// Нормализация: lowercase, ё→е, схлопывание любых пробелов — чтобы
+// «Тихий  Синий Кран» и «тихий синий кран» были одной фразой.
+// =======================================================================
+export const WORD_SALT = 'zv-word-v1';
+const WORD_PBKDF2_ITER = 600_000;
+
+export function normalizeWordPhrase(phrase) {
+  return String(phrase || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export async function wordCodeHash(phrase) {
+  return sha256hex(WORD_SALT + ':' + normalizeWordPhrase(phrase));
+}
+
+export async function sealWordPayload(phrase, payloadObj) {
+  return sealCodePayload(normalizeWordPhrase(phrase), WORD_SALT, WORD_PBKDF2_ITER, payloadObj);
+}
+
+export async function openWordPayload(phrase, blobB64) {
+  return openCodePayload(normalizeWordPhrase(phrase), WORD_SALT, WORD_PBKDF2_ITER, blobB64);
+}
+
+// =======================================================================
 // v27: мессенджерные управляющие сообщения (реакции, правки, удаление,
 // закреп) — ЧИСТЫЕ функции состояния. Живут здесь, потому что chat.js при
 // импорте трогает DOM и в Node-тестах не поднимается; вся логика применения
@@ -905,4 +941,420 @@ export async function openBackup(seedBytes, blobB64) {
 // ключа, hex — совпадает с проверкой на стороне PairingDO.
 export async function backupIdHash(pubRaw) {
   return sha256hex(pubRaw);
+}
+
+// =======================================================================
+// v31: ХРАПОВИК — forward secrecy для переписки. До v31 ключ комнаты был
+// статичным: утечка seed/ключа эпохи открывала ВЕСЬ серверный архив
+// переписки задним числом. Теперь каждое сообщение шифруется одноразовым
+// ключом, а цепочки ключей необратимо продвигаются (ключи прошлого
+// уничтожить — в этом и смысл).
+//
+// УРОВЕНЬ 1 — цепочки отправителя (Sender Chains), все комнаты и эпохи.
+// На пару (эпоха, отправитель-dev) цепочка выводится из того же IKM, что
+// ключ эпохи (deriveEpochRoomKey), отдельной HKDF-меткой
+// 'zv-chain-v1:<devPub>': корень цепочки может вывести любой участник
+// комнаты (как в Signal Sender Keys — секретность внутри группы не цель;
+// цель — необратимость продвижения). mk_n = HMAC(ck_n, 'zv-mk'),
+// ck_{n+1} = HMAC(ck_n, 'zv-ck'). Сообщение несёт rk:'c1', cn:n внутри
+// шифротекста.
+//
+// Маршрутизация без вскрытия: получатель не знает отправителя и cn, пока
+// не расшифрует, а сервер требует blob строго 4124 байта — свободного
+// места в формате нет. Поэтому подсказка лежит в nonce (12 байт, всегда
+// был виден на проводе): байт 0 — режим ('C' chain / 'D' DR / 'T' DR
+// transit), дальше cn и короткий тег отправителя/цепочки. Уникальность
+// пары (ключ, nonce) при этом не страдает: ключ сообщения одноразовый,
+// а в nonce дополнительно есть случайные байты. Старые сообщения (≤v30)
+// имеют полностью случайный nonce: подсказка может случайно совпасть с
+// тегом режима (шанс ~3/256) — вызывающий код при неудаче маршрутного
+// пути обязан откатываться на статичную расшифровку (chat.js так и делает).
+//
+// УРОВЕНЬ 2 — Double Ratchet для комнат 1:1: классика Signal поверх
+// цепочек уровня 1 (KDF root-цепочки, DH-шаг при смене направления).
+// Заголовок (rk:'d1', dh, pn, cn) — внутри шифротекста; первое сообщение
+// новой цепочки едет «транзитом»: завёрнуто компактно ключом новой
+// цепочки, снаружи — обычным сообщением type:'drx', зашифрованным
+// предыдущей цепочкой отправителя (или цепочкой уровня 1 для самого
+// первого сообщения сессии): получатель сначала открывает внешнее
+// (ключи у него есть), узнаёт новый dh, делает DH-шаг и открывает
+// внутреннее. Состояния — чистые JSON-объекты, переходы — функции ниже;
+// chat.js только хранит состояние и делает ввод-вывод.
+// =======================================================================
+export const CHAIN_MAX_GAP = 1000; // потолок пропуска вперёд за один take
+export const CHAIN_SKIPPED_MAX = 256; // потолок сохранённых skipped-ключей на цепочку
+
+async function hmacSha256(keyBytes, data) {
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, [
+    'sign',
+  ]);
+  const dataBytes = typeof data === 'string' ? te.encode(data) : data;
+  return new Uint8Array(await crypto.subtle.sign('HMAC', key, dataBytes));
+}
+
+export async function aesKeyFromRaw(rawBytes) {
+  if (!(rawBytes instanceof Uint8Array) || rawBytes.length !== 32) throw new Error('bad aes key');
+  return crypto.subtle.importKey('raw', rawBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+// Варианты encryptChatMessage/decryptChatMessage с явным ключом-сырьём и
+// явным nonce: паддинг и формат blob — те же (4124 байта), поэтому сервер
+// и старые проверки размера не замечают разницы.
+export async function encryptChatWithKeyBytes(keyBytes, msgObj, nonce) {
+  const key = await aesKeyFromRaw(keyBytes);
+  const json = te.encode(JSON.stringify(msgObj));
+  if (json.length > CHAT_PT_SIZE - 2) throw new Error('message too long');
+  const pt = new Uint8Array(CHAT_PT_SIZE);
+  new DataView(pt.buffer).setUint16(0, json.length, false);
+  pt.set(json, 2);
+  crypto.getRandomValues(pt.subarray(2 + json.length));
+  const iv = nonce ? new Uint8Array(nonce) : crypto.getRandomValues(new Uint8Array(12));
+  if (iv.length !== 12) throw new Error('bad nonce');
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, pt));
+  const blob = new Uint8Array(CHAT_BLOB_SIZE);
+  blob.set(iv, 0);
+  blob.set(ct, 12);
+  return blob;
+}
+
+export async function decryptChatWithKeyBytes(keyBytes, blob) {
+  const key = await aesKeyFromRaw(keyBytes);
+  return decryptChatMessage(key, blob);
+}
+
+// Компактное запечатывание БЕЗ паддинга (nonce||ct переменной длины):
+// используется только внутри drx-обёрток, которые сами едут в обычном
+// padded-blob, — наружу компактный формат не выходит.
+export async function sealCompactWithKeyBytes(keyBytes, obj) {
+  const key = await aesKeyFromRaw(keyBytes);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(JSON.stringify(obj)))
+  );
+  const out = new Uint8Array(iv.length + ct.length);
+  out.set(iv, 0);
+  out.set(ct, iv.length);
+  return out;
+}
+
+export async function openCompactWithKeyBytes(keyBytes, bytes) {
+  try {
+    if (!(bytes instanceof Uint8Array) || bytes.length < 13) return null;
+    const key = await aesKeyFromRaw(keyBytes);
+    const pt = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: bytes.subarray(0, 12) },
+      key,
+      bytes.subarray(12)
+    );
+    return JSON.parse(td.decode(pt));
+  } catch {
+    return null;
+  }
+}
+
+// ---------- Подсказки в nonce ----------
+const NONCE_TAG = { chain: 0x43, dr: 0x44, transit: 0x54 }; // 'C' 'D' 'T'
+
+// Тег маршрутизации: первые 4 байта сырого публичного ключа (65 байт,
+// 0x04||X||Y). Энтропии тега хватает различить отправителей/цепочки
+// внутри одной комнаты; после расшифровки принадлежность проверяется
+// строго (devPub/dh сверяются полностью).
+export function pubTagOf(pubRaw) {
+  return new Uint8Array(pubRaw).subarray(0, 4);
+}
+export const pubTagHex = (pubRaw) =>
+  [...pubTagOf(pubRaw)].map((x) => x.toString(16).padStart(2, '0')).join('');
+
+function nonceWithTag(tag, cn, tagBytes, tailLen) {
+  const nonce = new Uint8Array(12);
+  nonce[0] = tag;
+  new DataView(nonce.buffer).setUint32(1, cn >>> 0, false);
+  nonce.set(new Uint8Array(tagBytes).subarray(0, 4), 5);
+  const tail = crypto.getRandomValues(new Uint8Array(tailLen));
+  nonce.set(tail, 9);
+  return nonce;
+}
+
+// 'C': [tag][cn:4][epoch:2][devTag:2]… — для цепочки эпоха нужна до
+// расшифровки, поэтому раскладка своя: [tag][cn:4][epoch:2][devTag(первые
+// 2 байта ключа dev — маршрутизация) + 3 случайных]. Полный devTag (4
+// байта) в 12 байт вместе с cn и эпохой не влезает; 2 байта тега + строгая
+// проверка devPub после расшифровки дают достаточную маршрутизацию:
+// коллизия тегов двух участников комнаты практически исключена, а при
+// коллизии вызывающий перебирает обоих кандидатов.
+export function chainNonce(cn, epoch, devPubRaw) {
+  const nonce = new Uint8Array(12);
+  nonce[0] = NONCE_TAG.chain;
+  new DataView(nonce.buffer).setUint32(1, cn >>> 0, false);
+  new DataView(nonce.buffer).setUint16(5, epoch & 0xffff, false);
+  nonce.set(pubTagOf(devPubRaw).subarray(0, 2), 7);
+  nonce.set(crypto.getRandomValues(new Uint8Array(3)), 9);
+  return nonce;
+}
+
+// 'D': [tag][cn:4][dhTag:4][rand:3] — dhTag = первые 4 байта публичного
+// ключа цепочки (dh), получатель выбирает принимающую цепочку по нему.
+export function drNonce(cn, dhPubRaw) {
+  return nonceWithTag(NONCE_TAG.dr, cn, pubTagOf(dhPubRaw), 3);
+}
+
+// 'T': [tag][cn:4][prevDhTag:4][rand:3] — cn и цепочка относятся к
+// ПРЕДЫДУЩЕЙ отправляющей цепочке отправителя: её ключом зашифрована
+// внешняя drx-обёртка.
+export function transitNonce(cn, prevDhPubRaw) {
+  return nonceWithTag(NONCE_TAG.transit, cn, pubTagOf(prevDhPubRaw), 3);
+}
+
+// Разбор подсказки; null — подсказки нет (случайный nonce старых версий
+// или статичных служебных сообщений).
+export function parseBlobHint(nonce) {
+  if (!(nonce instanceof Uint8Array) || nonce.length !== 12) return null;
+  const dv = new DataView(nonce.buffer, nonce.byteOffset, 12);
+  const tag = nonce[0];
+  if (tag === NONCE_TAG.chain) {
+    return {
+      mode: 'c1',
+      cn: dv.getUint32(1, false),
+      epoch: dv.getUint16(5, false),
+      tag: [...nonce.subarray(7, 9)],
+    };
+  }
+  if (tag === NONCE_TAG.dr) return { mode: 'd1', cn: dv.getUint32(1, false), tag: hex(nonce.subarray(5, 9)) };
+  if (tag === NONCE_TAG.transit)
+    return { mode: 'tx', cn: dv.getUint32(1, false), tag: hex(nonce.subarray(5, 9)) };
+  return null;
+}
+
+export const tagBytesEq = (a, b) => a?.length === b?.length && a.every((v, i) => v === b[i]);
+
+// ---------- Уровень 1: цепочки отправителя ----------
+// IKM корня цепочки повторяет IKM ключа эпохи (deriveEpochRoomKey):
+// эпоха 0 — seed‖pinIkm?; эпоха ≥1 — seed‖pinIkm?‖epochSecret. Метка
+// HKDF отдельная, поэтому ключи эпохи и цепочки не пересекаются.
+export async function deriveChainRoot(seedBytes, pinIkm, epochSecret, epoch, devPub) {
+  const parts = [seedBytes];
+  if (pinIkm) parts.push(pinIkm);
+  if (Number(epoch) > 0) {
+    if (!(epochSecret instanceof Uint8Array) || epochSecret.length !== 32) {
+      throw new Error('chain: нет секрета эпохи');
+    }
+    parts.push(epochSecret);
+  }
+  const ikm = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+  let off = 0;
+  for (const p of parts) {
+    ikm.set(p, off);
+    off += p.length;
+  }
+  const base = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: te.encode('ZVONochek/chat/v1'),
+      info: te.encode('zv-chain-v1:' + devPub),
+    },
+    base,
+    256
+  );
+  return b64u.enc(bits);
+}
+
+export const chainInitSendState = (ckB64) => ({ ck: ckB64, n: 0 });
+export const chainInitRecvState = (ckB64) => ({ ck: ckB64, nextN: 0, skipped: [] });
+
+// Отправка: ключ сообщения из текущего ck, цепочка продвигается.
+// Мутирует state; возвращает {mk (bytes), cn}.
+export async function chainSendTake(state) {
+  const ck = b64u.dec(state.ck);
+  const mk = await hmacSha256(ck, 'zv-mk');
+  state.ck = b64u.enc(await hmacSha256(ck, 'zv-ck'));
+  const cn = state.n;
+  state.n += 1;
+  return { mk, cn };
+}
+
+function skippedSet(state, n, mkBytes) {
+  const arr = state.skipped;
+  const i = arr.findIndex(([k]) => k === n);
+  if (i >= 0) arr[i] = [n, b64u.enc(mkBytes)];
+  else arr.push([n, b64u.enc(mkBytes)]);
+  while (arr.length > CHAIN_SKIPPED_MAX) {
+    let minI = 0;
+    for (let j = 1; j < arr.length; j++) if (arr[j][0] < arr[minI][0]) minI = j;
+    arr.splice(minI, 1);
+  }
+}
+
+// Приём: достать ключ сообщения cn из принимающей цепочки.
+//  - cn == nextN: вывести из ck и продвинуться;
+//  - cn >  nextN: промежуточные ключи — в skipped (потолок пропуска
+//    CHAIN_MAX_GAP, дальше — status 'gap' БЕЗ мутации состояния);
+//  - cn <  nextN: ключ только из skipped, после использования УДАЛЯЕТСЯ;
+//    нет в skipped — status 'unavailable' (ключ уже использован/вытеснен:
+//    прямое следствие forward secrecy).
+//  - state.pruned (ck стёрт сменой эпохи): работает только skipped-ветка.
+// Мутирует state только при status 'ok'. Возвращает {status, mk?}.
+export async function chainRecvTake(state, cn) {
+  if (!Number.isInteger(cn) || cn < 0) return { status: 'unavailable' };
+  if (cn < state.nextN) {
+    const i = state.skipped.findIndex(([k]) => k === cn);
+    if (i < 0) return { status: 'unavailable' };
+    const mk = b64u.dec(state.skipped[i][1]);
+    state.skipped.splice(i, 1);
+    return { status: 'ok', mk };
+  }
+  if (state.pruned || !state.ck) return { status: 'unavailable' };
+  const gap = cn - state.nextN;
+  if (gap > CHAIN_MAX_GAP) return { status: 'gap' };
+  let ck = b64u.dec(state.ck);
+  for (let k = state.nextN; k < cn; k++) {
+    skippedSet(state, k, await hmacSha256(ck, 'zv-mk'));
+    ck = await hmacSha256(ck, 'zv-ck');
+  }
+  const mk = await hmacSha256(ck, 'zv-mk');
+  state.ck = b64u.enc(await hmacSha256(ck, 'zv-ck'));
+  state.nextN = cn + 1;
+  return { status: 'ok', mk };
+}
+
+// Смена эпохи: принимающая цепочка старой эпохи теряет ck (вывести новые
+// ключи из неё больше нельзя), остаются только skipped-ключи недоставленных
+// сообщений. Мутирует и возвращает state.
+export function chainPruneRecvState(state) {
+  if (!state) return state;
+  state.ck = null;
+  state.pruned = true;
+  return state;
+}
+
+// ---------- Уровень 2: Double Ratchet ----------
+// ECDH между существующими парами проекта (ECDH P-256, 256 бит общего
+// секрета — как в завёртках эпох).
+export async function ecdhSharedBits(privKey, pubRawBytes) {
+  const pub = await crypto.subtle.importKey(
+    'raw',
+    pubRawBytes,
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    []
+  );
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: pub }, privKey, 256));
+}
+
+// Случайный валидный скаляр P-256 (для ratchet-пар: приватная половина
+// должна переживать перезагрузку, поэтому пара строится из скаляра
+// функцией p256KeyPairFromPriv, а скаляр хранится vault-зашифрованным).
+export function randomP256Scalar() {
+  for (;;) {
+    const d = crypto.getRandomValues(new Uint8Array(32));
+    try {
+      p256PubFromPriv(d);
+      return d;
+    } catch {}
+  }
+}
+
+export async function drPairFromScalar(scalarBytes) {
+  const pair = await p256KeyPairFromPriv(scalarBytes, ['deriveBits'], 'ECDH');
+  const pubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  return { publicKey: pair.publicKey, privateKey: pair.privateKey, pubRaw };
+}
+
+// Корень сессии DR: HKDF(ECDH(eph, staticPeer) ‖ секрет эпохи) — привязка
+// к комнате и её эпохе инициации. Для эпохи 0 «секрет эпохи» — seed.
+export async function drRootFromInit(sharedBytes, epochSecretBytes) {
+  const ikm = new Uint8Array(sharedBytes.length + epochSecretBytes.length);
+  ikm.set(sharedBytes, 0);
+  ikm.set(epochSecretBytes, sharedBytes.length);
+  const base = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: te.encode('ZVONochek/chat/v1'),
+      info: te.encode('zv-dr-v1'),
+    },
+    base,
+    256
+  );
+  return b64u.enc(bits);
+}
+
+// KDF корня при DH-шаге: (новый root, ключ новой цепочки) — HKDF с
+// солью = текущий root, IKM = выход ECDH (схема Signal).
+export async function drKdfRk(rkB64, dhOutBytes) {
+  const base = await crypto.subtle.importKey('raw', dhOutBytes, 'HKDF', false, ['deriveBits']);
+  const bits = new Uint8Array(
+    await crypto.subtle.deriveBits(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: b64u.dec(rkB64),
+        info: te.encode('zv-dr-v1/rk'),
+      },
+      base,
+      512
+    )
+  );
+  return { rk: b64u.enc(bits.subarray(0, 32)), ck: b64u.enc(bits.subarray(32, 64)) };
+}
+
+// Принимающий DH-шаг: по новому dh собеседника и pn (сколько сообщений
+// он отправил на своей предыдущей цепочке) обновляет dr-состояние:
+//  - хвост предыдущей принимающей цепочки: недостающие ключи — в skipped
+//    (потолок CHAIN_MAX_GAP на добор; дальше — честно теряем хвост);
+//  - корень продвигается, создаётся новая принимающая цепочка.
+// dr — JSON-состояние из записи комнаты; stepPrivKey — CryptoKey пары,
+// чья публичная половина была последней отправленной мной (или ключ ECDH
+// устройства для самого первого шага отвечающего). Мутирует dr.
+export async function drRecvStep(dr, stepPrivKey, theirPubRaw, pn) {
+  // Повторный шаг на тот же dh (ре-транзит уже принятой цепочки) —
+  // идемпотентный no-op: второй DH-шаг на том же ключе разъехал бы корни.
+  if (dr.recvDh && pubTagHex(b64u.dec(dr.recvDh)) === pubTagHex(theirPubRaw)) {
+    return pubTagHex(theirPubRaw);
+  }
+  const prevTag = dr.recvDh ? pubTagHex(b64u.dec(dr.recvDh)) : null;
+  if (prevTag && dr.recvChains?.[prevTag] && Number.isInteger(pn) && pn >= 0) {
+    const prev = dr.recvChains[prevTag];
+    // pn из подписанного заголовка — авторитетная длина предыдущей
+    // цепочки отправителя. Добираем недостающие ключи в skipped и
+    // обрываем вывод: ck предыдущей цепочки после шага не живёт
+    // (иначе ключи «хвоста» выводились бы бесконечно). Неконсистентный
+    // pn (< уже принятых) — оборонительно ничего не трогаем.
+    if (!prev.pruned && prev.ck && pn >= prev.nextN) {
+      const fillTo = Math.min(pn, prev.nextN + CHAIN_MAX_GAP);
+      let ck = b64u.dec(prev.ck);
+      for (let k = prev.nextN; k < fillTo; k++) {
+        skippedSet(prev, k, await hmacSha256(ck, 'zv-mk'));
+        ck = await hmacSha256(ck, 'zv-ck');
+      }
+      prev.nextN = fillTo;
+      prev.ck = null;
+      prev.pruned = true;
+    }
+  }
+  const dhOut = await ecdhSharedBits(stepPrivKey, theirPubRaw);
+  const { rk, ck } = await drKdfRk(dr.rk, dhOut);
+  dr.rk = rk;
+  const dhB64 = b64u.enc(theirPubRaw);
+  const tag = pubTagHex(theirPubRaw);
+  dr.recvChains = dr.recvChains || {};
+  if (!dr.recvChains[tag]) {
+    dr.recvChains[tag] = { dh: dhB64, ck, nextN: 0, skipped: [] };
+  }
+  dr.recvDh = dhB64;
+  return tag;
+}
+
+// Допустимость контентного сообщения при активной DR-сессии (политика
+// против downgrade): контент от DR-собеседника принимается только в
+// режиме d1; служебные типы идут своими путями (их подписи и семантика
+// не зависят от режима шифрования контента).
+export const DR_CONTENT_TYPES = new Set(['text', 'file', 'voice', 'react', 'edit', 'del']);
+export function drDowngradeBlocked(dr, msg) {
+  if (!dr || dr.suspended || !msg) return false;
+  if (msg.devPub !== dr.peer) return false;
+  if (!DR_CONTENT_TYPES.has(msg.type)) return false;
+  return msg.rk !== 'd1';
 }

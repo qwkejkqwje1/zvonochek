@@ -1,5 +1,6 @@
-// ZVONochek Worker v25 — Pairing: Durable Object одной пары приветствия
-// (быстрое подключение к чату по короткому коду, техплан v21 §6).
+// ZVONochek Worker — Pairing: Durable Object коротких подключений к чату:
+// пара приветствия v25 (код 9 символов), постоянный алиас v26 (#join=),
+// серверный бэкап личности v27, встреча по кодовому слову v30.
 //
 // Механика: владелец комнаты генерирует одноразовый код из 9 символов
 // base64url (~54 бита энтропии). Ключ пары K = PBKDF2-HMAC-SHA256(код,
@@ -17,12 +18,19 @@
 // API (путь внутри DO — после /pair):
 //   POST /create {codeHash, blob, exp} — создать пару (TTL ≤ 15 мин от now)
 //   POST /claim  {codeHash}            — забрать blob: 200 / 404 / 410
+//   POST /word   {codeHash, blob, exp, adminHash} — v30: встреча по
+//                кодовому слову (TTL ≤ 24 ч, одноразовая, отзыв по admin)
 // DO адресуется idFromName(codeHash), поэтому codeHash внутри тела — лишь
 // сверка с адресом; реальный ключ маршрутизации задаёт worker.js.
 
 const PAIR_TTL_MS = 15 * 60_000;
 const MAX_CLAIMS = 5;
 const MAX_BLOB_CHARS = 4096;
+// v30: встреча по кодовому слову живёт дольше кода приветствия (фразу надо
+// успеть передать и ввести), но остаётся одноразовой; неудачных попыток
+// claim — не более 5, дальше запись сжигается, как у пары приветствия.
+const WORD_TTL_MS = 24 * 3_600_000;
+const WORD_MAX_CLAIMS = 5;
 // v26: постоянный алиас (#join=). Выдачи не сжигают пару, но ограничены:
 // не более 30 успешных выдач в час на один codeHash, дальше 429 до конца окна.
 const ALIAS_CLAIM_LIMIT = 30;
@@ -183,12 +191,44 @@ export class Pairing {
       return json({ ok: true, alias: true }, 201);
     }
 
+    // ---------- v30: создание встречи по кодовому слову ----------
+    // blob {seed, roomId} зашифрован ключом PBKDF2(фраза, 'zv-word-v1',
+    // 600k) на клиенте; сервер фразы не знает — только хэш её адреса.
+    if (path === '/word' && req.method === 'POST') {
+      const { codeHash, blob, exp, adminHash } = body;
+      if (typeof codeHash !== 'string' || !/^[a-f0-9]{64}$/.test(codeHash)) {
+        return json({ error: 'bad codeHash' }, 400);
+      }
+      if (typeof blob !== 'string' || !blob || blob.length > MAX_BLOB_CHARS) {
+        return json({ error: 'bad blob' }, 400);
+      }
+      if (typeof adminHash !== 'string' || !/^[a-f0-9]{64}$/.test(adminHash)) {
+        return json({ error: 'bad adminHash' }, 400);
+      }
+      if (this.meta('mode') || this.meta('blob')) {
+        return json({ error: 'taken' }, 409); // фраза уже занята (или адрес не пуст)
+      }
+      const expN = Number(exp);
+      if (!Number.isFinite(expN) || expN <= now) return json({ error: 'bad exp' }, 400);
+      if (expN > now + WORD_TTL_MS + 30_000) return json({ error: 'ttl too long' }, 400);
+      this.setMeta('mode', 'word');
+      this.setMeta('code_hash', codeHash);
+      this.setMeta('blob', blob);
+      this.setMeta('exp', String(expN));
+      this.setMeta('claims', '0');
+      this.setMeta('admin_hash', adminHash);
+      await this.ensureAlarm(expN);
+      return json({ ok: true, word: true, exp: expN }, 201);
+    }
+
     // ---------- v26: отзыв алиаса владельцем ----------
     // {codeHash, admin}: доступ доказывается знанием admin — сервер сверяет
     // SHA-256(admin) с admin_hash из создания. Неверный admin → 403.
+    // v30: тот же путь отзывает и встречу по кодовому слову (mode 'word').
     if (path === '/revoke' && req.method === 'POST') {
       const { codeHash, admin } = body;
-      if (this.meta('mode') !== 'alias' || this.meta('code_hash') !== codeHash) {
+      const mode = this.meta('mode');
+      if ((mode !== 'alias' && mode !== 'word') || this.meta('code_hash') !== codeHash) {
         return json({ error: 'not found' }, 404);
       }
       if (typeof admin !== 'string' || !admin) return json({ error: 'bad admin' }, 400);
@@ -201,8 +241,8 @@ export class Pairing {
 
     // ---------- Создание пары ----------
     if (path === '/create' && req.method === 'POST') {
-      if (this.meta('mode') === 'alias') {
-        return json({ error: 'taken' }, 409); // алиас парой приветствия не затираем
+      if (this.meta('mode') === 'alias' || this.meta('mode') === 'word') {
+        return json({ error: 'taken' }, 409); // алиас/встречу парой приветствия не затираем
       }
       const { codeHash, blob, exp } = body;
       if (typeof codeHash !== 'string' || !/^[a-f0-9]{64}$/.test(codeHash)) {
@@ -242,6 +282,30 @@ export class Pairing {
         this.setMeta('alias_claims', String(claims + 1));
         this.setMeta('alias_window', String(windowStart));
         return json({ ok: true, blob: this.meta('blob'), alias: true });
+      }
+      // v30: встреча по кодовому слову — одноразовая, TTL 24 часа.
+      if (this.meta('mode') === 'word') {
+        const exp = Number(this.meta('exp') || 0);
+        if (exp <= now) {
+          this.dropPair();
+          return json({ error: 'expired' }, 410);
+        }
+        if (this.meta('code_hash') !== codeHash) {
+          // Неудачная попытка по угаданному адресу DO: считаем, на пятой
+          // сжигаем встречу (тот же предел, что у пары приветствия).
+          const fails = Number(this.meta('claims') || 0) + 1;
+          if (fails >= WORD_MAX_CLAIMS) {
+            this.dropPair();
+            return json({ error: 'too many attempts' }, 410);
+          }
+          this.setMeta('claims', String(fails));
+          return json({ error: 'not found' }, 404);
+        }
+        const blob = this.meta('blob');
+        if (!blob) return json({ error: 'not found' }, 404);
+        // Успешная выдача = встреча сгорает (одноразовость).
+        this.dropPair();
+        return json({ ok: true, blob, word: true });
       }
       // Пара приветствия v25: одноразовая, с TTL (поведение без изменений).
       const blob = this.meta('blob');

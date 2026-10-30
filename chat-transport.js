@@ -12,7 +12,7 @@
 // об уведомлениях, реестр увиденных устройств, менеджер каналов) покрыты
 // Node-тестами test-v28.mjs: chat.js при импорте трогает DOM и в тестах не
 // поднимается.
-import { b64u, sha256hex } from './crypto.js?v=28';
+import { b64u, sha256hex } from './crypto.js?v=31';
 import { schnorr } from './vendor/secp256k1.js';
 
 const te = new TextEncoder();
@@ -243,6 +243,166 @@ export const RECEIPT_LABELS = {
   delivered: 'Доставлено',
   read: 'Прочитано',
 };
+
+// ---------- v29: живой групповой звонок в чате (gcall-state) ----------
+// Состояние звонка выводится из подписанных системных сообщений
+// type:'gcall-state' {callId, op:'start'|'join'|'leave'|'hb'|'end'}.
+// Участник без heartbeat дольше GCALL_HB_TIMEOUT_MS считается вышедшим;
+// когда множество участников пустеет, звонок завершён (явным 'end' или
+// автоматически — end при этом дописывает любой клиент, заметивший пустоту).
+export const GCALL_HB_TIMEOUT_MS = 60_000;
+
+// Извлечь события звонка из сохранённых записей ленты (entry.msg).
+export function gcallEventsFromEntries(items) {
+  const out = [];
+  for (const it of items || []) {
+    const m = it?.msg;
+    if (!m || m.type !== 'gcall-state') continue;
+    let d = null;
+    try {
+      d = JSON.parse(m.text || '');
+    } catch {}
+    if (!d || typeof d.callId !== 'string' || !d.callId) continue;
+    if (!['start', 'join', 'leave', 'hb', 'end'].includes(d.op)) continue;
+    out.push({
+      callId: d.callId,
+      op: d.op,
+      dev: m.devPub || '',
+      nick: m.nick || '',
+      ts: m.ts || 0,
+      hash: it.hash || '',
+    });
+  }
+  out.sort((a, b) => a.ts - b.ts || String(a.hash).localeCompare(String(b.hash)));
+  return out;
+}
+
+// Агрегация актуального состояния: берётся ПОСЛЕДНИЙ звонок (по первому
+// событию) среди имеющих 'start' — старые звонки на новый не влияют.
+// Возвращает null, если звонков не было вовсе.
+export function aggregateGcallState(events, now = Date.now()) {
+  const list = [...(events || [])].sort((a, b) => a.ts - b.ts);
+  if (!list.length) return null;
+  const byCall = new Map();
+  for (const e of list) {
+    if (!byCall.has(e.callId)) byCall.set(e.callId, []);
+    byCall.get(e.callId).push(e);
+  }
+  let callId = null;
+  let firstTs = -1;
+  for (const [id, evs] of byCall) {
+    if (!evs.some((e) => e.op === 'start')) continue;
+    const t0 = evs[0].ts;
+    if (t0 > firstTs) {
+      firstTs = t0;
+      callId = id;
+    }
+  }
+  if (!callId) {
+    // Нет ни одного start (история обрезана) — берём просто последний callId.
+    callId = list[list.length - 1].callId;
+  }
+  const evs = byCall.get(callId) || [];
+  let startedAt = null;
+  let endedAt = null;
+  let lastEventTs = 0;
+  const parts = new Map(); // dev -> {dev, nick, lastSeen}
+  for (const e of evs) {
+    lastEventTs = Math.max(lastEventTs, e.ts || 0);
+    if (endedAt !== null) break; // после end события этого звонка не действуют
+    if (e.op === 'start') {
+      if (startedAt === null) startedAt = e.ts;
+      parts.set(e.dev, { dev: e.dev, nick: e.nick || '', lastSeen: e.ts });
+    } else if (e.op === 'join' || e.op === 'hb') {
+      const prev = parts.get(e.dev);
+      parts.set(e.dev, {
+        dev: e.dev,
+        nick: e.nick || prev?.nick || '',
+        lastSeen: Math.max(prev?.lastSeen || 0, e.ts),
+      });
+    } else if (e.op === 'leave') {
+      parts.delete(e.dev);
+    } else if (e.op === 'end') {
+      endedAt = e.ts;
+    }
+  }
+  if (endedAt !== null) {
+    return {
+      callId,
+      active: false,
+      ended: true,
+      autoEnded: false,
+      startedAt,
+      endedAt,
+      durationMs: startedAt !== null ? Math.max(0, endedAt - startedAt) : null,
+      participants: [],
+    };
+  }
+  // Прунинг по heartbeat: молчащие дольше таймаута считаются вышедшими.
+  for (const [dev, p] of parts) {
+    if (now - p.lastSeen > GCALL_HB_TIMEOUT_MS) parts.delete(dev);
+  }
+  const participants = [...parts.values()].sort((a, b) => a.lastSeen - b.lastSeen);
+  if (startedAt !== null && participants.length === 0) {
+    return {
+      callId,
+      active: false,
+      ended: true,
+      autoEnded: true,
+      startedAt,
+      endedAt: lastEventTs || startedAt,
+      durationMs: Math.max(0, (lastEventTs || startedAt) - startedAt),
+      participants: [],
+    };
+  }
+  return {
+    callId,
+    active: participants.length > 0,
+    ended: false,
+    autoEnded: false,
+    startedAt,
+    endedAt: null,
+    durationMs: null,
+    participants,
+  };
+}
+
+// ---------- v29: автоудаление неактивных чатов (локальный свип) ----------
+// Срок — цифра владельца: 30 дней без активности. Активность комнаты —
+// последнее сообщение любого типа или момент создания записи.
+export const CHAT_INACTIVE_MS = 30 * 24 * 3600_000;
+
+export function roomLastActivityTs(rec, items) {
+  let t = rec?.createdAt || 0;
+  for (const it of items || []) {
+    const ts = it?.msg?.ts || it?.ts || 0;
+    if (ts > t) t = ts;
+  }
+  return t;
+}
+
+export function shouldSweepRoom(rec, items, now = Date.now(), { enabled = true } = {}) {
+  if (!enabled || !rec || rec.keepForever) return false;
+  return now - roomLastActivityTs(rec, items) > CHAT_INACTIVE_MS;
+}
+
+// ---------- v29: tombstones удалённых комнат в бэкапе ----------
+// Восстановление не воскрешает комнату, если её tombstone новее записи
+// комнаты в бэкапе (ts записи = createdAt на момент сбора бэкапа).
+export function isRoomTombstoned(roomId, roomTs, tombstones) {
+  if (!roomId) return false;
+  let max = null;
+  for (const t of tombstones || []) {
+    if (t && t.roomId === roomId && Number.isFinite(t.ts)) {
+      if (max === null || t.ts > max) max = t.ts;
+    }
+  }
+  return max !== null && max > (roomTs || 0);
+}
+
+export function filterRestoredRooms(candidates, tombstones) {
+  return (candidates || []).filter((c) => c && !isRoomTombstoned(c.roomId, c.ts, tombstones));
+}
 
 // ---------- Менеджер каналов ----------
 export class ChatTransportManager {

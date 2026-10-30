@@ -19,6 +19,17 @@
 //   POST /file  {fileId, idx, total, blob} — чанк зашифрованного файла (v25)
 //   GET  /file?fileId=&idx=       — отдать чанк файла (v25)
 //   WS   /listen                  — hibernation; auth первым сообщением {type:'auth', token, dev}
+//   POST /room-delete {creatorPub, sig} — v29: удаление комнаты создателем.
+//        Маршрут снаружи: POST /room/delete на воркере (worker.js пробрасывает
+//        сюда). Авторизация — не токеном, а ECDSA-подписью создателя над
+//        'zv-room-delete-v1:'+roomId; создатель регистрируется один раз при
+//        первом сообщении комнаты (поле creatorPub в /msg, seq=1).
+//
+// v29: удаление чатов и лимиты. meta.last_activity обновляется на /msg и
+// /file; alarm полностью вычищает комнату, неактивную 30 дней (цифра
+// владельца). Удаление (создателем или по неактивности) оставляет в meta
+// только tombstone (room_id + deleted): все остальные эндпоинты после этого
+// отвечают 410 Gone {error:'room_deleted'}, а не воскрешают комнату.
 //
 // v25: сервер по-прежнему слеп к содержимому, но теперь видит МЕТАДАННЫЕ,
 // которых у v21 не было: кто из устройств онлайн (presence по факту WS-подключений),
@@ -38,6 +49,11 @@ const MAX_SUBS = 16;
 const FILE_MAX_BLOB_B64 = 512 * 1024;
 const FILE_MAX_CHUNKS = 100; // v27: 100 × 256 КиБ = 25 МиБ — лимит файла на клиенте (был 40 / 10 МиБ)
 const FILE_RATE_PER_MIN = 600;
+// v29: автоудаление неактивных комнат (цифра владельца — 30 дней без единого
+// сообщения/файла). Активность комнаты — общая: любое сообщение любого
+// участника обновляет meta.last_activity.
+const INACTIVITY_WIPE_MS = 30 * 24 * 3600_000;
+const CREATOR_PUB_RE = /^[A-Za-z0-9_-]{87}$/; // base64url сырого P-256 point (65 байт)
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), {
@@ -101,6 +117,69 @@ export class ChatRoom {
   }
   setMeta(k, v) {
     this.sql.exec(`INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)`, k, v);
+  }
+
+  // v29: отметка активности комнаты (для автоудаления по неактивности).
+  touchActivity(now = Date.now()) {
+    try {
+      this.setMeta('last_activity', String(now));
+    } catch {}
+  }
+
+  // v29: проверка ECDSA-подписи создателя комнаты. Формат — как клиентский
+  // verifyChatSig (identity.js): публичный ключ — base64url сырого
+  // несжатого P-256 point, подпись — base64url (r||s) над UTF-8 текста.
+  async verifyCreatorSig(pubB64, sigB64, text) {
+    try {
+      if (!CREATOR_PUB_RE.test(pubB64 || '')) return false;
+      const raw = b64u.dec(pubB64);
+      if (raw.length !== 65 || raw[0] !== 0x04) return false;
+      const key = await crypto.subtle.importKey(
+        'raw',
+        raw,
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['verify']
+      );
+      return await crypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        key,
+        b64u.dec(sigB64),
+        te.encode(text)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  // v29: полное вычищение комнаты. Остаётся только tombstone в meta
+  // (room_id + deleted), чтобы поздние запросы получали 410 Gone, а не
+  // воскрешали комнату через /init. Живым WS-клиентам шлём room_deleted
+  // и закрываем сокеты — их следующий fetch всё равно упрётся в 410.
+  wipeRoom(roomId) {
+    try {
+      this.broadcast({ type: 'room_deleted', ts: Date.now() });
+      for (const ws of this.state.getWebSockets()) {
+        try {
+          ws.close(1000, 'room deleted');
+        } catch {}
+      }
+    } catch {}
+    for (const q of [
+      `DELETE FROM messages`,
+      `DELETE FROM file_chunks`,
+      `DELETE FROM members_state`,
+      `DELETE FROM subs`,
+      `DELETE FROM meta`,
+    ]) {
+      try {
+        this.sql.exec(q);
+      } catch {}
+    }
+    try {
+      if (roomId) this.setMeta('room_id', roomId);
+      this.setMeta('deleted', '1');
+    } catch {}
   }
 
   async tokenOk(req) {
@@ -187,6 +266,10 @@ export class ChatRoom {
     const roomId = this.roomId(req);
     if (!roomId) return json({ error: 'bad room' }, 400);
     if (!this.meta('room_id')) this.setMeta('room_id', roomId);
+    // v29: удалённая комната не воскресает — любой путь получает 410 Gone,
+    // клиенты по нему стирают комнату локально (в т.ч. те, кто был офлайн
+    // и не видел сообщения room-delete).
+    if (this.meta('deleted')) return json({ error: 'room_deleted' }, 410);
     const path = this.subPath(req);
     const url = new URL(req.url);
     await this.ensureAlarm();
@@ -208,6 +291,25 @@ export class ChatRoom {
       }
     }
 
+    // ---------- v29: удаление комнаты создателем (подпись, не токен) ----------
+    // Сюда запрос попадает из POST /room/delete на воркере (worker.js).
+    // Подпись проверяется ключом meta.creator_pub, зарегистрированным при
+    // первом сообщении комнаты; без регистрации создателя серверный wipe
+    // недоступен (комнаты до v29) — клиентское удаление сообщением при этом
+    // работает, градация зафиксирована в AUDIT-v29.
+    if (path === '/room-delete' && req.method === 'POST') {
+      const creator = this.meta('creator_pub');
+      if (!creator) return json({ error: 'creator_unknown' }, 403);
+      const { creatorPub, sig } = body;
+      if (creatorPub !== creator || typeof sig !== 'string' || !sig) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const okSig = await this.verifyCreatorSig(creator, sig, 'zv-room-delete-v1:' + roomId);
+      if (!okSig) return json({ error: 'forbidden' }, 403);
+      this.wipeRoom(roomId);
+      return json({ ok: true, deleted: true });
+    }
+
     // ---------- Инициализация комнаты / проверка токена ----------
     if (path === '/init' && req.method === 'POST') {
       const given = req.headers.get('x-access-token') || '';
@@ -217,6 +319,8 @@ export class ChatRoom {
       if (!stored) {
         this.setMeta('access_token_hash', hash);
         this.setMeta('created', String(Date.now()));
+        // v29: точка отсчёта автоудаления — создание комнаты.
+        if (!this.meta('last_activity')) this.setMeta('last_activity', String(Date.now()));
       } else if (stored !== hash) {
         return json({ error: 'forbidden' }, 403);
       }
@@ -265,7 +369,10 @@ export class ChatRoom {
       if (recent >= RATE_PER_MIN) return json({ error: 'rate limited' }, 429);
       const hash = await sha256hex(raw);
       const existing = this.one(`SELECT seq FROM messages WHERE hash=?`, hash);
-      if (existing) return json({ ok: true, seq: existing.seq, dup: true });
+      if (existing) {
+        this.touchActivity(now); // v29: ресинк дублей — тоже активность комнаты
+        return json({ ok: true, seq: existing.seq, dup: true });
+      }
       this.sql.exec(
         `INSERT INTO messages (hash, blob, ts) VALUES (?,?,?)`,
         hash,
@@ -286,6 +393,19 @@ export class ChatRoom {
         } catch {}
       }
       const row = this.one(`SELECT seq FROM messages WHERE hash=?`, hash);
+      // v29: регистрация создателя — один раз, только на ПЕРВОМ сообщении
+      // комнаты (клиент создателя шлёт room-meta первым и дублирует свой
+      // devPub полем creatorPub: сервер слеп к шифротексту и иначе
+      // подписанта не видит). Чужие поздние заявки не перезаписывают.
+      if (
+        row.seq === 1 &&
+        typeof body.creatorPub === 'string' &&
+        CREATOR_PUB_RE.test(body.creatorPub) &&
+        !this.meta('creator_pub')
+      ) {
+        this.setMeta('creator_pub', body.creatorPub);
+      }
+      this.touchActivity(now);
       this.broadcast({ type: 'msg', seq: row.seq, blob, ts: now }, dev || null);
       this.state.waitUntil(this.pushWake(dev || null));
       return json({ ok: true, seq: row.seq }, 201);
@@ -389,6 +509,7 @@ export class ChatRoom {
         blob,
         now
       );
+      this.touchActivity(now); // v29: файлы — тоже активность комнаты
       return json({ ok: true, idx: nIdx }, 201);
     }
     if (path === '/file' && req.method === 'GET') {
@@ -407,6 +528,22 @@ export class ChatRoom {
 
   async alarm() {
     const now = Date.now();
+    // v29: автоудаление неактивной комнаты (30 дней без сообщений/файлов) —
+    // полный wipe с tombstone, как при удалении создателем. У старых комнат
+    // без last_activity первый alarm только ставит точку отсчёта (grace):
+    // сносить комнату, о которой мы не знаем давность, нельзя.
+    try {
+      if (!this.meta('deleted')) {
+        const la = Number(this.meta('last_activity') || this.meta('created') || 0);
+        if (!la) {
+          this.setMeta('last_activity', String(now));
+        } else if (now - la > INACTIVITY_WIPE_MS) {
+          this.wipeRoom(this.meta('room_id'));
+          await this.state.storage.setAlarm(now + 24 * 3600_000);
+          return;
+        }
+      }
+    } catch {}
     // v27: исчезающие сообщения удаляются по своему expires_at независимо
     // от ack и раньше общего retention (guarded: колонки может не быть).
     try {

@@ -25,7 +25,43 @@
 //   · картинки ≤3 МБ подгружаются и расшифровываются автоматически;
 //   · голосовые сообщения: MediaRecorder → тот же файловый канал,
 //     тип 'voice', плеер в ленте.
-import { CONFIG, getWorkerBase } from './config.js?v=28';
+//
+// v29 — удаление чатов и живой групповой звонок:
+//   · создатель публикует подписанный 'room-meta' первым сообщением —
+//     остальные узнают creatorPub, сервер регистрирует его при seq=1;
+//   · «Удалить у себя» (с 'leave' остальным), «Удалить для всех»
+//     (подписанный 'room-delete' + серверный wipe по подписи создателя,
+//     POST /room/delete; офлайн-участники добирают 410 Gone);
+//   · автоудаление неактивных чатов: 30 дней без сообщений — серверный
+//     wipe (alarm в ChatRoomDO) и локальный свип; per-room флаг
+//     keepForever («Сохранить от автоудаления»);
+//   · tombstones удалённых комнат в бэкапе v27 — восстановление их не
+//     воскрешает (localStorage 'zvDeletedRooms');
+//   · групповой звонок как ЖИВАЯ сессия: подписанные 'gcall-state'
+//     (start/join/leave/hb/end), плашка «Идёт групповой звонок · Войти»
+//     в шапке, свободный вход/выход, heartbeat 20 с, прунинг 60 с.
+//
+// v30 — десктопная разметка и доступ по кодовому слову:
+//   · двухпанельный экран чата ≥1024px: список комнат слева (тот же
+//     renderRoomList, второй контейнер), открытый чат справа на всю
+//     ширину; на телефоне поведение прежнее;
+//   · rendezvous по фразе: владелец включает «Доступ по кодовому слову»
+//     (3+ слова), собеседник вписывает фразу на главном экране — PairingDO
+//     режим 'word': blob {seed, roomId} под PBKDF2(фраза, 600k), встреча
+//     одноразовая, TTL 24 часа, отзыв по admin как у алиаса.
+//
+// v31 — храповик (forward secrecy), финальная версия цепочки:
+//   · уровень 1: цепочки отправителя (Sender Chains) для всех комнат и
+//     эпох — каждое сообщение шифруется одноразовым ключом цепочки
+//     (rk:'c1', cn в шифротексте, подсказка маршрутизации — в nonce);
+//     пропущенные ключи живут в skipped-окне ≤256 и удаляются после
+//     использования; смена эпохи обрывает старые цепочки;
+//   · уровень 2: Double Ratchet для комнат 1:1 поверх ecdh-публикаций
+//     фазы 3 (rk:'d1', dh/pn/cn в шифротексте; первое сообщение новой
+//     цепочки — транзитом через 'drx'); при живой DR-сессии контент не
+//     в режиме d1 от собеседника не принимается (анти-downgrade);
+//   · сообщения ≤v30 расшифровываются статичными ключами, как раньше.
+import { CONFIG, getWorkerBase } from './config.js?v=31';
 import {
   b64u,
   newSecret,
@@ -52,13 +88,43 @@ import {
   aliasCodeHash,
   sealAliasPayload,
   openAliasPayload,
+  normalizeWordPhrase,
+  wordCodeHash,
+  sealWordPayload,
+  openWordPayload,
   REACT_EMOJIS,
   nextReactionOp,
   applyReactionState,
   applyEditOrDelete,
   applyPinState,
-} from './crypto.js?v=28';
-import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=28';
+  deriveChainRoot,
+  chainInitSendState,
+  chainInitRecvState,
+  chainSendTake,
+  chainRecvTake,
+  chainPruneRecvState,
+  encryptChatWithKeyBytes,
+  decryptChatWithKeyBytes,
+  sealCompactWithKeyBytes,
+  openCompactWithKeyBytes,
+  parseBlobHint,
+  chainNonce,
+  drNonce,
+  transitNonce,
+  pubTagOf,
+  pubTagHex,
+  tagBytesEq,
+  ecdhSharedBits,
+  randomP256Scalar,
+  drPairFromScalar,
+  drRootFromInit,
+  drKdfRk,
+  drRecvStep,
+  DR_CONTENT_TYPES,
+  drDowngradeBlocked,
+  genP256KeyPair,
+} from './crypto.js?v=31';
+import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=31';
 import {
   getChatDevice,
   getChatDeviceEcdh,
@@ -67,7 +133,7 @@ import {
   verifyChatSig,
   encryptWithVault,
   decryptWithVault,
-} from './identity.js?v=28';
+} from './identity.js?v=31';
 import {
   ChatTransportManager,
   FallbackTransport,
@@ -78,7 +144,10 @@ import {
   receiptState,
   RECEIPT_GLYPHS,
   RECEIPT_LABELS,
-} from './chat-transport.js?v=28';
+  aggregateGcallState,
+  gcallEventsFromEntries,
+  shouldSweepRoom,
+} from './chat-transport.js?v=31';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -174,6 +243,7 @@ function showChatScreen() {
   $('#home')?.classList.add('hidden');
   $('#prejoin')?.classList.add('hidden');
   $('#chatroom')?.classList.remove('hidden');
+  syncChatEmpty();
   const h = $('#chatHomeNote');
   if (h) h.textContent = ''; // v22: комната открыта — домашний дубль подсказок больше не нужен
 }
@@ -362,6 +432,8 @@ function previewOf(m) {
   if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('newdev:')) {
     return '⚠ Новое устройство в комнате';
   }
+  if (m.type === 'leave') return `${m.nick || 'Участник'} вышел из чата`;
+  if (m.type === 'room-meta') return 'Чат создан';
   return String(m.text || '');
 }
 function unreadOf(rec, msgs) {
@@ -369,9 +441,72 @@ function unreadOf(rec, msgs) {
   return msgs.filter((it) => !it.mine && (it.seq || 0) > readSeq).length;
 }
 
+// v30: один построитель пункта списка комнат — используется и главным
+// экраном (#chatRoomsList), и десктопным сайдбаром экрана чата
+// (#chatRoomsSidebar). Состояние одно (kvAll), обработчики не дублируются
+// между рендерами: каждый рендер пересоздаёт узлы целиком.
+function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
+  const li = document.createElement('li');
+  const btn = document.createElement('button');
+  btn.className = 'btn small chat-room-item';
+  if (sidebar && cur && cur.rec.roomId === r.roomId) btn.classList.add('active');
+  const top = document.createElement('span');
+  top.className = 'chat-room-top';
+  const title = document.createElement('b');
+  title.textContent = (r.keepForever ? '★ ' : '') + `Чат ${r.roomId.slice(0, 8)}…`;
+  const when = document.createElement('span');
+  when.className = 'chat-room-when';
+  when.textContent = last ? fmtDayTime(last.msg.ts) : '';
+  top.append(title, when);
+  const bottom = document.createElement('span');
+  bottom.className = 'chat-room-preview';
+  const pv = document.createElement('span');
+  pv.className = 'chat-room-preview-text';
+  pv.textContent = last ? previewOf(last.msg) : 'Нет сообщений';
+  bottom.append(pv);
+  if (unread > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'chat-unread-badge';
+    badge.textContent = String(unread);
+    bottom.append(badge);
+  }
+  btn.append(top, bottom);
+  btn.onclick = async () => {
+    const seed = await decryptWithVault(r.seedEnc);
+    openRoomBySeed(seed);
+  };
+  // v29: меню действий с комнатой (открыть / сохранить от автоудаления /
+  // удалить у себя / удалить для всех).
+  const menuBtn = document.createElement('button');
+  menuBtn.className = 'btn small ghost chat-room-menu-btn';
+  menuBtn.textContent = '···';
+  menuBtn.title = 'Действия с чатом';
+  menuBtn.setAttribute('aria-label', 'Действия с чатом');
+  menuBtn.onclick = (e) => {
+    e.stopPropagation();
+    openRoomListMenu(r, menuBtn).catch(() => {});
+  };
+  li.append(btn, menuBtn);
+  // v30: текст для фильтра поиска по сайдбару (название + превью).
+  li.dataset.search = (title.textContent + ' ' + pv.textContent).toLowerCase();
+  return li;
+}
+
+// v30: фильтр сайдбара по уже отрендеренным пунктам (без перерендера).
+let sidebarQuery = '';
+function applySidebarFilter() {
+  const side = $('#chatRoomsSidebar');
+  if (!side) return;
+  const q = sidebarQuery.trim().toLowerCase();
+  for (const li of side.children) {
+    li.style.display = !q || (li.dataset.search || '').includes(q) ? '' : 'none';
+  }
+}
+
 async function renderRoomList() {
   const list = $('#chatRoomsList');
-  if (!list) return;
+  const side = $('#chatRoomsSidebar');
+  if (!list && !side) return;
   const rooms = (await kvAll('rooms')).map((x) => x.value).filter(Boolean);
   const allMsgs = (await kvAll('messages')).map((x) => x.value).filter(Boolean);
   const byRoom = new Map();
@@ -388,38 +523,99 @@ async function renderRoomList() {
     return { r, last, unread: unreadOf(r, visible), lastTs: last ? last.msg.ts : r.createdAt || 0 };
   });
   enriched.sort((a, b) => b.lastTs - a.lastTs);
-  list.replaceChildren();
-  for (const { r, last, unread } of enriched) {
-    const li = document.createElement('li');
-    const btn = document.createElement('button');
-    btn.className = 'btn small chat-room-item';
-    const top = document.createElement('span');
-    top.className = 'chat-room-top';
-    const title = document.createElement('b');
-    title.textContent = `Чат ${r.roomId.slice(0, 8)}…`;
-    const when = document.createElement('span');
-    when.className = 'chat-room-when';
-    when.textContent = last ? fmtDayTime(last.msg.ts) : '';
-    top.append(title, when);
-    const bottom = document.createElement('span');
-    bottom.className = 'chat-room-preview';
-    const pv = document.createElement('span');
-    pv.className = 'chat-room-preview-text';
-    pv.textContent = last ? previewOf(last.msg) : 'Нет сообщений';
-    bottom.append(pv);
-    if (unread > 0) {
-      const badge = document.createElement('span');
-      badge.className = 'chat-unread-badge';
-      badge.textContent = String(unread);
-      bottom.append(badge);
+  if (list) {
+    list.replaceChildren();
+    for (const e of enriched) list.append(buildRoomListItem(e));
+  }
+  // v30: тот же список — в десктопный сайдбар экрана чата.
+  if (side) {
+    side.replaceChildren();
+    for (const e of enriched) side.append(buildRoomListItem(e, { sidebar: true }));
+    applySidebarFilter();
+  }
+  syncChatEmpty();
+}
+
+// v30: на десктопе, когда экран чата виден, но комната не открыта, правая
+// панель показывает заглушку «Выберите чат слева» вместо карточки комнаты.
+function syncChatEmpty() {
+  $('#chatroom')?.classList.toggle('chat-no-room', !cur);
+}
+
+// ---------- v29: меню комнаты в списке и внутри комнаты ----------
+let listMenuRec = null;
+function hideRoomListMenu() {
+  $('#chatListMenu')?.classList.add('hidden');
+  listMenuRec = null;
+}
+async function openRoomListMenu(rec, anchor) {
+  const menu = $('#chatListMenu');
+  if (!menu) return;
+  if (listMenuRec?.roomId === rec.roomId && !menu.classList.contains('hidden')) {
+    hideRoomListMenu();
+    return;
+  }
+  listMenuRec = rec;
+  const device = await getChatDevice().catch(() => null);
+  const isCreator =
+    !!device &&
+    (rec.creatorPub === device.devicePub || (!rec.creatorPub && rec.createdByMe));
+  const keep = $('#roomListKeep');
+  if (keep) keep.textContent = rec.keepForever ? '✓ Сохранено от автоудаления' : '★ Сохранить от автоудаления';
+  const delAll = $('#roomListDelAll');
+  if (delAll) delAll.classList.toggle('hidden', !isCreator);
+  for (const id of ['#roomListDelSelf', '#roomListDelAll']) {
+    const b = $(id);
+    if (b) {
+      delete b.dataset.armed;
+      b.dataset.label = b.textContent;
     }
-    btn.append(top, bottom);
-    btn.onclick = async () => {
-      const seed = await decryptWithVault(r.seedEnc);
-      openRoomBySeed(seed);
-    };
-    li.append(btn);
-    list.append(li);
+  }
+  menu.classList.remove('hidden');
+  const r = anchor.getBoundingClientRect();
+  menu.style.top = Math.min(window.innerHeight - 240, r.bottom + 4) + 'px';
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - 220, r.left)) + 'px';
+}
+// Двухшаговое подтверждение для разрушительных пунктов меню: первый клик
+// «взводит» кнопку (подпись меняется на «Точно …?»), второй — выполняет.
+function armButton(btn, armedText) {
+  if (!btn) return false;
+  if (btn.dataset.armed) {
+    delete btn.dataset.armed;
+    if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    return true;
+  }
+  btn.dataset.armed = '1';
+  if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+  btn.textContent = armedText;
+  setTimeout(() => {
+    if (btn.dataset.armed) {
+      delete btn.dataset.armed;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    }
+  }, 5000);
+  return false;
+}
+// Состояние пунктов меню открытой комнаты (создатель/keepForever).
+function renderRoomMenuState() {
+  if (!cur) return;
+  const keep = $('#roomActKeep');
+  if (keep) {
+    keep.textContent = cur.rec.keepForever
+      ? '✓ Сохранено от автоудаления'
+      : '★ Сохранить от автоудаления';
+  }
+  const isCreator =
+    cur.rec.creatorPub === cur.device.devicePub ||
+    (!cur.rec.creatorPub && cur.rec.createdByMe);
+  $('#roomActDeleteAll')?.classList.toggle('hidden', !isCreator);
+  const noteEl = $('#roomMenuNote');
+  if (noteEl) {
+    noteEl.textContent = cur.rec.creatorPub
+      ? 'Создатель чата известен — доступно удаление для всех с серверным wipe.'
+      : cur.rec.createdByMe
+        ? 'Вы создали этот чат до регистрации создателя на сервере: удаление для всех сработает сообщением участникам, серверный wipe может быть недоступен.'
+        : 'Создатель этого чата не определён (чат создан до v29): «Удалить для всех» недоступно.';
   }
 }
 
@@ -482,6 +678,464 @@ async function decryptAny(raw) {
   return null;
 }
 
+// ---------- v31: храповик (forward secrecy) ----------
+// Уровень 1 — цепочки отправителя для всех комнат/эпох; уровень 2 —
+// Double Ratchet для комнат 1:1. Состояние — в записи комнаты
+// (rec.ratchet, JSON), переходы — чистые функции crypto.js; здесь только
+// хранение, маршрутизация по nonce-подсказке и ввод-вывод. Сообщения
+// версий ≤v30 (без rk) расшифровываются статичными ключами как раньше
+// (decryptAny) — маршрутная ветка при неудаче всегда откатывается на неё.
+async function roomSeedB64() {
+  if (cur.seedB64) return cur.seedB64;
+  const s = await decryptWithVault(cur.rec.seedEnc);
+  cur.seedB64 = s;
+  return s;
+}
+
+function epochSecretBytes(n) {
+  if (!n) return null;
+  const entry = (cur.rec.epochs || []).find((e) => e.n === n);
+  return entry?.secret ? b64u.dec(entry.secret) : null;
+}
+
+function ratchetRt() {
+  if (!cur.rec.ratchet || typeof cur.rec.ratchet !== 'object') {
+    cur.rec.ratchet = { send: {}, recv: {}, dr: null };
+  }
+  if (!cur.rec.ratchet.send) cur.rec.ratchet.send = {};
+  if (!cur.rec.ratchet.recv) cur.rec.ratchet.recv = {};
+  if (!('dr' in cur.rec.ratchet)) cur.rec.ratchet.dr = null;
+  return cur.rec.ratchet;
+}
+
+async function chainRootB64(epoch, dev) {
+  const cacheKey = `${epoch}|${dev}`;
+  if (cur.chainRoots.has(cacheKey)) return cur.chainRoots.get(cacheKey);
+  const secret = epoch > 0 ? epochSecretBytes(epoch) : null;
+  if (epoch > 0 && !secret) return null;
+  const seedBytes = b64u.dec(await roomSeedB64());
+  const root = await deriveChainRoot(seedBytes, cur.pinIkm, secret, epoch, dev);
+  cur.chainRoots.set(cacheKey, root);
+  return root;
+}
+
+async function getSendChain(epoch) {
+  const rt = ratchetRt();
+  if (!rt.send[epoch]) {
+    const root = await chainRootB64(epoch, cur.device.devicePub);
+    if (!root) return null;
+    rt.send[epoch] = chainInitSendState(root);
+  }
+  return rt.send[epoch];
+}
+
+function peekRecvChain(epoch, dev) {
+  return cur.rec.ratchet?.recv?.[epoch]?.[dev] || null;
+}
+
+async function freshRecvChain(epoch, dev) {
+  const root = await chainRootB64(epoch, dev);
+  return root ? chainInitRecvState(root) : null;
+}
+
+function commitRecvChain(epoch, dev, state) {
+  const rt = ratchetRt();
+  if (!rt.recv[epoch]) rt.recv[epoch] = {};
+  rt.recv[epoch][dev] = state;
+  saveRoom(cur.rec).catch(() => {});
+}
+
+// Смена эпохи: принимающие цепочки старых эпох теряют ck (остаются только
+// skipped-ключи недоставленных сообщений), отправляющие выбрасываются —
+// в старой эпохе мы больше не пишем.
+function pruneOldEpochChains(newEpoch) {
+  const rt = cur.rec.ratchet;
+  if (!rt) return;
+  for (const ep of Object.keys(rt.recv || {})) {
+    if (Number(ep) < newEpoch) {
+      for (const dev of Object.keys(rt.recv[ep])) chainPruneRecvState(rt.recv[ep][dev]);
+    }
+  }
+  for (const ep of Object.keys(rt.send || {})) {
+    if (Number(ep) < newEpoch) delete rt.send[ep];
+  }
+}
+
+// Отправка в режиме цепочки: одноразовый ключ сообщения из цепочки
+// текущей эпохи, подсказка маршрутизации — в nonce.
+async function encryptOutgoing(m) {
+  const epoch = m.epoch || 0;
+  const st = await getSendChain(epoch);
+  if (!st) {
+    // Секрета текущей эпохи у нас нет (исключили при ротации): поведение
+    // как до v31 — статичный ключ; такие сообщения всё равно нечитаемы.
+    return encryptChatMessage(cur.keys.roomKey, m);
+  }
+  const { mk, cn } = await chainSendTake(st);
+  m.rk = 'c1';
+  m.cn = cn;
+  const blob = await encryptChatWithKeyBytes(
+    mk,
+    m,
+    chainNonce(cn, epoch, b64u.dec(cur.device.devicePub))
+  );
+  saveRoom(cur.rec).catch(() => {});
+  return blob;
+}
+
+// Кандидаты-отправители для маршрутной расшифровки: сначала совпавшие по
+// 2-байтному тегу dev из nonce, если таких нет — все известные устройства.
+function chainCandidateDevs(tag2) {
+  const devs = new Set([
+    cur.device.devicePub,
+    ...Object.keys(cur.rec.members || {}),
+    ...Object.keys(cur.rec.seenDevices || {}),
+    ...cur.receipts.keys(),
+    ...cur.online,
+  ]);
+  const matched = [];
+  for (const d of devs) {
+    let t = cur.devTagCache.get(d);
+    if (!t) {
+      try {
+        t = [...pubTagOf(b64u.dec(d)).subarray(0, 2)];
+      } catch {
+        continue;
+      }
+      cur.devTagCache.set(d, t);
+    }
+    if (tagBytesEq(t, tag2)) matched.push(d);
+  }
+  return matched.length ? matched : [...devs];
+}
+
+const cloneChain = (st) => JSON.parse(JSON.stringify(st));
+
+// Расшифровка blob режима 'c1' по подсказке nonce. При успехе состояние
+// цепочки коммитится; при «ключ уже использован и удалён» возвращает
+// {__miss} — вызывающий положит заглушку в ленту.
+async function chainDecrypt(raw, hint) {
+  const epoch = hint.epoch;
+  if (epoch > 0 && !epochSecretBytes(epoch)) return null;
+  let miss = null;
+  for (const dev of chainCandidateDevs(hint.tag)) {
+    const stored = peekRecvChain(epoch, dev);
+    const base = stored || (await freshRecvChain(epoch, dev));
+    if (!base) continue;
+    const trial = cloneChain(base);
+    const r = await chainRecvTake(trial, hint.cn);
+    if (r.status !== 'ok') {
+      if (r.status === 'unavailable' && stored && hint.cn < stored.nextN) {
+        miss = { dev, cn: hint.cn, epoch };
+      }
+      continue;
+    }
+    const msg = await decryptChatWithKeyBytes(r.mk, raw);
+    if (msg && msg.devPub === dev && msg.rk === 'c1' && msg.cn === hint.cn) {
+      commitRecvChain(epoch, dev, trial);
+      if (msg.type === 'drx') return await drOpenInnerFromOuter(msg);
+      return msg;
+    }
+  }
+  return miss ? { __miss: miss } : null;
+}
+
+// ---------- v31: Double Ratchet (комнаты 1:1) ----------
+function drState() {
+  return cur?.rec.ratchet?.dr || null;
+}
+function drActive() {
+  const dr = drState();
+  return dr && !dr.suspended ? dr : null;
+}
+
+// Приватный ключ для принимающего DH-шага: пара, чья публичная половина
+// была моей последней отправленной (текущая отправляющая пара DR), а до
+// первой своей отправки — долговременный ECDH-ключ устройства.
+async function drStepPrivKey(dr) {
+  if (dr.send?.privEnc) {
+    const scalar = b64u.dec(await decryptWithVault(dr.send.privEnc));
+    return (await drPairFromScalar(scalar)).privateKey;
+  }
+  const d = await getChatDeviceEcdh();
+  return d.ecdhPriv;
+}
+
+// Отправка контента в режиме DR. Возвращает blob для провода; само
+// сообщение m (с полями rk/dh/pn/cn) — то, что ляжет в локальную ленту.
+async function drEncryptContent(m) {
+  const dr = drState();
+  if (dr.needStep || !dr.send) {
+    // DH-шаг отправки: новая ratchet-пара, корень продвигается, первое
+    // сообщение новой цепочки едет транзитом (см. drOpenInnerFromOuter).
+    const scalar = randomP256Scalar();
+    const pair = await drPairFromScalar(scalar);
+    const peerPub = memberEcdhPub(dr.peer);
+    const theirPubRaw = dr.recvDh ? b64u.dec(dr.recvDh) : peerPub ? b64u.dec(peerPub) : null;
+    if (!theirPubRaw) throw new Error('dr: нет публичного ключа собеседника');
+    const dhOut = await ecdhSharedBits(pair.privateKey, theirPubRaw);
+    const { rk, ck } = await drKdfRk(dr.rk, dhOut);
+    const pn = dr.send ? dr.send.n : 0;
+    const newSend = {
+      dh: b64u.enc(pair.pubRaw),
+      ck,
+      n: 0,
+      pn,
+      privEnc: await encryptWithVault(b64u.enc(scalar)),
+    };
+    m.rk = 'd1';
+    m.dh = newSend.dh;
+    m.pn = pn;
+    m.cn = 0;
+    const tmp = { ck, n: 0 };
+    const { mk } = await chainSendTake(tmp);
+    newSend.ck = tmp.ck;
+    newSend.n = tmp.n;
+    const innerBytes = await sealCompactWithKeyBytes(mk, m);
+    const outer = await buildMsg(
+      'drx',
+      JSON.stringify({ dh: newSend.dh, pn, inner: b64u.enc(innerBytes) })
+    );
+    const prevSend = dr.send;
+    dr.rk = rk;
+    dr.send = newSend;
+    dr.needStep = false;
+    let blob;
+    if (prevSend) {
+      // Внешняя обёртка — ключом предыдущей отправляющей цепочки
+      // (индекс pn: ровно следующий за её сообщениями).
+      const pst = { ck: prevSend.ck, n: prevSend.n };
+      const t = await chainSendTake(pst);
+      blob = await encryptChatWithKeyBytes(t.mk, outer, transitNonce(t.cn, b64u.dec(prevSend.dh)));
+    } else {
+      // Самое первое сообщение сессии с этой стороны: обёртка едет
+      // обычным сообщением цепочки уровня 1.
+      blob = await encryptOutgoing(outer);
+    }
+    saveRoom(cur.rec).catch(() => {});
+    return blob;
+  }
+  const tmp = { ck: dr.send.ck, n: dr.send.n };
+  const { mk, cn } = await chainSendTake(tmp);
+  dr.send.ck = tmp.ck;
+  dr.send.n = tmp.n;
+  m.rk = 'd1';
+  m.dh = dr.send.dh;
+  m.pn = dr.send.pn;
+  m.cn = cn;
+  const blob = await encryptChatWithKeyBytes(mk, m, drNonce(cn, b64u.dec(dr.send.dh)));
+  saveRoom(cur.rec).catch(() => {});
+  return blob;
+}
+
+// Открытие транзитной обёртки 'drx': подпись внешнего сообщения обязана
+// быть валидной и принадлежать DR-собеседнику — шаг состояния делается
+// только по аутентифицированному dh, иначе сессию можно было бы
+// рассинхронизировать подделкой.
+async function drOpenInnerFromOuter(outer) {
+  const dr = drState();
+  if (!dr || !outer || outer.devPub !== dr.peer) return null;
+  let sigOk = false;
+  try {
+    sigOk = !!(outer.sig && (await verifyChatSig(outer.devPub, outer.sig, canonical(outer))));
+  } catch {}
+  if (!sigOk) return null;
+  let data = null;
+  try {
+    data = JSON.parse(outer.text || '');
+  } catch {}
+  if (!data?.dh || !data?.inner) return null;
+  const innerBytes = b64u.dec(data.inner);
+  const theirPubRaw = b64u.dec(data.dh);
+  const tag = pubTagHex(theirPubRaw);
+  if (dr.recvDh === data.dh && dr.recvChains?.[tag]) {
+    // Повторный транзит уже принятой цепочки — внутреннее сообщение cn=0.
+    const trial = cloneChain(dr.recvChains[tag]);
+    const r = await chainRecvTake(trial, 0);
+    if (r.status !== 'ok') return null;
+    const inner = await openCompactWithKeyBytes(r.mk, innerBytes);
+    if (inner && inner.rk === 'd1' && inner.dh === data.dh) {
+      dr.recvChains[tag] = trial;
+      saveRoom(cur.rec).catch(() => {});
+      return inner;
+    }
+    return null;
+  }
+  const stepPriv = await drStepPrivKey(dr);
+  await drRecvStep(dr, stepPriv, theirPubRaw, Number.isInteger(data.pn) ? data.pn : 0);
+  dr.needStep = true;
+  const chain = dr.recvChains?.[tag];
+  if (!chain) return null;
+  const trial = cloneChain(chain);
+  const r = await chainRecvTake(trial, 0);
+  if (r.status !== 'ok') {
+    saveRoom(cur.rec).catch(() => {});
+    return null;
+  }
+  const inner = await openCompactWithKeyBytes(r.mk, innerBytes);
+  if (inner && inner.rk === 'd1' && inner.dh === data.dh) {
+    dr.recvChains[tag] = trial;
+    saveRoom(cur.rec).catch(() => {});
+    return inner;
+  }
+  saveRoom(cur.rec).catch(() => {});
+  return null;
+}
+
+async function drDecryptDirect(raw, hint) {
+  const dr = drState();
+  if (!dr) return null;
+  const chain = dr.recvChains?.[hint.tag];
+  if (!chain) return null;
+  const trial = cloneChain(chain);
+  const r = await chainRecvTake(trial, hint.cn);
+  if (r.status !== 'ok') {
+    if (r.status === 'unavailable' && hint.cn < chain.nextN) {
+      return { __miss: { dev: dr.peer, cn: hint.cn, epoch: cur.rec.epoch || 0 } };
+    }
+    return null;
+  }
+  const msg = await decryptChatWithKeyBytes(r.mk, raw);
+  if (msg && msg.rk === 'd1' && msg.cn === hint.cn && msg.dh === chain.dh && msg.devPub === dr.peer) {
+    dr.recvChains[hint.tag] = trial;
+    saveRoom(cur.rec).catch(() => {});
+    return msg;
+  }
+  return null;
+}
+
+async function drDecryptTransit(raw, hint) {
+  const dr = drState();
+  if (!dr) return null;
+  const chain = dr.recvChains?.[hint.tag];
+  if (!chain) return null;
+  const trial = cloneChain(chain);
+  const r = await chainRecvTake(trial, hint.cn);
+  if (r.status !== 'ok') return null;
+  const outer = await decryptChatWithKeyBytes(r.mk, raw);
+  if (!outer || outer.type !== 'drx' || outer.devPub !== dr.peer) return null;
+  dr.recvChains[hint.tag] = trial; // обёртка потреблена, даже если шаг не выйдет
+  saveRoom(cur.rec).catch(() => {});
+  return await drOpenInnerFromOuter(outer);
+}
+
+// Единая точка расшифровки входящего blob: сначала маршрутная ветка по
+// подсказке nonce, при неудаче — статичные ключи (все сообщения ≤v30 и
+// служебные автономные посты). drx-обёртки, пришедшие статичным или
+// цепочечным путём, разворачиваются в DR-сообщение.
+async function decryptIncoming(raw) {
+  const hint = parseBlobHint(raw.subarray(0, 12));
+  if (hint?.mode === 'c1') {
+    const r = await chainDecrypt(raw, hint);
+    if (r) return r;
+  } else if (hint?.mode === 'd1') {
+    const r = await drDecryptDirect(raw, hint);
+    if (r) return r;
+  } else if (hint?.mode === 'tx') {
+    const r = await drDecryptTransit(raw, hint);
+    if (r) return r;
+  }
+  const m = await decryptAny(raw);
+  if (m && m.type === 'drx') return await drOpenInnerFromOuter(m);
+  return m;
+}
+
+// Инициация DR-сессии собеседником: dr-init приходит обычным сообщением
+// текущего режима; корень выводится из ECDH(эфемерный ключ инициатора,
+// наш ECDH устройства) и секрета эпохи инициации.
+async function handleDrInit(msg, sigOk) {
+  if (!cur || !sigOk || !msg?.devPub) return;
+  const peer = msg.devPub;
+  if (peer === cur.device.devicePub) return;
+  const others = knownMembers().filter((d) => d !== cur.device.devicePub);
+  if (others.length !== 1 || others[0] !== peer) return;
+  let data = null;
+  try {
+    data = JSON.parse(msg.text || '');
+  } catch {}
+  if (!data?.ephPub) return;
+  const existing = drState();
+  if (existing && !existing.suspended) {
+    // Коллизия одновременных инициаций: инициатором остаётся меньший
+    // devPub; если собеседник меньше — принимаем его сессию.
+    if (!(existing.initiator && peer < cur.device.devicePub)) return;
+  }
+  const epoch = Number.isInteger(data.epoch) ? data.epoch : cur.rec.epoch || 0;
+  const mat = epoch === 0 ? b64u.dec(await roomSeedB64()) : epochSecretBytes(epoch);
+  if (!mat) return;
+  const d = await getChatDeviceEcdh();
+  const shared = await ecdhSharedBits(d.ecdhPriv, b64u.dec(data.ephPub));
+  const rk = await drRootFromInit(shared, mat);
+  ratchetRt().dr = {
+    peer,
+    initiator: false,
+    rk,
+    recvDh: null,
+    recvChains: {},
+    send: null,
+    needStep: false,
+    suspended: false,
+    startedTs: Date.now(),
+  };
+  saveRoom(cur.rec).catch(() => {});
+}
+
+// Инициатор — устройство с меньшим devPub (детерминированный тай-брейк,
+// обе стороны считают одинаково). Условия: комната строго 1:1,
+// собеседник объявил dr в caps и опубликовал ecdhPub.
+async function maybeStartDr() {
+  if (!cur || !cur.rec.nick) return;
+  const existing = drState();
+  if (existing) return;
+  const others = knownMembers().filter((d) => d !== cur.device.devicePub);
+  if (others.length !== 1) return;
+  const peer = others[0];
+  const mem = cur.rec.members?.[peer];
+  if (!mem?.ecdhPub || mem?.caps?.dr !== 1) return;
+  if (!(cur.device.devicePub < peer)) return; // инициатор — меньший devPub
+  const epoch = cur.rec.epoch || 0;
+  const mat = epoch === 0 ? b64u.dec(await roomSeedB64()) : epochSecretBytes(epoch);
+  if (!mat) return;
+  const eph = await genP256KeyPair(['deriveBits'], 'ECDH');
+  const ephRaw = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+  const shared = await ecdhSharedBits(eph.privateKey, b64u.dec(mem.ecdhPub));
+  const rk = await drRootFromInit(shared, mat);
+  ratchetRt().dr = {
+    peer,
+    initiator: true,
+    rk,
+    recvDh: null,
+    recvChains: {},
+    send: null,
+    needStep: false,
+    suspended: false,
+    startedTs: Date.now(),
+  };
+  saveRoom(cur.rec).catch(() => {});
+  await sendMsg('dr-init', JSON.stringify({ ephPub: b64u.enc(ephRaw), epoch }));
+}
+
+// Заглушка навсегда недоступного сообщения храповика: ключ использован и
+// удалён (или вытеснен из skipped-окна) — содержимое не восстановить, но
+// место сообщения в ленте честно показываем.
+async function storeRatchetMiss(item, hash, miss) {
+  const stubMsg = {
+    v: 1,
+    id: 'miss-' + hash,
+    ts: item.ts || Date.now(),
+    nick: '',
+    devPub: miss.dev || '',
+    type: 'text',
+    text: '',
+    epoch: miss.epoch || 0,
+    ratchetMiss: true,
+  };
+  const entry = { hash, msg: stubMsg, sigOk: false, mine: false, reactions: {} };
+  if (Number.isFinite(item.seq)) entry.seq = item.seq;
+  await storeMessage(cur.rec, entry);
+  renderMessages().catch(() => {});
+}
+
 // opts.pin — PIN строкой; opts.pinProtected — ссылка помечена как PIN-комната
 // (маркер &p=1): если PIN не задан и локально не сохранён, показываем экран
 // запроса PIN и комнату не открываем.
@@ -521,6 +1175,12 @@ async function openRoomBySeed(seedStr, opts = {}) {
         introSent: false,
         createdAt: Date.now(),
       };
+      // v29: комната создана этим устройством через «Создать чат» —
+      // оно опубликует room-meta и получит право «Удалить для всех».
+      if (opts.created) {
+        rec.createdByMe = true;
+        rec.creatorPub = device.devicePub;
+      }
     }
     rec = normalizeRoomRecord(rec);
     if (pin) {
@@ -566,6 +1226,15 @@ async function openRoomBySeed(seedStr, opts = {}) {
       fb: null,
       healthTimer: null,
       syncingInitial: true, // до конца первой синхронизации алертов устройств нет
+      // v29: живой групповой звонок (сессия этого открытия комнаты)
+      gcall: null, // {callId, hbTimer} — я участник этого звонка
+      gcallState: null, // последняя агрегация aggregateGcallState
+      gcallEndPosted: new Set(), // callId, по которым end уже выведен мной
+      gcallTimer: null, // периодический прунинг/перерендер плашки
+      // v31: храповик — кэш seed комнаты и корней цепочек на сессию открытия
+      seedB64: null,
+      chainRoots: new Map(), // `${epoch}|${dev}` -> ck0 base64
+      devTagCache: new Map(), // devPub -> [b0, b1] тег маршрутизации nonce
     };
     if (rec.epoch > 0) {
       const k = await keyForEpoch(rec.epoch);
@@ -596,6 +1265,12 @@ async function openRoomBySeed(seedStr, opts = {}) {
       method: 'POST',
       body: { dev: device.devicePub, sub },
     });
+    // v29: серверная копия уже удалена — не воскрешаем локальную запись.
+    if (init.status === 410) {
+      await wipeLocalRoom(keys.roomId, { silent: true });
+      note('Этот чат удалён (создателем или после 30 дней неактивности) — локальная копия тоже стёрта.');
+      return;
+    }
     if (init.status === 403) {
       note('Сервер отклонил доступ к этой комнате (токен не совпал).');
       status('Ошибка доступа');
@@ -618,6 +1293,7 @@ async function openRoomBySeed(seedStr, opts = {}) {
       nickGate(false);
       $('#chatNickBox')?.classList.add('hidden');
       renderMessages().catch(() => {});
+      await sendRoomMetaIfNeeded(); // v29: room-meta — строго первым сообщением
       await sendIntroIfNeeded();
       await sendEcdhIfNeeded();
       await sendDialInfoIfNeeded();
@@ -625,8 +1301,17 @@ async function openRoomBySeed(seedStr, opts = {}) {
     connectWs();
     await fetchMissed();
     await syncState();
+    // v31: если комната 1:1 и собеседник объявил DR — поднять сессию
+    // Double Ratchet (инициатор — меньший devPub, см. maybeStartDr).
+    await maybeStartDr().catch(() => {});
     await setupTransport();
     if (cur) cur.syncingInitial = false;
+    // v29: периодический прунинг участников звонка и плашка (20 с).
+    if (cur) {
+      cur.gcallTimer = setInterval(() => updateGcallBanner().catch(() => {}), 20_000);
+      updateGcallBanner().catch(() => {});
+      renderRoomMenuState();
+    }
     status(cur && cur.transportMode === 'fallback' ? 'Резервный канал' : 'На связи');
     // v27: локальная чистка истёкших исчезающих сообщений.
     if (cur) {
@@ -657,6 +1342,8 @@ function closeCurrent(hideScreen = true) {
     if (cur.expireTimer) clearInterval(cur.expireTimer);
     if (cur.draftTimer) clearTimeout(cur.draftTimer);
     if (cur.healthTimer) clearInterval(cur.healthTimer);
+    if (cur.gcallTimer) clearInterval(cur.gcallTimer);
+    if (cur.gcall?.hbTimer) clearInterval(cur.gcall.hbTimer);
     try {
       cur.fb?.close();
     } catch {}
@@ -667,14 +1354,237 @@ function closeCurrent(hideScreen = true) {
       cur.ws?.close();
     } catch {}
     cur = null;
+    syncChatEmpty();
   }
   if (hideScreen) hideChatScreen();
+}
+
+// ---------- v29: удаление чатов ----------
+// Tombstones живут в localStorage ('zvDeletedRooms': [{roomId, ts}]) —
+// backup.js читает тот же ключ при сборе бэкапа и при восстановлении,
+// чтобы удалённая комната не воскресала из резервной копии.
+const TOMBSTONE_KEY = 'zvDeletedRooms';
+function loadTombstones() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(TOMBSTONE_KEY) || '[]');
+    return Array.isArray(arr)
+      ? arr.filter((t) => t && typeof t.roomId === 'string' && Number.isFinite(t.ts))
+      : [];
+  } catch {
+    return [];
+  }
+}
+function addTombstone(roomId) {
+  try {
+    const arr = loadTombstones().filter((t) => t.roomId !== roomId);
+    arr.push({ roomId, ts: Date.now() });
+    localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(arr.slice(-200)));
+  } catch {}
+}
+function notifyRoomsChanged() {
+  try {
+    window.dispatchEvent(new CustomEvent('zv-rooms-changed'));
+  } catch {}
+}
+
+// Полное локальное стирание комнаты: сообщения, запись, черновик и
+// seenDevices (всё внутри записи), tombstone против воскрешения из бэкапа.
+// Если комната сейчас открыта — закрываем её экран.
+async function wipeLocalRoom(roomId, { byCreator = false, silent = false } = {}) {
+  const isCur = !!cur && cur.rec.roomId === roomId;
+  if (isCur) closeCurrent(true);
+  const all = await kvAll('messages');
+  for (const x of all) {
+    if (x.value && x.value.roomId === roomId) {
+      await kvDel('messages', x.key).catch(() => {});
+    }
+  }
+  await kvDel('rooms', roomId).catch(() => {});
+  sweepState.delete(roomId);
+  addTombstone(roomId);
+  notifyRoomsChanged();
+  renderRoomList().catch(() => {});
+  if (!silent) {
+    if (byCreator) {
+      showChatToast({
+        title: 'Чат удалён создателем',
+        body: 'Комната и её локальная копия стёрты на этом устройстве.',
+        roomId,
+      });
+      note('Чат удалён создателем — локальная копия стёрта.');
+    }
+  }
+}
+
+// Сервер ответил 410 Gone: серверной копии больше нет (удаление
+// создателем или автоудаление по неактивности) — стираем и локально.
+async function handleRemoteDeleted(roomId) {
+  await wipeLocalRoom(roomId, { silent: true });
+  note('Этот чат удалён на сервере (создателем или после 30 дней неактивности) — локальная копия стёрта.');
+}
+
+// Автономная отправка системного сообщения в НЕоткрытую комнату (для
+// 'leave' и 'room-delete' из списка комнат): ключи выводятся из seedEnc
+// записи, подпись — текущим устройством. Шифрование базовым ключом эпохи 0:
+// получатели пробуют его при расшифровке всегда (decryptAny).
+async function postSystemStandalone(rec, type, text) {
+  const seed = await decryptWithVault(rec.seedEnc);
+  const seedBytes = b64u.dec(seed);
+  let pinIkm = null;
+  if (rec.pinEnc) {
+    try {
+      const pin = await decryptWithVault(rec.pinEnc);
+      if (pin) pinIkm = await derivePinIkm(pin, seedBytes);
+    } catch {}
+  }
+  const keys = await deriveChatKeys(seedBytes, { pinIkm });
+  if (keys.roomId !== rec.roomId) throw new Error('ключи не совпали с комнатой');
+  const device = await getChatDevice();
+  const m = {
+    v: 1,
+    id: newMsgId(),
+    ts: Date.now(),
+    nick: rec.nick || 'Участник',
+    devPub: device.devicePub,
+    type,
+    text,
+    epoch: 0,
+  };
+  m.sig = await signChatText(canonical(m));
+  const blob = await encryptChatMessage(keys.roomKey, m);
+  const r = await api(rec.roomId, keys.accessToken, '/msg', {
+    method: 'POST',
+    body: { blob: b64u.enc(blob), dev: device.devicePub },
+  });
+  return r.status;
+}
+
+// «Удалить у себя»: остальным — подписанный 'leave' (если мы успели
+// представиться в комнате), затем локальное стирание с tombstone.
+async function deleteRoomSelf(rec) {
+  if (!rec) return;
+  const roomId = rec.roomId;
+  try {
+    if (cur && cur.rec.roomId === roomId) {
+      if (cur.gcall) await leaveGcall().catch(() => {});
+      if (rec.nick) await sendMsg('leave', rec.nick || '').catch(() => {});
+    } else if (rec.nick && rec.introSent) {
+      await postSystemStandalone(rec, 'leave', rec.nick || '').catch(() => {});
+    }
+  } catch {}
+  // v30: своя встреча по кодовому слову при удалении чата гасится досрочно.
+  if (rec.word) await wordRevokeCurrent(rec).catch(() => {});
+  await wipeLocalRoom(roomId, { silent: true });
+  note('Чат удалён на этом устройстве.');
+}
+
+// «Удалить для всех» (только создатель): подписанный 'room-delete'
+// участникам + серверный wipe по подписи создателя + отзыв короткой
+// ссылки + локальное стирание. Возвращает текст исхода для UI.
+async function deleteRoomForAll(rec) {
+  if (!rec) return 'Комната не найдена.';
+  const roomId = rec.roomId;
+  const device = await getChatDevice();
+  const isCreator =
+    rec.creatorPub === device.devicePub || (!rec.creatorPub && rec.createdByMe);
+  if (!isCreator) return 'Удалить для всех может только создатель чата.';
+  // 1) Короткая ссылка: отозвать, пока есть admin из записи комнаты.
+  if (rec.alias?.code) {
+    try {
+      const admin = await decryptWithVault(rec.alias.adminEnc);
+      await pairApi('/pair/revoke', { codeHash: await aliasCodeHash(rec.alias.code), admin });
+    } catch {}
+  }
+  // 1b) v30: встреча по кодовому слову тоже гасится — чат удаляется для всех.
+  if (rec.word) await wordRevokeCurrent(rec).catch(() => {});
+  // 2) Подписанное управляющее сообщение участникам (онлайн получат по WS,
+  //    офлайн — при докачке; кто не докачает, упрётся в серверный 410).
+  try {
+    if (cur && cur.rec.roomId === roomId) {
+      await sendMsg('room-delete', JSON.stringify({ roomId }));
+    } else {
+      await postSystemStandalone(rec, 'room-delete', JSON.stringify({ roomId }));
+    }
+  } catch {}
+  // 3) Серверный wipe: подпись создателя над 'zv-room-delete-v1:'+roomId.
+  let serverNote = '';
+  try {
+    const sig = await signChatText('zv-room-delete-v1:' + roomId);
+    const res = await fetch(workerBase() + '/room/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roomId, creatorPub: device.devicePub, sig }),
+    });
+    if (res.status === 200) {
+      serverNote = 'Серверная копия вычищена.';
+    } else if (res.status === 403) {
+      serverNote =
+        'Сервер не подтвердил создателя (комната создана до v29 или room-meta не дошёл): серверная копия НЕ вычищена, но у участников чат удалён сообщением.';
+    } else {
+      serverNote = `Серверный wipe не подтвердился (статус ${res.status}): у участников чат удалён сообщением.`;
+    }
+  } catch {
+    serverNote = 'Сервер недоступен: wipe не выполнен, у участников чат удалён сообщением.';
+  }
+  // 4) Локальное стирание.
+  await wipeLocalRoom(roomId, { silent: true });
+  return 'Чат удалён для всех. ' + serverNote;
+}
+
+// Настройка «Автоудаление неактивных чатов»: default ON (цифра владельца —
+// 30 дней; срок в UI не редактируется, только вкл/выкл).
+const autoDeleteOn = () => {
+  try {
+    return localStorage.getItem('zvAutoDeleteChats') !== '0';
+  } catch {
+    return true;
+  }
+};
+
+// Локальный свип при старте: комнаты без сообщений дольше 30 дней
+// удаляются молча (сервер сделает то же своим alarm-ом). Открытая комната
+// и комнаты с keepForever не трогаются.
+async function sweepInactiveRooms() {
+  if (!autoDeleteOn()) return;
+  try {
+    const rooms = (await kvAll('rooms')).map((x) => x.value).filter(Boolean);
+    if (!rooms.length) return;
+    const allMsgs = (await kvAll('messages')).map((x) => x.value).filter(Boolean);
+    const byRoom = new Map();
+    for (const m of allMsgs) {
+      if (!byRoom.has(m.roomId)) byRoom.set(m.roomId, []);
+      byRoom.get(m.roomId).push(m);
+    }
+    const now = Date.now();
+    for (const rec of rooms) {
+      if (cur && cur.rec.roomId === rec.roomId) continue;
+      if (shouldSweepRoom(rec, byRoom.get(rec.roomId) || [], now)) {
+        await wipeLocalRoom(rec.roomId, { silent: true });
+      }
+    }
+  } catch {}
 }
 
 // ---------- Сообщения ----------
 // v27: управляющие типы — применяются к состоянию комнаты/сообщений, в ленте
 // пузырями не рендерятся (кроме 'ttl' — служебной строкой о смене таймера).
-const CONTROL_TYPES = new Set(['react', 'edit', 'del', 'pin', 'unpin', 'ttl', 'dial']);
+// v29: 'room-delete' (wipe у клиентов) и 'gcall-state' (агрегация живого
+// звонка) — тоже управляющие; у gcall-state есть своя ветка рендера строк.
+const CONTROL_TYPES = new Set([
+  'react',
+  'edit',
+  'del',
+  'pin',
+  'unpin',
+  'ttl',
+  'dial',
+  'room-delete',
+  'gcall-state',
+  // v31: служебные сообщения храповика — не рендерятся и не нотифицируют;
+  // dr-init обрабатывается в ingest, drx разворачивается при расшифровке.
+  'dr-init',
+  'drx',
+]);
 
 async function buildMsg(type, text) {
   const m = {
@@ -686,13 +1596,19 @@ async function buildMsg(type, text) {
     type,
     text,
     epoch: cur.rec.epoch || 0,
+    // v31: объявление возможностей храповика (вне канонической строки
+    // подписи, как epoch и replyTo): собеседники видят, что устройство
+    // понимает цепочки (rk) и Double Ratchet (dr).
+    caps: { rk: 1, dr: 1 },
   };
   m.sig = await signChatText(canonical(m));
   return m;
 }
 
 // extra — дополнительные поля шифротекста (replyTo у текстовых сообщений).
-async function sendMsg(type, text, extra = null) {
+// bodyExtra — поля тела /msg ВНЕ шифротекста (v29: creatorPub у room-meta —
+// сервер слеп к содержимому и регистрирует создателя только по этому полю).
+async function sendMsg(type, text, extra = null, bodyExtra = null) {
   if (!cur) throw new Error('no room');
   const m = await buildMsg(type, text);
   if (extra) Object.assign(m, extra);
@@ -703,7 +1619,23 @@ async function sendMsg(type, text, extra = null) {
       ? cur.rec.ttlSec
       : 0;
   if (ttlSec) m.ttlSec = ttlSec;
-  const blob = await encryptChatMessage(cur.keys.roomKey, m);
+  // v31: выбор режима шифрования. Контент при живой DR-сессии — только
+  // Double Ratchet; всё остальное — цепочка отправителя текущей эпохи;
+  // единственное статичное исключение — intro нового устройства
+  // (бутстрап: получатели ещё не знают его devPub и цепочку не выведут).
+  let blob;
+  const dr = drActive();
+  if (dr && DR_CONTENT_TYPES.has(type)) {
+    try {
+      blob = await drEncryptContent(m);
+    } catch {
+      blob = await encryptOutgoing(m); // DR не вышло — цепочка уровня 1
+    }
+  } else if (type === 'intro' && !cur.rec.introSent) {
+    blob = await encryptChatMessage(cur.keys.roomKey, m);
+  } else {
+    blob = await encryptOutgoing(m);
+  }
   const hash = await hashChatBlob(blob);
   // v28 (D): резервный канал — тот же blob уходит в MQTT/Nostr, локально
   // помечается pendingWorkerSync и хранит blob для точного ресинка.
@@ -726,8 +1658,19 @@ async function sendMsg(type, text, extra = null) {
   }
   const r = await api(cur.keys.roomId, cur.keys.accessToken, '/msg', {
     method: 'POST',
-    body: { blob: b64u.enc(blob), dev: cur.device.devicePub, ...(ttlSec ? { ttlSec } : {}) },
+    body: {
+      blob: b64u.enc(blob),
+      dev: cur.device.devicePub,
+      ...(ttlSec ? { ttlSec } : {}),
+      ...(bodyExtra || {}),
+    },
   });
+  // v29: серверная копия комнаты удалена (создателем или по неактивности) —
+  // стираем комнату и локально, а не показываем абстрактную «ошибку сервера».
+  if (r.status === 410) {
+    await handleRemoteDeleted(cur.rec.roomId);
+    throw new Error('Этот чат удалён на сервере');
+  }
   if (r.status === 429) throw new Error('Слишком часто: лимит 60 сообщений в минуту на комнату');
   if (r.status !== 200 && r.status !== 201) throw new Error('Сервер: ' + r.status);
   const entry = { hash, seq: r.data.seq, msg: m, sigOk: true, mine: true, reactions: {} };
@@ -826,7 +1769,46 @@ async function applyControlMessage(msg, sigOk) {
       }
       return;
     }
+    // v29: удаление комнаты создателем. Авторизация: подпись валидна и
+    // подписант — создатель из room-meta. Для комнат без room-meta
+    // (созданы до v29) принимаем room-delete от известного участника с
+    // intro — слабее, но это единственная доступная проверка; градация
+    // честно записана в AUDIT-v29.
+    if (msg.type === 'room-delete') {
+      if (!sigOk) return;
+      let target = null;
+      try {
+        target = JSON.parse(msg.text || '')?.roomId;
+      } catch {}
+      if (target !== roomId) return;
+      const authorized = cur.rec.creatorPub
+        ? msg.devPub === cur.rec.creatorPub
+        : !!cur.rec.members[msg.devPub]?.nick;
+      if (!authorized) return;
+      await wipeLocalRoom(roomId, { byCreator: true });
+      return;
+    }
+    // v29: событие живого группового звонка — состояние выводится из ленты
+    // чистой агрегацией; здесь только перерендер плашки.
+    if (msg.type === 'gcall-state') {
+      if (!sigOk) return;
+      updateGcallBanner().catch(() => {});
+      return;
+    }
   } catch {}
+}
+
+// v29: создатель комнаты публикует подписанный 'room-meta' ПЕРВЫМ
+// сообщением комнаты (до intro): остальные клиенты закрепляют creatorPub
+// по валидной подписи, а сервер по полю creatorPub в теле этого же /msg
+// регистрирует создателя для серверного wipe (POST /room/delete).
+async function sendRoomMetaIfNeeded() {
+  if (!cur || !cur.rec.createdByMe || cur.rec.metaSent || !cur.rec.nick) return;
+  const dev = cur.device.devicePub;
+  await sendMsg('room-meta', JSON.stringify({ creator: dev }), null, { creatorPub: dev });
+  cur.rec.metaSent = true;
+  cur.rec.creatorPub = dev;
+  await saveRoom(cur.rec);
 }
 
 async function sendIntroIfNeeded() {
@@ -904,6 +1886,8 @@ async function applyEpochMessage(msg) {
     const k = await keyForEpoch(n);
     if (k) cur.keys = { ...cur.keys, roomKey: k };
   }
+  // v31: цепочки старых эпох обрываются (см. pruneOldEpochChains).
+  pruneOldEpochChains(n);
   cur.epochMissing = false;
   await saveRoom(cur.rec);
   renderMessages().catch(() => {});
@@ -983,6 +1967,8 @@ async function doEpochRotate() {
     await sendMsg('epoch', JSON.stringify({ n, wraps }));
     cur.rec.epochs.push({ n, secret: b64u.enc(secret), ts: Date.now() });
     cur.rec.epoch = n;
+    // v31: цепочки уходящей эпохи обрываются и у инициатора ротации.
+    pruneOldEpochChains(n);
     await saveRoom(cur.rec);
     const k = await keyForEpoch(n);
     if (k) cur.keys = { ...cur.keys, roomKey: k };
@@ -1060,8 +2046,17 @@ async function ingest(item) {
   const key = cur.rec.roomId + ':' + hash;
   const seen = await kvGet('messages', key);
   if (!seen) {
-    const msg = await decryptAny(raw);
-    if (!msg || msg.v !== 1) return;
+    const dec = await decryptIncoming(raw);
+    if (dec?.__miss) {
+      // v31: ключ сообщения навсегда недоступен (использован и удалён или
+      // вытеснен из skipped-окна) — кладём заглушку и НЕ выходим: seq-хвост
+      // ниже обязан продвинуть lastSeq, иначе fetch принесёт это снова.
+      await storeRatchetMiss(item, hash, dec.__miss);
+    } else if (!dec || dec.v !== 1) {
+      return;
+    }
+    const msg = dec?.__miss ? null : dec;
+    if (msg) {
     let sigOk = false;
     try {
       sigOk = !!(msg.devPub && msg.sig && (await verifyChatSig(msg.devPub, msg.sig, canonical(msg))));
@@ -1073,7 +2068,20 @@ async function ingest(item) {
         nick: msg.nick || msg.text || 'Участник',
         firstSeen: cur.rec.members[msg.devPub]?.firstSeen || Date.now(),
         sigOk,
+        left: false, // v29: вернувшийся после leave снова участник
       };
+      // v31: третий участник в комнате с DR-сессией — сессия
+      // приостанавливается, комната возвращается на цепочки уровня 1
+      // (Double Ratchet по определению парный).
+      const drIntro = cur.rec.ratchet?.dr;
+      if (
+        drIntro &&
+        !drIntro.suspended &&
+        msg.devPub !== drIntro.peer &&
+        msg.devPub !== cur.device.devicePub
+      ) {
+        drIntro.suspended = true;
+      }
       await saveRoom(cur.rec);
       renderPresence();
       renderMembersList();
@@ -1104,8 +2112,41 @@ async function ingest(item) {
         }
       } catch {}
     }
+    // v29: создатель комнаты — из подписанного room-meta, первый валидный
+    // закрепляется и не перезаписывается (как TOFU у участников).
+    if (msg.type === 'room-meta' && msg.devPub && sigOk && !cur.rec.creatorPub) {
+      try {
+        const d = JSON.parse(msg.text || '');
+        if (d && d.creator === msg.devPub) {
+          cur.rec.creatorPub = msg.devPub;
+          if (msg.devPub === cur.device.devicePub) cur.rec.createdByMe = true;
+          await saveRoom(cur.rec);
+          renderMembersList();
+        }
+      } catch {}
+    }
+    // v29: участник вышел из чата («Удалить у себя» у него) — помечаем
+    // left: knownMembers его больше не считает, до следующего intro.
+    if (msg.type === 'leave' && msg.devPub && sigOk) {
+      cur.rec.members[msg.devPub] = { ...cur.rec.members[msg.devPub], left: true };
+      await saveRoom(cur.rec);
+      renderPresence();
+      renderMembersList();
+    }
     if (msg.type === 'epoch') {
       await applyEpochMessage(msg).catch(() => {});
+    }
+    // v31: caps собеседника (объявление поддержки храповика) — сливаем в
+    // существующую запись участника; инициация DR — отдельным обработчиком.
+    if (msg.caps && msg.devPub && cur.rec.members[msg.devPub]) {
+      cur.rec.members[msg.devPub] = { ...cur.rec.members[msg.devPub], caps: msg.caps };
+      saveRoom(cur.rec).catch(() => {});
+    }
+    if (msg.type === 'dr-init') {
+      await handleDrInit(msg, sigOk).catch(() => {});
+    }
+    if (msg.type === 'ecdh' || msg.type === 'intro') {
+      maybeStartDr().catch(() => {});
     }
     // v28 (E): реестр увиденных устройств (алерт — внутри noteRoomDevice).
     if (!mine && msg.devPub) {
@@ -1118,7 +2159,10 @@ async function ingest(item) {
     const byId = (await roomMessages(cur.rec.roomId)).find(
       (x) => x.msg?.id && msg.id && x.msg.id === msg.id
     );
-    if (!byId) {
+    if (drDowngradeBlocked(cur.rec.ratchet?.dr, msg)) {
+      // v31: контент не в режиме d1 от DR-собеседника при живой сессии не
+      // принимаем — защита от навязанного отката на статичный режим.
+    } else if (!byId) {
       const entry = { hash, msg, sigOk, mine, reactions: {} };
       // seq есть только у воркера; у резервного канала его нет до ресинка.
       if (Number.isFinite(item.seq)) entry.seq = item.seq;
@@ -1141,6 +2185,7 @@ async function ingest(item) {
         }).catch(() => {});
       }
     }
+    }
   }
   if (Number.isFinite(item.seq)) {
     if (item.seq > cur.rec.lastSeq) {
@@ -1159,12 +2204,19 @@ async function ingest(item) {
 
 async function fetchMissed() {
   if (!cur) return;
+  const roomId = cur.rec.roomId;
   const r = await api(
     cur.keys.roomId,
     cur.keys.accessToken,
     `/fetch?after=${cur.rec.lastSeq || 0}`
   ).catch(() => null);
-  if (!r || r.status !== 200) return;
+  if (!r) return;
+  // v29: комната удалена на сервере, пока мы были офлайн.
+  if (r.status === 410) {
+    await handleRemoteDeleted(roomId);
+    return;
+  }
+  if (r.status !== 200) return;
   for (const item of r.data.messages || []) await ingest(item);
 }
 
@@ -1849,6 +2901,157 @@ async function redeemCode(code) {
   await redeemGreet(code);
 }
 
+// ---------- Кодовое слово (v30, rendezvous — режим 'word' PairingDO) ----------
+// Владелец задаёт фразу из 3+ слов; blob {seed, roomId} запечатан ключом
+// PBKDF2(фраза, 'zv-word-v1', 600k). Встреча одноразовая, TTL 24 часа,
+// отзыв — тем же /pair/revoke по admin, что и алиас. Фраза на сервере не
+// бывает: только SHA-256 её нормализованной формы как адрес DO.
+const WORD_TTL_MS_CLIENT = 24 * 3_600_000;
+
+const wordParts = (phraseRaw) => {
+  const norm = normalizeWordPhrase(phraseRaw);
+  return { norm, words: norm ? norm.split(' ') : [] };
+};
+
+// Отзыв встречи из записи комнаты (общий путь для «Отключить», смены
+// фразы, удаления чата). 404 = встречи уже нет (истекла/использована) — ок.
+async function wordRevokeCurrent(rec) {
+  if (!rec?.word) return true;
+  const admin = await decryptWithVault(rec.word.adminEnc);
+  const phrase = await decryptWithVault(rec.word.phraseEnc);
+  const codeHash = await wordCodeHash(phrase);
+  const r = await pairApi('/pair/revoke', { codeHash, admin });
+  if (r.status !== 200 && r.status !== 404) {
+    throw new Error('сервер пар отклонил отзыв (' + r.status + ')');
+  }
+  rec.word = null;
+  await saveRoom(rec);
+  return true;
+}
+
+async function wordEnable() {
+  if (!cur) return;
+  const { norm, words } = wordParts($('#wordPhraseInput')?.value || '');
+  if (words.length < 3) {
+    renderWordHint(words.length);
+    note('Кодовая фраза — минимум 3 слова: одно-два слова перебираются слишком быстро.');
+    return;
+  }
+  try {
+    // Прежняя встреча гасится, чтобы живых фраз у комнаты было не две.
+    if (cur.rec.word) await wordRevokeCurrent(cur.rec).catch(() => {});
+    const seed = await decryptWithVault(cur.rec.seedEnc);
+    const blob = await sealWordPayload(norm, { seed, roomId: cur.rec.roomId });
+    const codeHash = await wordCodeHash(norm);
+    const admin = b64u.enc(crypto.getRandomValues(new Uint8Array(16))); // 128 бит
+    const adminHash = await sha256hex(admin);
+    const exp = Date.now() + WORD_TTL_MS_CLIENT;
+    const r = await pairApi('/pair/word', { codeHash, blob, exp, adminHash });
+    if (r.status === 409) {
+      note('Эта фраза уже занята другой встречей — придумайте другую: адрес фразы один на всех.');
+      return;
+    }
+    if (r.status !== 200 && r.status !== 201) {
+      throw new Error('сервер пар недоступен (' + r.status + ') — воркер v30 задеплоен?');
+    }
+    cur.rec.word = {
+      phraseEnc: await encryptWithVault(norm),
+      adminEnc: await encryptWithVault(admin),
+      exp,
+    };
+    await saveRoom(cur.rec);
+    await renderWordBox();
+    note('Доступ по кодовому слову включён на 24 часа. Продиктуйте фразу собеседнику голосом: встреча одноразовая, после его входа фраза сгорит.');
+  } catch (e) {
+    note('Не удалось включить доступ по слову: ' + e.message);
+  }
+}
+
+async function wordDisable() {
+  if (!cur) return;
+  try {
+    await wordRevokeCurrent(cur.rec);
+    await renderWordBox();
+    note('Доступ по кодовому слову отключён.');
+  } catch (e) {
+    note('Не удалось отключить доступ по слову: ' + e.message);
+  }
+}
+
+function renderWordHint(count) {
+  const hint = $('#wordPhraseHint');
+  if (!hint) return;
+  hint.textContent =
+    count < 3
+      ? `Слов: ${count} из минимум 3. Регистр, лишние пробелы и буква ё не важны.`
+      : `Слов: ${count}. Фразу такой длины подобрать практически невозможно.`;
+}
+
+async function renderWordBox() {
+  const box = $('#chatWordBox');
+  if (!box || !cur) return;
+  box.classList.remove('hidden');
+  const state = $('#wordState');
+  const input = $('#wordPhraseInput');
+  let w = cur.rec.word;
+  if (w && w.exp <= Date.now()) {
+    // Срок вышел — сервер встречу уже не отдаст; локально просто забываем.
+    cur.rec.word = null;
+    await saveRoom(cur.rec);
+    w = null;
+  }
+  if (w) {
+    try {
+      const phrase = await decryptWithVault(w.phraseEnc);
+      if (input && document.activeElement !== input) {
+        input.value = phrase;
+        renderWordHint(wordParts(phrase).words.length);
+      }
+    } catch {}
+    if (state) {
+      state.textContent =
+        'Активно до ' + fmtDayTime(w.exp) + '. Встреча одноразовая: после первого входа собеседника фраза сгорит.';
+    }
+  } else if (state) {
+    state.textContent = 'Сейчас доступ по слову выключен.';
+  }
+  const disableBtn = $('#wordDisable');
+  if (disableBtn) disableBtn.disabled = !w;
+}
+
+// Поиск чата по фразе с главного экрана. Возвращает true при успехе.
+// Любая неудача (нет встречи, истекла, сожжена попытками, blob не
+// открылся этой фразой) — одним понятным текстом, без деталей сервера.
+async function redeemWord(phraseRaw) {
+  const { norm, words } = wordParts(phraseRaw);
+  const fail = () =>
+    note('Чат по этой фразе не найден: проверьте фразу или срок (встреча живёт сутки и одноразовая).');
+  if (!norm || words.length < 2) {
+    fail();
+    return false;
+  }
+  try {
+    note('Ищу чат по кодовой фразе…');
+    const codeHash = await wordCodeHash(norm);
+    const r = await pairApi('/pair/claim', { codeHash });
+    if (r.status !== 200 || !r.data.blob) {
+      fail();
+      return false;
+    }
+    const payload = await openWordPayload(norm, r.data.blob);
+    if (!payload?.seed) {
+      fail();
+      return false;
+    }
+    note('');
+    await openRoomBySeed(payload.seed);
+    return true;
+  } catch (e) {
+    note('Не удалось найти чат по фразе: ' + e.message);
+    return false;
+  }
+}
+
 // ---------- Присутствие и шапка ----------
 function knownMembers() {
   if (!cur) return [];
@@ -1860,7 +3063,11 @@ function knownMembers() {
     // v28 (E): устройства из реестра увиденных — видны, даже если молчат.
     ...Object.keys(cur.rec.seenDevices || {}),
   ]);
-  return [...devs];
+  // v29: вышедшие из чата (leave) участниками не считаются — до их
+  // следующего intro. Себя из списка не выкидываем никогда.
+  return [...devs].filter(
+    (d) => d === cur.device.devicePub || !cur.rec.members?.[d]?.left
+  );
 }
 
 function renderPresence() {
@@ -2130,9 +3337,20 @@ async function renderMessages() {
     return true;
   });
   renderPinBar(items);
+  // v29: контекст живого группового звонка для строк ленты и плашки.
+  const gEvents = gcallEventsFromEntries(items);
+  const gStartTs = new Map();
+  for (const e of gEvents) {
+    if (e.op === 'start' && !gStartTs.has(e.callId)) gStartTs.set(e.callId, e.ts);
+  }
+  const gStateIds = new Set(gEvents.map((e) => e.callId));
+  const gEndShown = new Set();
+  updateGcallBanner(gEvents).catch(() => {});
   // v28 (F): группировка подряд идущих пузырей одного автора (пауза < 5 мин,
   // один день): аватар — у нижнего в группе, ник — у первого.
-  const bubbleItems = items.filter((x) => ['text', 'file', 'voice'].includes(x.msg.type));
+  const bubbleItems = items.filter(
+    (x) => ['text', 'file', 'voice'].includes(x.msg.type) && !x.msg.ratchetMiss
+  );
   const grp = new Map();
   bubbleItems.forEach((x, i) => {
     const same = (a, b) =>
@@ -2189,8 +3407,54 @@ async function renderMessages() {
       box.append(div);
       continue;
     }
+    if (m.type === 'room-meta') {
+      continue; // v29: служебная метка создателя — в ленте не показываем
+    }
+    if (m.type === 'leave') {
+      const div = document.createElement('div');
+      div.className = 'chat-sys';
+      div.textContent = `${m.nick || 'Участник'} вышел из чата`;
+      box.append(div);
+      continue;
+    }
+    if (m.type === 'gcall-state') {
+      // v29: строки живого звонка. hb в ленту не пишем; end — один раз на
+      // звонок, с длительностью от start (по клиентским ts — приблизительно).
+      let d = null;
+      try {
+        d = JSON.parse(m.text || '');
+      } catch {}
+      if (!d || d.op === 'hb') continue;
+      if (d.op === 'end') {
+        if (gEndShown.has(d.callId)) continue;
+        gEndShown.add(d.callId);
+      }
+      const div = document.createElement('div');
+      div.className = 'chat-sys';
+      if (d.op === 'start') div.textContent = `📞 ${m.nick || 'Участник'} начал групповой звонок`;
+      else if (d.op === 'join') div.textContent = `${m.nick || 'Участник'} присоединился к звонку`;
+      else if (d.op === 'leave') div.textContent = `${m.nick || 'Участник'} покинул звонок`;
+      else if (d.op === 'end') {
+        const st = gStartTs.get(d.callId);
+        const dur =
+          st && m.ts > st ? ` · длился ${Math.max(1, Math.round((m.ts - st) / 60000))} мин` : '';
+        div.textContent = `Звонок завершён${dur}`;
+      } else continue;
+      box.append(div);
+      continue;
+    }
     if (CONTROL_TYPES.has(m.type)) {
       continue; // react/edit/del/pin/unpin уже применены к состоянию при ingest
+    }
+    if (m.ratchetMiss) {
+      // v31: содержимое навсегда недоступно — ключ сообщения использован
+      // и удалён храповиком (или вытеснен из окна пропущенных). Место в
+      // ленте показываем честной заглушкой, а не дырой.
+      const div = document.createElement('div');
+      div.className = 'chat-bubble ratchet-miss';
+      div.textContent = '🔒 Ключ сообщения недоступен (устарело)';
+      box.append(div);
+      continue;
     }
     if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('newdev:')) {
       // v28 (E): локальная строка о новом устройстве (вне сервера).
@@ -2201,6 +3465,9 @@ async function renderMessages() {
       continue;
     }
     if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('gcall:')) {
+      // v29: если этот звонок ведётся gcall-state-сообщениями, legacy-строка
+      // не нужна — вход живёт на плашке «Идёт групповой звонок».
+      if (gStateIds.has(m.text.slice(6))) continue;
       const div = document.createElement('div');
       div.className = 'chat-sys';
       const span = document.createElement('span');
@@ -2430,6 +3697,141 @@ async function renderMessages() {
   }
 }
 
+// ---------- v29 (B): живой групповой звонок в чате ----------
+// Модель: состояние звонка — подписанные 'gcall-state' сообщения в ленте
+// комнаты; актуальное множество участников выводит чистая агрегация
+// (chat-transport.js) с прунингом по heartbeat (20 с hb, 60 с тишины =
+// вышел). Вход/выход свободные; дозвон делается только при старте.
+// Навигация в звонок закрывает контекст чата (checkHash), поэтому участие
+// при возврате в комнату ВОЗОБНОВЛЯЕТСЯ по последнему моему событию
+// (start/join/hb без leave) — см. updateGcallBanner.
+async function gcallPost(op, callId) {
+  await sendMsg('gcall-state', JSON.stringify({ callId, op }));
+}
+function adoptGcall(callId) {
+  if (!cur) return;
+  if (cur.gcall?.callId === callId && cur.gcall.hbTimer) return;
+  if (cur.gcall?.hbTimer) clearInterval(cur.gcall.hbTimer);
+  const hbTimer = setInterval(() => {
+    if (cur && !cur.closed && cur.gcall?.callId === callId) {
+      gcallPost('hb', callId).catch(() => {});
+    }
+  }, 20_000);
+  cur.gcall = { callId, hbTimer };
+}
+function dropGcall() {
+  if (!cur?.gcall) return;
+  if (cur.gcall.hbTimer) clearInterval(cur.gcall.hbTimer);
+  cur.gcall = null;
+}
+async function leaveGcall() {
+  if (!cur?.gcall) return;
+  const { callId } = cur.gcall;
+  dropGcall();
+  await gcallPost('leave', callId).catch(() => {});
+  updateGcallBanner().catch(() => {});
+}
+async function joinGcall(callId) {
+  if (!cur) return;
+  await gcallPost('join', callId);
+  adoptGcall(callId);
+  if (window.__zvDial?.openCallLink) window.__zvDial.openCallLink(callLinkOf(callId));
+  else location.hash = 'k=' + callId;
+}
+// Кнопка «Групповой звонок»: активного звонка нет — создать и дозвониться;
+// есть — просто войти (повторного дозвонa не делается).
+async function startOrJoinGcall() {
+  if (!cur || !cur.rec.nick) return note('Сначала введите никнейм.');
+  const items = await roomMessages(cur.rec.roomId);
+  const st = aggregateGcallState(gcallEventsFromEntries(items));
+  if (st && st.active) {
+    await joinGcall(st.callId);
+    return;
+  }
+  const callId = newSecret();
+  await gcallPost('start', callId);
+  // Legacy-приглашение для клиентов v28 (у них нет gcall-state).
+  await postCallLine('gcall:' + callId);
+  const link = callLinkOf(callId);
+  let dialed = 0;
+  let reachable = 0;
+  for (const dev of knownMembers().filter((d) => d !== cur.device.devicePub)) {
+    if (!cur.rec.members?.[dev]?.masterPub) continue;
+    reachable++;
+    const r = await dialMember(dev, { group: true, secret: callId, link });
+    if (r.dialed) dialed++;
+  }
+  await postCallLine(
+    dialed
+      ? `📞 Групповой звонок: дозвон ${dialed} участн. — телефоны звонят`
+      : '📞 Групповой звонок начат: вход — по плашке в шапке чата'
+  );
+  if (reachable && !dialed) {
+    note('Звонок начат, но дозвон не прошёл: участники войдут по плашке в шапке чата.');
+  }
+  adoptGcall(callId);
+  if (window.__zvDial?.openCallLink) window.__zvDial.openCallLink(link);
+  else location.hash = 'k=' + callId;
+}
+// Плашка «Идёт групповой звонок» в шапке + возобновление/завершение моей
+// сессии звонка по агрегации. Вызывается из renderMessages (с готовыми
+// событиями), из applyControlMessage и по таймеру прунинга (20 с).
+async function updateGcallBanner(eventsArg) {
+  const bar = $('#chatGcallBar');
+  if (!cur) return;
+  let events = eventsArg;
+  if (!events) {
+    const items = await roomMessages(cur.rec.roomId);
+    if (!cur) return;
+    events = gcallEventsFromEntries(items);
+  }
+  const st = aggregateGcallState(events);
+  cur.gcallState = st;
+  if (st && st.active) {
+    if (cur.gcall && cur.gcall.callId !== st.callId) dropGcall();
+    if (!cur.gcall) {
+      // Возобновление: моё последнее событие этого звонка — start/join/hb
+      // и не было leave: я всё ещё участник (контекст чата пересоздался
+      // после возврата из звонкового экрана).
+      const mine = [...events]
+        .reverse()
+        .find((e) => e.callId === st.callId && e.dev === cur.device.devicePub);
+      if (mine && (mine.op === 'start' || mine.op === 'join' || mine.op === 'hb')) {
+        adoptGcall(st.callId);
+        gcallPost('hb', st.callId).catch(() => {});
+      }
+    }
+  } else if (cur.gcall) {
+    dropGcall();
+  }
+  // Автозавершение: звонок опустел по прунингу и end ещё никто не вывел —
+  // выводим один раз (идемпотентно по callId в рамках сессии и ленты).
+  if (st && st.autoEnded && cur.rec.nick) {
+    if (!cur.gcallEndPosted) cur.gcallEndPosted = new Set();
+    if (!cur.gcallEndPosted.has(st.callId)) {
+      cur.gcallEndPosted.add(st.callId);
+      gcallPost('end', st.callId).catch(() => {});
+    }
+  }
+  const gbtnSpan = $('#chatGroupCallBtn span');
+  if (gbtnSpan) gbtnSpan.textContent = st && st.active ? 'Войти в звонок' : 'Групповой звонок';
+  if (!bar) return;
+  if (!st || !st.active) {
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+  const names = st.participants.map((p) => p.nick || 'Участник').join(', ');
+  const txt = $('#chatGcallText');
+  if (txt) {
+    txt.textContent =
+      `📞 Идёт групповой звонок · ${st.participants.length} участн.` + (names ? ` · ${names}` : '');
+  }
+  const joined = !!cur.gcall && cur.gcall.callId === st.callId;
+  $('#chatGcallJoin')?.classList.toggle('hidden', joined);
+  $('#chatGcallLeave')?.classList.toggle('hidden', !joined);
+}
+
 // ---------- v28 (A): дозвон из чата через Inbox ----------
 // Чат не реализует Inbox сам: звонит публичный хук app.js
 // (window.__zvDial.ringPersonal). Приглашение в чат ('call:'/'gcall:') при
@@ -2478,6 +3880,42 @@ async function dialMember(dev, { group = false, secret = null, link = null } = {
 
 // ---------- Проводка UI ----------
 function initChatUI() {
+  // v30: меню списка комнат (···) должно открываться и из десктопного
+  // сайдбара экрана чата, где #home скрыт. Меню — position:fixed,
+  // поэтому переносим узел в body: от родителя оно не зависит.
+  const listMenu = $('#chatListMenu');
+  if (listMenu && listMenu.parentElement !== document.body) {
+    document.body.append(listMenu);
+  }
+  // v30: поиск по уже загруженным комнатам в сайдбаре (фильтр по DOM).
+  const sideSearch = $('#chatSidebarSearch');
+  if (sideSearch) {
+    sideSearch.oninput = () => {
+      sidebarQuery = sideSearch.value || '';
+      applySidebarFilter();
+    };
+  }
+  // v30: блок «Доступ по кодовому слову» в меню комнаты.
+  const roomActWord = $('#roomActWord');
+  if (roomActWord) {
+    roomActWord.onclick = () => {
+      $('#chatRoomMenuBox')?.classList.add('hidden');
+      const box = $('#chatWordBox');
+      if (!box) return;
+      if (box.classList.contains('hidden')) renderWordBox().catch(() => {});
+      else box.classList.add('hidden');
+    };
+  }
+  const wordEnableBtn = $('#wordEnable');
+  if (wordEnableBtn) wordEnableBtn.onclick = () => wordEnable().catch(() => {});
+  const wordDisableBtn = $('#wordDisable');
+  if (wordDisableBtn) wordDisableBtn.onclick = () => wordDisable().catch(() => {});
+  const wordCloseBtn = $('#wordClose');
+  if (wordCloseBtn) wordCloseBtn.onclick = () => $('#chatWordBox')?.classList.add('hidden');
+  const wordInput = $('#wordPhraseInput');
+  if (wordInput) {
+    wordInput.oninput = () => renderWordHint(wordParts(wordInput.value).words.length);
+  }
   const create = $('#btnCreateChat');
   if (create) {
     create.onclick = async () => {
@@ -2496,7 +3934,7 @@ function initChatUI() {
           }
         }
         const seed = newSecret();
-        await openRoomBySeed(seed, pin ? { pin } : {});
+        await openRoomBySeed(seed, { ...(pin ? { pin } : {}), created: true });
         note(
           pin
             ? 'Чат создан и защищён PIN: ссылка без PIN бесполезна. Сообщите PIN собеседнику устно и сверьте контрольную фразу (список участников в шапке комнаты).'
@@ -2523,8 +3961,16 @@ function initChatUI() {
       const bare = raw.match(/^([A-Za-z0-9_-]{9})$/);
       if (bare) return redeemCode(bare[1]); // алиас → приветствие (порядок в redeemCode)
       const m = raw.match(/chat=([A-Za-z0-9_-]{43})/) || raw.match(/^([A-Za-z0-9_-]{43})$/);
-      if (!m) return note('Вставьте ссылку на чат (#chat=…), сам ключ или код подключения из 9 символов.');
-      openRoomBySeed(m[1], { pinProtected: /[?&]p=1/.test(raw) || raw.includes('&p=1') });
+      if (m) {
+        return openRoomBySeed(m[1], { pinProtected: /[?&]p=1/.test(raw) || raw.includes('&p=1') });
+      }
+      // v30: кодовое слово/фраза. Порядок проб для неоднозначного ввода:
+      // сначала все точные форматы (ссылки join/greet, голый код-9,
+      // seed-43) — они однозначны и ничего не сжигают; фраза пробуется
+      // ПОСЛЕДНЕЙ: её claim одноразовый, жечь встречу случайным вводом
+      // нельзя. Признак фразы: есть пробелы или ввод длиннее кодов (>12).
+      if (/\s/.test(raw) || raw.length > 12) return redeemWord(raw);
+      return note('Вставьте ссылку на чат (#chat=…), сам ключ, код подключения из 9 символов или кодовую фразу (3+ слова).');
     };
   }
   const pinProtectCheck = $('#chatPinProtect');
@@ -2547,6 +3993,8 @@ function initChatUI() {
   const back = $('#chatBack');
   if (back) {
     back.onclick = () => {
+      // v29: выход из комнаты завершает и участие в живом звонке.
+      if (cur?.gcall) leaveGcall().catch(() => {});
       closeCurrent(true);
       history.replaceState(null, '', location.pathname);
       renderRoomList().catch(() => {});
@@ -2565,6 +4013,7 @@ function initChatUI() {
       $('#chatMessages')?.classList.remove('hidden');
       $('#chatroom .chat-input-bar')?.classList.remove('hidden');
       note('');
+      await sendRoomMetaIfNeeded(); // v29: создатель — room-meta первым сообщением
       await sendIntroIfNeeded();
       await sendEcdhIfNeeded();
       await sendDialInfoIfNeeded();
@@ -2765,39 +4214,125 @@ function initChatUI() {
       }
     };
   }
+  // v29 (B): кнопка группового звонка — модель «живой звонок»: нет
+  // активного — создать и дозвониться; есть — войти по плашке/кнопке.
   const groupCallBtn = $('#chatGroupCallBtn');
   if (groupCallBtn) {
-    groupCallBtn.onclick = async () => {
-      if (!cur || !cur.rec.nick) return note('Сначала введите никнейм.');
-      try {
-        const secret = newSecret();
-        const link = callLinkOf(secret);
-        await postCallLine('gcall:' + secret);
-        let dialed = 0;
-        let reachable = 0;
-        for (const dev of knownMembers().filter((d) => d !== cur.device.devicePub)) {
-          if (!cur.rec.members?.[dev]?.masterPub) continue;
-          reachable++;
-          const r = await dialMember(dev, { group: true, secret, link });
-          if (r.dialed) dialed++;
-        }
-        await postCallLine(
-          dialed
-            ? `📞 Групповой звонок: дозвон ${dialed} участн. — телефоны звонят`
-            : '📞 Групповой звонок: приглашение в чате (дозвон недоступен — у участников нет личной идентичности в чате)'
-        );
-        if (reachable && !dialed) {
-          note('Групповая комната создана, но дозвон не прошёл: участники войдут по приглашению в чате.');
-        }
-        // Создатель входит в групповую комнату сразу (механизм group.js в
-        // звонковом пути подхватит комнату по ссылке, как обычную).
-        if (window.__zvDial?.openCallLink) window.__zvDial.openCallLink(link);
-        else location.hash = 'k=' + secret;
-      } catch (e) {
-        note(e.message);
-      }
+    groupCallBtn.onclick = () => startOrJoinGcall().catch((e) => note(e.message));
+  }
+  const gcallJoin = $('#chatGcallJoin');
+  if (gcallJoin) {
+    gcallJoin.onclick = () => {
+      const st = cur?.gcallState;
+      if (st && st.active) joinGcall(st.callId).catch((e) => note(e.message));
     };
   }
+  const gcallLeave = $('#chatGcallLeave');
+  if (gcallLeave) {
+    gcallLeave.onclick = () => leaveGcall().catch(() => {});
+  }
+  // ---------- v29: управление комнатой (меню внутри комнаты) ----------
+  const roomMenuBtn = $('#chatRoomMenuBtn');
+  if (roomMenuBtn) {
+    roomMenuBtn.onclick = () => {
+      const box = $('#chatRoomMenuBox');
+      if (!box) return;
+      const willShow = box.classList.contains('hidden');
+      box.classList.toggle('hidden');
+      if (willShow) renderRoomMenuState();
+    };
+  }
+  const roomMenuClose = $('#roomActClose');
+  if (roomMenuClose) roomMenuClose.onclick = () => $('#chatRoomMenuBox')?.classList.add('hidden');
+  const roomKeep = $('#roomActKeep');
+  if (roomKeep) {
+    roomKeep.onclick = async () => {
+      if (!cur) return;
+      cur.rec.keepForever = !cur.rec.keepForever;
+      await saveRoom(cur.rec);
+      renderRoomMenuState();
+      renderRoomList().catch(() => {});
+      note(
+        cur.rec.keepForever
+          ? 'Чат сохранён от автоудаления на этом устройстве.'
+          : 'Автоудаление для этого чата снова включено (30 дней без сообщений).'
+      );
+    };
+  }
+  const roomDelSelf = $('#roomActDeleteSelf');
+  if (roomDelSelf) {
+    roomDelSelf.onclick = async () => {
+      if (!cur) return;
+      if (!armButton(roomDelSelf, 'Точно удалить у себя? Ещё раз — удалить')) return;
+      const rec = cur.rec;
+      $('#chatRoomMenuBox')?.classList.add('hidden');
+      await deleteRoomSelf(rec);
+    };
+  }
+  const roomDelAll = $('#roomActDeleteAll');
+  if (roomDelAll) {
+    roomDelAll.onclick = async () => {
+      if (!cur) return;
+      if (
+        !armButton(
+          roomDelAll,
+          'Удалить для ВСЕХ безвозвратно? Ещё раз — подтвердить'
+        )
+      )
+        return;
+      const rec = cur.rec;
+      $('#chatRoomMenuBox')?.classList.add('hidden');
+      const res = await deleteRoomForAll(rec);
+      note(res);
+    };
+  }
+  // ---------- v29: меню комнаты в списке ----------
+  const rlOpen = $('#roomListOpen');
+  if (rlOpen) {
+    rlOpen.onclick = async () => {
+      const rec = listMenuRec;
+      hideRoomListMenu();
+      if (rec) openRoomBySeed(await decryptWithVault(rec.seedEnc));
+    };
+  }
+  const rlKeep = $('#roomListKeep');
+  if (rlKeep) {
+    rlKeep.onclick = async () => {
+      const rec = listMenuRec;
+      if (!rec) return;
+      rec.keepForever = !rec.keepForever;
+      normalizeRoomRecord(rec);
+      await saveRoom(rec);
+      hideRoomListMenu();
+      renderRoomList().catch(() => {});
+    };
+  }
+  const rlDelSelf = $('#roomListDelSelf');
+  if (rlDelSelf) {
+    rlDelSelf.onclick = async () => {
+      const rec = listMenuRec;
+      if (!rec) return;
+      if (!armButton(rlDelSelf, 'Точно удалить у себя? Ещё раз — удалить')) return;
+      hideRoomListMenu();
+      await deleteRoomSelf(rec);
+    };
+  }
+  const rlDelAll = $('#roomListDelAll');
+  if (rlDelAll) {
+    rlDelAll.onclick = async () => {
+      const rec = listMenuRec;
+      if (!rec) return;
+      if (!armButton(rlDelAll, 'Удалить для ВСЕХ безвозвратно? Ещё раз — подтвердить')) return;
+      hideRoomListMenu();
+      note(await deleteRoomForAll(rec));
+    };
+  }
+  document.addEventListener('click', (e) => {
+    const menu = $('#chatListMenu');
+    if (menu && !menu.classList.contains('hidden') && !menu.contains(e.target)) {
+      hideRoomListMenu();
+    }
+  });
   const epochBtn = $('#chatEpochBtn');
   if (epochBtn) epochBtn.onclick = () => openEpochDialog().catch(() => {});
   const epochCancel = $('#epochCancel');
@@ -3077,7 +4612,21 @@ function initChatUI() {
       if (ns.checked) notifyBeep();
     };
   }
+  // v29: настройка автоудаления неактивных чатов (default ON, срок 30 дней
+  // задан владельцем и в UI не редактируется).
+  const adt = $('#chatAutoDelToggle');
+  if (adt) {
+    adt.checked = autoDeleteOn();
+    adt.onchange = () => {
+      try {
+        localStorage.setItem('zvAutoDeleteChats', adt.checked ? '1' : '0');
+      } catch {}
+      if (adt.checked) sweepInactiveRooms().catch(() => {});
+    };
+  }
   startRoomSweep();
+  // v29: локальный свип неактивных комнат при старте приложения.
+  sweepInactiveRooms().catch(() => {});
   // v28 (B): тап по системному уведомлению чата (SW шлёт chat-notification).
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', (e) => {
@@ -3132,6 +4681,11 @@ async function sweepOtherRooms() {
     }
     const after = Math.max(r.lastSeq || 0, st.lastNotifiedSeq);
     const res = await api(r.roomId, st.token, `/fetch?after=${after}`).catch(() => null);
+    // v29: серверная копия удалена — стираем локальную молча (без тостов).
+    if (res && res.status === 410) {
+      await wipeLocalRoom(r.roomId, { silent: true });
+      continue;
+    }
     if (!res || res.status !== 200) continue;
     const items = res.data.messages || [];
     if (!items.length) continue;
@@ -3192,4 +4746,5 @@ window.ZVChat = {
   redeemGreet,
   redeemJoin,
   redeemCode,
+  redeemWord,
 };
