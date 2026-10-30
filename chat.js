@@ -25,7 +25,7 @@
 //   · картинки ≤3 МБ подгружаются и расшифровываются автоматически;
 //   · голосовые сообщения: MediaRecorder → тот же файловый канал,
 //     тип 'voice', плеер в ленте.
-import { CONFIG } from './config.js?v=27';
+import { CONFIG, getWorkerBase } from './config.js?v=28';
 import {
   b64u,
   newSecret,
@@ -57,16 +57,28 @@ import {
   applyReactionState,
   applyEditOrDelete,
   applyPinState,
-} from './crypto.js?v=27';
-import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=27';
+} from './crypto.js?v=28';
+import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=28';
 import {
   getChatDevice,
   getChatDeviceEcdh,
+  getChatNostrSecret,
   signChatText,
   verifyChatSig,
   encryptWithVault,
   decryptWithVault,
-} from './identity.js?v=27';
+} from './identity.js?v=28';
+import {
+  ChatTransportManager,
+  FallbackTransport,
+  compareChatEntries,
+  shouldNotifyMessage,
+  ToastGate,
+  observeDevice,
+  receiptState,
+  RECEIPT_GLYPHS,
+  RECEIPT_LABELS,
+} from './chat-transport.js?v=28';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -87,8 +99,8 @@ const fileState = new Map(); // fileId -> {progress, url, name, error, busy}
 const voiceAudio = new Map(); // fileId -> HTMLAudioElement (сессионный кэш плеера)
 
 // ---------- Сервер ----------
-const chatBase = (roomId) => `${CONFIG.WORKER_URL.replace(/\/$/, '')}/chat/${roomId}`;
-const workerBase = () => CONFIG.WORKER_URL.replace(/\/$/, '');
+const chatBase = (roomId) => `${getWorkerBase().replace(/\/$/, '')}/chat/${roomId}`;
+const workerBase = () => getWorkerBase().replace(/\/$/, '');
 
 async function api(roomId, token, path, opts = {}) {
   const res = await fetch(chatBase(roomId) + path, {
@@ -138,7 +150,10 @@ async function roomMessages(roomId) {
   return all
     .map((x) => x.value)
     .filter((m) => m && m.roomId === roomId)
-    .sort((a, b) => (a.seq || 0) - (b.seq || 0) || a.msg.ts - b.msg.ts);
+    // v28: единая сортировка слияния каналов — по seq, если он есть, иначе
+    // по ts+hash (сообщения резервного канала получают seq только после
+    // ресинка в воркер и не должны при этом теряться или дублироваться).
+    .sort(compareChatEntries);
 }
 
 // ---------- UI: утилиты ----------
@@ -167,6 +182,127 @@ function hideChatScreen() {
   $('#home')?.classList.remove('hidden');
 }
 
+// ---------- v28: уведомления о сообщениях, пока приложение живо ----------
+// Серверный push с закрытым приложением сознательно не трогаем (VAPID
+// отложен владельцем). Здесь: внутриприложенческий тост, системное
+// уведомление через SW при скрытой вкладке и опциональный звук.
+const roomTitleOf = (roomId) => `Чат ${String(roomId || '').slice(0, 8)}…`;
+const notifyTextOn = () => {
+  try {
+    return localStorage.getItem('zvNotifyText') === '1';
+  } catch {
+    return false;
+  }
+};
+const notifySoundOn = () => {
+  try {
+    return localStorage.getItem('zvNotifySound') === '1';
+  } catch {
+    return false;
+  }
+};
+const toastGate = new ToastGate(2000);
+let notifyAudioCtx = null;
+function notifyBeep() {
+  if (!notifySoundOn()) return;
+  try {
+    notifyAudioCtx = notifyAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = notifyAudioCtx;
+    const t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.frequency.value = 880;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.1, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.start(t);
+    o.stop(t + 0.2);
+  } catch {}
+}
+function showChatToast({ title, body, roomId }) {
+  try {
+    document.querySelectorAll('.chat-toast').forEach((el) => el.remove());
+    const el = document.createElement('div');
+    el.className = 'chat-toast';
+    const t = document.createElement('b');
+    t.textContent = title;
+    const b = document.createElement('span');
+    b.textContent = body;
+    el.append(t, b);
+    el.onclick = () => {
+      el.remove();
+      if (cur && cur.rec.roomId === roomId) showChatScreen();
+    };
+    document.body.append(el);
+    setTimeout(() => el.remove(), 6000);
+  } catch {}
+}
+async function maybeNotifyMessage({ roomId, nick, preview, mine, roomActive }) {
+  const d = toastGate.check(roomId, {
+    mine,
+    roomActive,
+    documentHidden: typeof document !== 'undefined' && document.hidden,
+  });
+  if (!d.show) return d;
+  const title = nick ? `${nick} · ${roomTitleOf(roomId)}` : roomTitleOf(roomId);
+  let body = notifyTextOn() ? String(preview || 'Новое сообщение') : 'Новое сообщение';
+  if (d.count > 1) body += ` (+${d.count - 1})`;
+  showChatToast({ title, body, roomId });
+  notifyBeep();
+  if (d.system && 'Notification' in window && Notification.permission === 'granted') {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      await reg.showNotification(title, {
+        body,
+        tag: 'zvchat-' + roomId,
+        data: { chatRoom: roomId },
+      });
+    } catch {}
+  }
+  return d;
+}
+
+// ---------- v28: видимость устройств комнаты (без вайт-листа) ----------
+// Реестр seenDevices живёт в записи комнаты. Первое появление устройства
+// даёт одну локальную системную строку и, если комната не перед глазами,
+// тост. Историческая подгрузка при открытии комнаты тревоги не поднимает
+// (cur.syncingInitial). Это видимость, а не контроль доступа.
+async function noteRoomDevice(dev, { hasIntro = false } = {}) {
+  if (!cur || !dev || dev === cur.device.devicePub) return;
+  const silent = !!cur.syncingInitial;
+  const res = observeDevice(cur.rec.seenDevices, dev, { hasIntro, silent });
+  cur.rec.seenDevices = res.seen;
+  const roomId = cur.rec.roomId;
+  await saveRoom(cur.rec).catch(() => {});
+  if (!res.shouldAlert || !cur || cur.rec.roomId !== roomId) return;
+  const entry = {
+    hash: 'local-newdev-' + dev.slice(-16),
+    msg: {
+      v: 1,
+      id: 'local-newdev-' + dev,
+      ts: Date.now(),
+      nick: '',
+      devPub: '',
+      type: 'system',
+      text: 'newdev:' + dev,
+    },
+    sigOk: true,
+    mine: false,
+    reactions: {},
+  };
+  await storeMessage(cur.rec, entry).catch(() => {});
+  if (cur && cur.rec.roomId === roomId) renderMessages().catch(() => {});
+  maybeNotifyMessage({
+    roomId,
+    nick: '⚠ Новое устройство',
+    preview: 'К комнате подключилось новое устройство',
+    mine: false,
+    roomActive: chatVisible(),
+  }).catch(() => {});
+}
+
 const fmtTime = (ts) =>
   new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const fmtDayTime = (ts) => {
@@ -181,6 +317,15 @@ const fmtDayTime = (ts) => {
 };
 const fmtSize = (b) =>
   b > 1024 * 1024 ? (b / (1024 * 1024)).toFixed(1) + ' МБ' : Math.max(1, Math.ceil(b / 1024)) + ' КБ';
+// v28 (F): подпись чипа даты в ленте — «Сегодня»/«Вчера»/полная дата.
+const dayLabel = (ts) => {
+  const d = new Date(ts);
+  const today = new Date();
+  const yesterday = new Date(Date.now() - 24 * 3600_000);
+  if (d.toDateString() === today.toDateString()) return 'Сегодня';
+  if (d.toDateString() === yesterday.toDateString()) return 'Вчера';
+  return d.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
+};
 function hueOf(str) {
   let h = 0;
   for (let i = 0; i < String(str).length; i++) h = (h * 31 + String(str).charCodeAt(i)) % 360;
@@ -211,6 +356,12 @@ function previewOf(m) {
   if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('call:')) {
     return 'Приглашение на звонок';
   }
+  if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('gcall:')) {
+    return 'Групповой звонок';
+  }
+  if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('newdev:')) {
+    return '⚠ Новое устройство в комнате';
+  }
   return String(m.text || '');
 }
 function unreadOf(rec, msgs) {
@@ -229,9 +380,7 @@ async function renderRoomList() {
     byRoom.get(m.roomId).push(m);
   }
   const enriched = rooms.map((r) => {
-    const msgs = (byRoom.get(r.roomId) || []).sort(
-      (a, b) => (a.seq || 0) - (b.seq || 0) || a.msg.ts - b.msg.ts
-    );
+    const msgs = (byRoom.get(r.roomId) || []).sort(compareChatEntries);
     // v27: превью — по последнему ВИДИМОМУ сообщению: управляющие типы
     // (реакции, правки, закрепы) и обмен ключами эпохи в превью не показываем.
     const visible = msgs.filter((x) => !CONTROL_TYPES.has(x.msg.type) && x.msg.type !== 'ecdh');
@@ -411,6 +560,12 @@ async function openRoomBySeed(seedStr, opts = {}) {
       menuTarget: null, // запись сообщения, для которой открыто меню действий
       expireTimer: null,
       draftTimer: null,
+      // v28: транспорт (воркер/резерв), реестр устройств, ворота ника
+      transportMode: 'worker',
+      mgr: null,
+      fb: null,
+      healthTimer: null,
+      syncingInitial: true, // до конца первой синхронизации алертов устройств нет
     };
     if (rec.epoch > 0) {
       const k = await keyForEpoch(rec.epoch);
@@ -447,20 +602,32 @@ async function openRoomBySeed(seedStr, opts = {}) {
       return;
     }
     status('Подключение…');
-    renderMessages().catch(() => {});
+    // v28 (E): ник обязателен — до его ввода лента и поле ввода скрыты,
+    // сообщения не рендерятся (раньше вошедший без ника молча читал чат).
+    const nickGate = (on) => {
+      $('#chatMessages')?.classList.toggle('hidden', on);
+      $('#chatroom .chat-input-bar')?.classList.toggle('hidden', on);
+      $('#chatPinBar')?.classList.toggle('hidden', on);
+    };
     if (!rec.nick) {
+      nickGate(true);
       $('#chatNickBox')?.classList.remove('hidden');
       $('#chatNickInput')?.focus();
-      note('Введите никнейм — это единственная «регистрация», только для этой комнаты.');
+      note('Введите никнейм — без него сообщения не показываются. Это единственная «регистрация», только для этой комнаты.');
     } else {
+      nickGate(false);
       $('#chatNickBox')?.classList.add('hidden');
+      renderMessages().catch(() => {});
       await sendIntroIfNeeded();
       await sendEcdhIfNeeded();
+      await sendDialInfoIfNeeded();
     }
     connectWs();
     await fetchMissed();
     await syncState();
-    status('На связи');
+    await setupTransport();
+    if (cur) cur.syncingInitial = false;
+    status(cur && cur.transportMode === 'fallback' ? 'Резервный канал' : 'На связи');
     // v27: локальная чистка истёкших исчезающих сообщений.
     if (cur) {
       cur.expireTimer = setInterval(() => pruneExpired().catch(() => {}), 30_000);
@@ -489,6 +656,12 @@ function closeCurrent(hideScreen = true) {
     if (cur.typingTimer) clearTimeout(cur.typingTimer);
     if (cur.expireTimer) clearInterval(cur.expireTimer);
     if (cur.draftTimer) clearTimeout(cur.draftTimer);
+    if (cur.healthTimer) clearInterval(cur.healthTimer);
+    try {
+      cur.fb?.close();
+    } catch {}
+    cur.mgr = null;
+    cur.fb = null;
     hideMsgMenu();
     try {
       cur.ws?.close();
@@ -501,7 +674,7 @@ function closeCurrent(hideScreen = true) {
 // ---------- Сообщения ----------
 // v27: управляющие типы — применяются к состоянию комнаты/сообщений, в ленте
 // пузырями не рендерятся (кроме 'ttl' — служебной строкой о смене таймера).
-const CONTROL_TYPES = new Set(['react', 'edit', 'del', 'pin', 'unpin', 'ttl']);
+const CONTROL_TYPES = new Set(['react', 'edit', 'del', 'pin', 'unpin', 'ttl', 'dial']);
 
 async function buildMsg(type, text) {
   const m = {
@@ -532,6 +705,25 @@ async function sendMsg(type, text, extra = null) {
   if (ttlSec) m.ttlSec = ttlSec;
   const blob = await encryptChatMessage(cur.keys.roomKey, m);
   const hash = await hashChatBlob(blob);
+  // v28 (D): резервный канал — тот же blob уходит в MQTT/Nostr, локально
+  // помечается pendingWorkerSync и хранит blob для точного ресинка.
+  if (cur.transportMode === 'fallback' && cur.fb) {
+    await cur.fb.send(b64u.enc(blob));
+    const entry = {
+      hash,
+      msg: m,
+      sigOk: true,
+      mine: true,
+      reactions: {},
+      pendingWorkerSync: true,
+      blobB64: b64u.enc(blob),
+    };
+    if (ttlSec) entry.expiresAt = m.ts + ttlSec * 1000;
+    await storeMessage(cur.rec, entry);
+    if (CONTROL_TYPES.has(type)) await applyControlMessage(m, true).catch(() => {});
+    renderMessages().catch(() => {});
+    return m;
+  }
   const r = await api(cur.keys.roomId, cur.keys.accessToken, '/msg', {
     method: 'POST',
     body: { blob: b64u.enc(blob), dev: cur.device.devicePub, ...(ttlSec ? { ttlSec } : {}) },
@@ -652,6 +844,32 @@ async function sendEcdhIfNeeded() {
   const d = await getChatDeviceEcdh();
   await sendMsg('ecdh', d.ecdhPub);
   cur.rec.ecdhSent = true;
+  await saveRoom(cur.rec);
+}
+
+// v28 (A): публикация данных личной идентичности для дозвона из чата.
+// Отдельное управляющее сообщение 'dial' (в ленте не рендерится): masterPub
+// и отпечаток публичны, cert/chain доказывают принадлежность устройства
+// master-ключу. Секрет личной ссылки сюда НЕ входит: адрес дозвонa
+// выводится из masterPub, а payload запечатывается ECDH-ключом устройства.
+async function sendDialInfoIfNeeded() {
+  if (!cur || cur.rec.dialInfoSent || !cur.rec.nick) return;
+  const dev = cur.device;
+  if (!dev?.masterPub) {
+    cur.rec.dialInfoSent = true; // гостевое устройство: публиковать нечего
+    await saveRoom(cur.rec);
+    return;
+  }
+  await sendMsg(
+    'dial',
+    JSON.stringify({
+      masterPub: dev.masterPub,
+      masterFp: dev.masterFp || null,
+      cert: dev.cert || null,
+      chain: dev.chain || null,
+    })
+  );
+  cur.rec.dialInfoSent = true;
   await saveRoom(cur.rec);
 }
 
@@ -810,6 +1028,8 @@ function applyReceipt(dev, delivered, read) {
 
 function applyPresence(dev, online, ts) {
   if (!cur || dev === cur.device.devicePub) return;
+  // v28 (E): присутствие — источник реестра устройств без ника.
+  noteRoomDevice(dev, { hasIntro: !!cur.rec.members[dev]?.nick }).catch(() => {});
   if (online) cur.online.add(dev);
   else {
     cur.online.delete(dev);
@@ -867,30 +1087,74 @@ async function ingest(item) {
         await saveRoom(cur.rec);
       }
     }
+    // v28 (A): данные личной идентичности для дозвона — только с подписью.
+    if (msg.type === 'dial' && msg.devPub && sigOk) {
+      try {
+        const d = JSON.parse(msg.text || '');
+        if (d && typeof d.masterPub === 'string' && /^[A-Za-z0-9_-]{87}$/.test(d.masterPub)) {
+          cur.rec.members[msg.devPub] = {
+            ...cur.rec.members[msg.devPub],
+            masterPub: d.masterPub,
+            masterFp: d.masterFp || null,
+            cert: d.cert || null,
+            chain: d.chain || null,
+          };
+          await saveRoom(cur.rec);
+          renderMembersList();
+        }
+      } catch {}
+    }
     if (msg.type === 'epoch') {
       await applyEpochMessage(msg).catch(() => {});
     }
-    const entry = { hash, seq: item.seq, msg, sigOk, mine, reactions: {} };
-    // v27: локальный срок жизни исчезающего сообщения — из шифротекста.
-    if (msg.ttlSec > 0) entry.expiresAt = msg.ts + msg.ttlSec * 1000;
-    await storeMessage(cur.rec, entry);
-    if (CONTROL_TYPES.has(msg.type)) {
-      await applyControlMessage(msg, sigOk).catch(() => {});
+    // v28 (E): реестр увиденных устройств (алерт — внутри noteRoomDevice).
+    if (!mine && msg.devPub) {
+      noteRoomDevice(msg.devPub, {
+        hasIntro: !!cur.rec.members[msg.devPub]?.nick,
+      }).catch(() => {});
     }
-    renderMessages().catch(() => {});
-    if (!mine) renderRoomList().catch(() => {});
+    // v28 (D): дедуп по id сообщения между каналами — один и тот же msg мог
+    // прийти и из воркера, и из резервного канала разными blob-ами.
+    const byId = (await roomMessages(cur.rec.roomId)).find(
+      (x) => x.msg?.id && msg.id && x.msg.id === msg.id
+    );
+    if (!byId) {
+      const entry = { hash, msg, sigOk, mine, reactions: {} };
+      // seq есть только у воркера; у резервного канала его нет до ресинка.
+      if (Number.isFinite(item.seq)) entry.seq = item.seq;
+      // v27: локальный срок жизни исчезающего сообщения — из шифротекста.
+      if (msg.ttlSec > 0) entry.expiresAt = msg.ts + msg.ttlSec * 1000;
+      await storeMessage(cur.rec, entry);
+      if (CONTROL_TYPES.has(msg.type)) {
+        await applyControlMessage(msg, sigOk).catch(() => {});
+      }
+      renderMessages().catch(() => {});
+      if (!mine) renderRoomList().catch(() => {});
+      // v28 (B): уведомление, пока приложение живо.
+      if (!mine && !CONTROL_TYPES.has(msg.type) && msg.type !== 'ecdh') {
+        maybeNotifyMessage({
+          roomId: cur.rec.roomId,
+          nick: msg.nick || 'Участник',
+          preview: previewOf(msg),
+          mine: false,
+          roomActive: chatVisible(),
+        }).catch(() => {});
+      }
+    }
   }
-  if (item.seq > cur.rec.lastSeq) {
-    cur.rec.lastSeq = item.seq;
-    await saveRoom(cur.rec);
+  if (Number.isFinite(item.seq)) {
+    if (item.seq > cur.rec.lastSeq) {
+      cur.rec.lastSeq = item.seq;
+      await saveRoom(cur.rec);
+    }
+    // Доставка: ack на каждое сообщение (с dev — для members_state на сервере).
+    api(cur.keys.roomId, cur.keys.accessToken, '/ack', {
+      method: 'POST',
+      body: { seqs: [item.seq], dev: cur.device.devicePub },
+    }).catch(() => {});
+    // Прочтение: если чат сейчас на экране, всё докачанное считаем увиденным.
+    sendReadAck().catch(() => {});
   }
-  // Доставка: ack на каждое сообщение (с dev — для members_state на сервере).
-  api(cur.keys.roomId, cur.keys.accessToken, '/ack', {
-    method: 'POST',
-    body: { seqs: [item.seq], dev: cur.device.devicePub },
-  }).catch(() => {});
-  // Прочтение: если чат сейчас на экране, всё докачанное считаем увиденным.
-  sendReadAck().catch(() => {});
 }
 
 async function fetchMissed() {
@@ -902,6 +1166,129 @@ async function fetchMissed() {
   ).catch(() => null);
   if (!r || r.status !== 200) return;
   for (const item of r.data.messages || []) await ingest(item);
+}
+
+// ---------- v28: транспортный менеджер и резервный канал ----------
+// Основной канал — воркер (WS + HTTP, поведение не менялось). При его
+// недоступности дольше порога менеджер переключает комнату на
+// FallbackTransport (MQTT live + Nostr store); сообщения этого периода
+// помечаются pendingWorkerSync и при возврате воркера публикуются в него
+// ровно тем же blob (серверный дедуп по хэшу съедает дубли).
+async function workerHealthOk() {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 2500);
+    const r = await fetch(workerBase() + '/health', { signal: ctl.signal, cache: 'no-store' });
+    clearTimeout(t);
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+async function healthTick() {
+  if (!cur || cur.closed || !cur.mgr) return;
+  const ok = await workerHealthOk();
+  if (!cur || cur.closed || !cur.mgr) return;
+  if (ok) await cur.mgr.noteWorkerSuccess().catch(() => {});
+  else await cur.mgr.noteWorkerFailure().catch(() => {});
+}
+function applyTransportMode(mode) {
+  if (!cur) return;
+  cur.transportMode = mode === 'worker' ? 'worker' : 'fallback';
+  const fb = cur.transportMode === 'fallback';
+  $('#chatFallbackBadge')?.classList.toggle('hidden', !fb);
+  const attach = $('#chatAttach');
+  if (attach) {
+    attach.disabled = fb;
+    attach.title = fb
+      ? 'Файлы недоступны на резервном канале'
+      : 'Прикрепить файл';
+  }
+  const mic = $('#chatMic');
+  if (mic) {
+    mic.disabled = fb;
+    mic.title = fb ? 'Голосовые недоступны на резервном канале' : 'Голосовое сообщение';
+  }
+  if (fb) {
+    status('Резервный канал');
+    try {
+      cur.ws?.close();
+    } catch {}
+    // Подтянуть историю из Nostr store за время отсутствия воркера
+    // (fetchSince ждёт курсор в секундах, fallbackSince храним в мс).
+    cur.fb
+      ?.fetchSince(Math.floor((cur.rec.fallbackSince || 0) / 1000))
+      .then(async (items) => {
+        let maxTs = cur.rec.fallbackSince || 0;
+        for (const it of items || []) {
+          const blob = typeof it === 'string' ? it : it?.blob;
+          if (blob) await ingest({ blob }).catch(() => {});
+          const ts = typeof it === 'object' ? it?.ts || 0 : 0;
+          if (ts > maxTs) maxTs = ts;
+        }
+        if (cur && maxTs > (cur.rec.fallbackSince || 0)) {
+          cur.rec.fallbackSince = maxTs;
+          saveRoom(cur.rec).catch(() => {});
+        }
+      })
+      .catch(() => {});
+  } else {
+    status('На связи');
+    if (!cur.ws || cur.ws.readyState > 1) connectWs();
+    fetchMissed().catch(() => {});
+  }
+  renderPresence();
+}
+// Ресинк при возврате воркера: pending-сообщения публикуются в воркер тем
+// же blob, затем докачивается пропущенное. Ошибка любого шага оставляет
+// комнату на резервном канале (менеджер это обработает).
+async function resyncToWorker() {
+  if (!cur) return;
+  const roomId = cur.rec.roomId;
+  const items = await roomMessages(roomId);
+  for (const it of items) {
+    if (!it.pendingWorkerSync || !it.blobB64) continue;
+    const r = await api(roomId, cur.keys.accessToken, '/msg', {
+      method: 'POST',
+      body: { blob: it.blobB64, dev: cur.device.devicePub },
+    }).catch(() => null);
+    if (!r || (r.status !== 200 && r.status !== 201 && r.status !== 409)) {
+      throw new Error('ресинк: воркер отклонил сообщение (' + (r?.status || 'нет сети') + ')');
+    }
+    const upd = { ...it };
+    delete upd.pendingWorkerSync;
+    delete upd.blobB64;
+    if (Number.isFinite(r.data?.seq)) upd.seq = r.data.seq;
+    await kvPut('messages', roomId + ':' + it.hash, { roomId, ...upd });
+  }
+  await fetchMissed();
+}
+async function setupTransport() {
+  if (!cur || cur.mgr) return;
+  let secret = null;
+  try {
+    secret = await getChatNostrSecret();
+  } catch {}
+  const fb = new FallbackTransport({
+    roomId: cur.keys.roomId,
+    brokers: CONFIG.MQTT_BROKERS || [],
+    relays: CONFIG.NOSTR_RELAYS || [],
+    secret,
+    onBlob: (blob) => {
+      ingest({ blob }).catch(() => {});
+    },
+  });
+  cur.fb = fb;
+  cur.transportMode = 'worker';
+  cur.mgr = new ChatTransportManager({
+    fallback: fb,
+    thresholdMs: 8000,
+    onModeChange: (m) => applyTransportMode(m),
+    onResync: () => resyncToWorker(),
+  });
+  cur.healthTimer = setInterval(() => {
+    healthTick().catch(() => {});
+  }, 5000);
 }
 
 // ---------- WebSocket ----------
@@ -918,6 +1305,8 @@ function connectWs() {
   cur.ws = ws;
   ws.onopen = () => {
     cur.backoff = 1000;
+    // v28 (D): живой WS воркера — сигнал менеджеру каналов.
+    cur.mgr?.noteWorkerSuccess().catch(() => {});
     ws.send(JSON.stringify({ type: 'auth', token: cur.keys.accessToken, dev: cur.device.devicePub }));
   };
   ws.onmessage = async (e) => {
@@ -949,6 +1338,10 @@ function connectWs() {
   };
   ws.onclose = () => {
     if (!cur || cur.closed) return;
+    // v28 (D): обрыв WS кормит менеджер; в fallback переподключения к
+    // воркеру не крутим — возвратом управляет health-цикл менеджера.
+    cur.mgr?.noteWorkerFailure().catch(() => {});
+    if (cur.transportMode === 'fallback') return;
     status('Офлайн, переподключение…');
     scheduleReconnect();
   };
@@ -959,7 +1352,7 @@ function connectWs() {
   };
 }
 function scheduleReconnect() {
-  if (!cur || cur.closed) return;
+  if (!cur || cur.closed || cur.transportMode === 'fallback') return;
   const wait = cur.backoff;
   cur.backoff = Math.min(30000, cur.backoff * 2);
   setTimeout(() => {
@@ -998,6 +1391,10 @@ function setFileProgress(pct, label) {
 async function uploadFile(file, extra = {}) {
   if (!cur) return;
   if (!cur.rec.nick) return note('Сначала введите никнейм.');
+  // v28 (D): файловый канал существует только у воркера.
+  if (cur.transportMode === 'fallback') {
+    return note('Файлы и голосовые недоступны на резервном канале: дождитесь возврата основного сервера.');
+  }
   if (file.size > FILE_MAX_BYTES) {
     return note(`Файл больше ${fmtSize(FILE_MAX_BYTES)} — лимит для чата.`);
   }
@@ -1460,6 +1857,8 @@ function knownMembers() {
     ...Object.keys(cur.rec.members || {}),
     ...cur.receipts.keys(),
     ...cur.online,
+    // v28 (E): устройства из реестра увиденных — видны, даже если молчат.
+    ...Object.keys(cur.rec.seenDevices || {}),
   ]);
   return [...devs];
 }
@@ -1476,7 +1875,10 @@ function renderPresence() {
   }
   line.textContent =
     `${members.length} участника · ${onlineCount} онлайн` +
-    (cur.online.size ? '' : ' · собеседники не в сети');
+    (cur.online.size ? '' : ' · собеседники не в сети') +
+    (cur.transportMode === 'fallback' ? ' · резервный канал' : '');
+  // v28 (A): групповой звонок имеет смысл при двух и более собеседниках.
+  $('#chatGroupCallBtn')?.classList.toggle('hidden', others.length < 2);
 }
 
 function renderMembersList() {
@@ -1507,7 +1909,13 @@ function renderMembersList() {
     av.append(dot);
     const name = document.createElement('span');
     name.className = 'chat-member-name';
-    name.textContent = nickOf(dev) + (isMe ? ' (вы)' : '');
+    // v28 (E): устройство без intro видно честной строкой, а не «Участник».
+    const hasIntro = !!cur.rec.members?.[dev]?.nick;
+    name.textContent = isMe
+      ? nickOf(dev) + ' (вы)'
+      : hasIntro
+        ? nickOf(dev)
+        : `Без ника · устройство …${dev.slice(-6)}`;
     const seen = document.createElement('span');
     seen.className = 'chat-member-seen';
     if (isMe) seen.textContent = 'это вы';
@@ -1517,6 +1925,23 @@ function renderMembersList() {
       seen.textContent = ls ? 'был(а) в ' + fmtTime(ls) : 'не в сети';
     }
     row.append(av, name, seen);
+    // v28 (A): кнопка дозвона участнику с личной идентичностью.
+    if (!isMe && cur.rec.members?.[dev]?.masterPub) {
+      const cb = document.createElement('button');
+      cb.className = 'btn small ghost chat-member-call';
+      cb.textContent = '📞';
+      cb.title = 'Позвонить участнику (его телефон зазвонит)';
+      cb.setAttribute('aria-label', 'Позвонить участнику');
+      cb.onclick = (e) => {
+        e.stopPropagation();
+        dialMember(dev)
+          .then((r) => {
+            if (!r.dialed) note('Не удалось дозвониться участнику — отправлено приглашение в чат.');
+          })
+          .catch(() => {});
+      };
+      row.append(cb);
+    }
     box.append(row);
   }
 }
@@ -1705,10 +2130,32 @@ async function renderMessages() {
     return true;
   });
   renderPinBar(items);
+  // v28 (F): группировка подряд идущих пузырей одного автора (пауза < 5 мин,
+  // один день): аватар — у нижнего в группе, ник — у первого.
+  const bubbleItems = items.filter((x) => ['text', 'file', 'voice'].includes(x.msg.type));
+  const grp = new Map();
+  bubbleItems.forEach((x, i) => {
+    const same = (a, b) =>
+      !!a &&
+      !!b &&
+      a.msg.devPub === b.msg.devPub &&
+      Math.abs(b.msg.ts - a.msg.ts) < 5 * 60_000 &&
+      new Date(a.msg.ts).toDateString() === new Date(b.msg.ts).toDateString();
+    grp.set(x.hash, { first: !same(bubbleItems[i - 1], x), last: !same(x, bubbleItems[i + 1]) });
+  });
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
   box.replaceChildren();
+  let lastDayKey = '';
   for (const it of items) {
     const m = it.msg;
+    const dk = new Date(m.ts).toDateString();
+    if (dk !== lastDayKey) {
+      lastDayKey = dk;
+      const chip = document.createElement('div');
+      chip.className = 'chat-date-chip';
+      chip.textContent = dayLabel(m.ts);
+      box.append(chip);
+    }
     if (m.type === 'intro') {
       const div = document.createElement('div');
       div.className = 'chat-sys';
@@ -1745,6 +2192,31 @@ async function renderMessages() {
     if (CONTROL_TYPES.has(m.type)) {
       continue; // react/edit/del/pin/unpin уже применены к состоянию при ingest
     }
+    if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('newdev:')) {
+      // v28 (E): локальная строка о новом устройстве (вне сервера).
+      const div = document.createElement('div');
+      div.className = 'chat-sys warn';
+      div.textContent = `⚠ К комнате подключилось новое устройство (…${m.text.slice(7).slice(-6)})`;
+      box.append(div);
+      continue;
+    }
+    if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('gcall:')) {
+      const div = document.createElement('div');
+      div.className = 'chat-sys';
+      const span = document.createElement('span');
+      span.textContent = `${m.nick || 'Участник'} создал групповой звонок `;
+      const btn = document.createElement('button');
+      btn.className = 'btn small primary';
+      btn.textContent = 'Войти в групповой звонок';
+      btn.onclick = () => {
+        const secret = m.text.slice(6);
+        if (window.__zvDial?.openCallLink) window.__zvDial.openCallLink(secret);
+        else location.hash = 'k=' + secret;
+      };
+      div.append(span, btn);
+      box.append(div);
+      continue;
+    }
     if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('call:')) {
       const div = document.createElement('div');
       div.className = 'chat-sys';
@@ -1754,24 +2226,43 @@ async function renderMessages() {
       btn.className = 'btn small primary';
       btn.textContent = 'Войти в звонок';
       btn.onclick = () => {
-        location.hash = 'k=' + m.text.slice(5);
+        const secret = m.text.slice(5);
+        if (window.__zvDial?.openCallLink) window.__zvDial.openCallLink(secret);
+        else location.hash = 'k=' + secret;
       };
       div.append(span, btn);
       box.append(div);
       continue;
     }
+    if (m.type === 'system') {
+      // v28: прочие системные строки (статусы дозвонa и т.п.) — плашкой.
+      const div = document.createElement('div');
+      div.className = 'chat-sys';
+      div.textContent = String(m.text || '');
+      box.append(div);
+      continue;
+    }
+    const g = grp.get(it.hash) || { first: true, last: true };
     const rowEl = document.createElement('div');
-    rowEl.className = 'chat-msg-row' + (it.mine ? ' mine' : '');
+    rowEl.className =
+      'chat-msg-row' +
+      (it.mine ? ' mine' : '') +
+      (g.first ? ' grp-first' : '') +
+      (g.last ? ' grp-last' : '') +
+      (g.last && !g.first ? '' : '') +
+      (g.last ? ' tail' : '');
     rowEl.dataset.hash = it.hash; // v27: цель для цитат, закрепа и поиска
     if (!it.mine) {
       const av = document.createElement('span');
-      av.className = 'chat-avatar';
+      // v28 (F): аватар виден только у нижнего сообщения группы (место в
+      // раскладке сохраняется прозрачным слотом, чтобы пузыри не прыгали).
+      av.className = 'chat-avatar' + (g.last ? '' : ' ghost');
       av.style.background = `hsl(${hueOf(m.devPub || '')} 65% 42%)`;
       av.textContent = (m.nick || 'У')[0].toUpperCase();
       rowEl.append(av);
     }
     const div = document.createElement('div');
-    div.className = 'chat-msg' + (it.mine ? ' mine' : '');
+    div.className = 'chat-msg' + (it.mine ? ' mine' : '') + (g.last ? ' tail' : '');
     if (!m.deleted && (m.type === 'file' || m.type === 'voice')) {
       let meta = null;
       try {
@@ -1849,7 +2340,8 @@ async function renderMessages() {
       body.textContent = 'Сообщение удалено';
       div.append(body);
     } else {
-      if (!it.mine) {
+      if (!it.mine && g.first) {
+        // v28 (F): ник — только у первого сообщения группы одного автора.
         const head = document.createElement('div');
         head.className = 'chat-msg-head';
         head.textContent = m.nick || 'Участник';
@@ -1878,9 +2370,13 @@ async function renderMessages() {
     tm.textContent = fmtTime(m.ts);
     foot.append(tm);
     if (it.mine) {
+      // v28 (F): статус — галочками в стиле Telegram, подпись — в title.
+      const others = knownMembers().filter((d) => d !== cur.device.devicePub);
+      const st = receiptState(it, cur.receipts, others);
       const rc = document.createElement('span');
-      rc.className = 'chat-receipt';
-      rc.textContent = receiptLabel(it);
+      rc.className = 'chat-receipt st-' + st;
+      rc.textContent = RECEIPT_GLYPHS[st] || '✓';
+      rc.title = RECEIPT_LABELS[st] || '';
       foot.append(rc);
     } else if (!it.sigOk) {
       const warn = document.createElement('span');
@@ -1932,6 +2428,52 @@ async function renderMessages() {
     box.scrollTop = box.scrollHeight;
     box.dataset.scrolled = '1';
   }
+}
+
+// ---------- v28 (A): дозвон из чата через Inbox ----------
+// Чат не реализует Inbox сам: звонит публичный хук app.js
+// (window.__zvDial.ringPersonal). Приглашение в чат ('call:'/'gcall:') при
+// этом остаётся и как запасной путь, и как кнопка входа в звонковую
+// комнату для всех участников.
+const callLinkOf = (secret) => `${location.origin}${location.pathname}#k=${secret}`;
+async function postCallLine(text) {
+  try {
+    await sendMsg('system', text);
+  } catch {}
+}
+async function dialMember(dev, { group = false, secret = null, link = null } = {}) {
+  if (!cur) return { dialed: false, reason: 'no-room' };
+  const member = cur.rec.members?.[dev] || {};
+  const dial = window.__zvDial;
+  if (!member.masterPub || !dial?.ringPersonal) return { dialed: false, reason: 'no-dial' };
+  const roomId = cur.rec.roomId;
+  const sec = secret || newSecret();
+  const lnk = link || callLinkOf(sec);
+  const res = await dial
+    .ringPersonal(member.masterPub, lnk, {
+      ecdhPub: member.ecdhPub || memberEcdhPub(dev),
+      name: cur.rec.nick || 'Участник чата',
+      callKind: group ? 'group' : 'single',
+      onState: (state) => {
+        if (!cur || cur.closed || cur.rec.roomId !== roomId) return;
+        const label = {
+          accepted: 'принял(а) звонок',
+          declined: 'отклонил(а) звонок',
+          cancelled: 'звонок отменён',
+          expired: 'не ответил(а) на звонок',
+        }[state];
+        if (label) postCallLine(`📞 ${nickOf(dev)} ${label}`);
+      },
+    })
+    .catch((e) => ({ ok: false, error: e?.message || String(e) }));
+  if (res?.ok) {
+    if (!group) {
+      await postCallLine('call:' + sec);
+      await postCallLine(`📞 Дозвон: ${nickOf(dev)} — телефон звенит…`);
+    }
+    return { dialed: true, secret: sec, link: lnk };
+  }
+  return { dialed: false, reason: res?.error || 'ring-failed' };
 }
 
 // ---------- Проводка UI ----------
@@ -2019,9 +2561,13 @@ function initChatUI() {
       cur.rec.nick = nick;
       await saveRoom(cur.rec);
       $('#chatNickBox')?.classList.add('hidden');
+      // v28 (E): ворота ника сняты — показываем ленту и ввод.
+      $('#chatMessages')?.classList.remove('hidden');
+      $('#chatroom .chat-input-bar')?.classList.remove('hidden');
       note('');
       await sendIntroIfNeeded();
       await sendEcdhIfNeeded();
+      await sendDialInfoIfNeeded();
       renderPresence();
       renderMessages().catch(() => {});
     };
@@ -2190,11 +2736,63 @@ function initChatUI() {
   if (callBtn) {
     callBtn.onclick = async () => {
       if (!cur || !cur.rec.nick) return note('Сначала введите никнейм.');
+      const others = knownMembers().filter((d) => d !== cur.device.devicePub);
+      if (others.length > 1) {
+        return note('В группе используйте «Групповой звонок» или кнопку 📞 у участника в списке (шапка комнаты).');
+      }
       try {
+        const peer = others[0];
+        if (peer) {
+          // v28 (A): настоящий дозвон, если у собеседника есть личная
+          // идентичность в чате; иначе — прежнее приглашение с пометкой.
+          const r = await dialMember(peer);
+          if (r.dialed) {
+            note('Дозвон идёт: у собеседника звенит телефон. Когда примет, вы оба сможете войти в звонковую комнату кнопкой у приглашения в чате.');
+            return;
+          }
+          const secret = newSecret();
+          await sendMsg('system', 'call:' + secret);
+          cur.pendingCall = secret;
+          note('У собеседника нет личной идентичности в чате (гостевое устройство), поэтому его телефон не зазвонит: отправлено только приглашение в чат.');
+          return;
+        }
         const secret = newSecret();
         await sendMsg('system', 'call:' + secret);
         cur.pendingCall = secret;
         note('Приглашение на звонок отправлено в чат. Нажмите «Войти в звонок» у сообщения — вы или собеседник.');
+      } catch (e) {
+        note(e.message);
+      }
+    };
+  }
+  const groupCallBtn = $('#chatGroupCallBtn');
+  if (groupCallBtn) {
+    groupCallBtn.onclick = async () => {
+      if (!cur || !cur.rec.nick) return note('Сначала введите никнейм.');
+      try {
+        const secret = newSecret();
+        const link = callLinkOf(secret);
+        await postCallLine('gcall:' + secret);
+        let dialed = 0;
+        let reachable = 0;
+        for (const dev of knownMembers().filter((d) => d !== cur.device.devicePub)) {
+          if (!cur.rec.members?.[dev]?.masterPub) continue;
+          reachable++;
+          const r = await dialMember(dev, { group: true, secret, link });
+          if (r.dialed) dialed++;
+        }
+        await postCallLine(
+          dialed
+            ? `📞 Групповой звонок: дозвон ${dialed} участн. — телефоны звонят`
+            : '📞 Групповой звонок: приглашение в чате (дозвон недоступен — у участников нет личной идентичности в чате)'
+        );
+        if (reachable && !dialed) {
+          note('Групповая комната создана, но дозвон не прошёл: участники войдут по приглашению в чате.');
+        }
+        // Создатель входит в групповую комнату сразу (механизм group.js в
+        // звонковом пути подхватит комнату по ссылке, как обычную).
+        if (window.__zvDial?.openCallLink) window.__zvDial.openCallLink(link);
+        else location.hash = 'k=' + secret;
       } catch (e) {
         note(e.message);
       }
@@ -2431,9 +3029,121 @@ function initChatUI() {
     hideMsgMenu();
   });
 
+  // ---------- v28 (B): настройки уведомлений о сообщениях ----------
+  const notifyBtn = $('#chatNotifyBtn');
+  if (notifyBtn) {
+    const syncNotifyBtn = () => {
+      if (!('Notification' in window)) {
+        notifyBtn.disabled = true;
+        notifyBtn.textContent = '🔔 Уведомления не поддерживаются браузером';
+        return;
+      }
+      notifyBtn.disabled = Notification.permission === 'denied';
+      notifyBtn.querySelector('span').textContent =
+        Notification.permission === 'granted'
+          ? '🔔 Уведомления включены'
+          : Notification.permission === 'denied'
+            ? '🔔 Уведомления запрещены в браузере'
+            : '🔔 Включить уведомления';
+    };
+    notifyBtn.onclick = async () => {
+      // Разрешение запрашиваем только по явному действию, не при загрузке.
+      try {
+        await Notification.requestPermission();
+      } catch {}
+      syncNotifyBtn();
+      if (Notification.permission === 'granted') {
+        note('Уведомления о сообщениях включены — пока приложение открыто (чат или звонки).');
+      }
+    };
+    syncNotifyBtn();
+  }
+  const nt = $('#chatNotifyText');
+  if (nt) {
+    nt.checked = notifyTextOn();
+    nt.onchange = () => {
+      try {
+        localStorage.setItem('zvNotifyText', nt.checked ? '1' : '0');
+      } catch {}
+    };
+  }
+  const ns = $('#chatNotifySound');
+  if (ns) {
+    ns.checked = notifySoundOn();
+    ns.onchange = () => {
+      try {
+        localStorage.setItem('zvNotifySound', ns.checked ? '1' : '0');
+      } catch {}
+      if (ns.checked) notifyBeep();
+    };
+  }
+  startRoomSweep();
+  // v28 (B): тап по системному уведомлению чата (SW шлёт chat-notification).
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data?.type !== 'chat-notification') return;
+      if (cur && cur.rec.roomId === e.data.roomId) showChatScreen();
+      else renderRoomList().catch(() => {});
+    });
+  }
+
   renderRoomList().catch(() => {});
   // v22: флаг успешной инициализации чата для watchdog в zvdiag.js.
   window.__zvChatBooted = true;
+}
+
+// ---------- v28 (B): живой фон для неоткрытых комнат ----------
+// У неоткрытой комнаты нет WS; раз в 30 секунд лёгкий fetch по seq считает
+// новые сообщения и поднимает тост/уведомление без текста переписки.
+// Сообщения при этом НЕ помечаются прочитанными и не сохраняются — при
+// входе в комнату их подтянет обычный fetchMissed.
+const sweepState = new Map(); // roomId -> {token, lastNotifiedSeq}
+let sweepStarted = false;
+function startRoomSweep() {
+  if (sweepStarted) return;
+  sweepStarted = true;
+  setInterval(() => {
+    sweepOtherRooms().catch(() => {});
+  }, 30000);
+}
+async function sweepOtherRooms() {
+  const rooms = (await kvAll('rooms')).map((x) => x.value).filter(Boolean);
+  for (const r of rooms) {
+    if (cur && !cur.closed && cur.rec.roomId === r.roomId) continue;
+    let st = sweepState.get(r.roomId);
+    if (!st) {
+      try {
+        const seed = await decryptWithVault(r.seedEnc);
+        const seedBytes = b64u.dec(seed);
+        let pinIkm = null;
+        if (r.pinEnc) {
+          try {
+            const pin = await decryptWithVault(r.pinEnc);
+            if (pin) pinIkm = await derivePinIkm(pin, seedBytes);
+          } catch {}
+        }
+        const keys = await deriveChatKeys(seedBytes, { pinIkm });
+        if (keys.roomId !== r.roomId) continue;
+        st = { token: keys.accessToken, lastNotifiedSeq: r.lastReadSeq || 0 };
+        sweepState.set(r.roomId, st);
+      } catch {
+        continue;
+      }
+    }
+    const after = Math.max(r.lastSeq || 0, st.lastNotifiedSeq);
+    const res = await api(r.roomId, st.token, `/fetch?after=${after}`).catch(() => null);
+    if (!res || res.status !== 200) continue;
+    const items = res.data.messages || [];
+    if (!items.length) continue;
+    st.lastNotifiedSeq = Math.max(st.lastNotifiedSeq, ...items.map((i) => i.seq || 0));
+    maybeNotifyMessage({
+      roomId: r.roomId,
+      nick: null,
+      preview: items.length > 1 ? `Новых сообщений: ${items.length}` : 'Новое сообщение',
+      mine: false,
+      roomActive: false,
+    }).catch(() => {});
+  }
 }
 
 function checkHash() {

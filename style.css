@@ -2438,6 +2438,154 @@ label.disabled select {
   justify-content: center;
 }
 
+/* v28 (F): раскладка «как у Telegram» поверх палитры Soft Neon — только чат */
+.chat-room-avatar {
+  background: linear-gradient(135deg, #4a4ae0, #2b8f7a);
+  font-size: 15px;
+}
+.chat-messages {
+  /* Тёмный фон ленты с едва заметным паттерном из CSS-градиентов. */
+  background:
+    radial-gradient(circle at 12% 18%, rgba(130, 130, 255, 0.055) 0 2px, transparent 3px),
+    radial-gradient(circle at 82% 68%, rgba(80, 220, 190, 0.045) 0 2px, transparent 3px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.014), rgba(255, 255, 255, 0));
+  background-size: 140px 140px, 190px 190px, 100% 100%;
+  border-radius: 14px;
+  padding: 12px 8px;
+}
+.chat-date-chip {
+  align-self: center;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  padding: 3px 12px;
+  border-radius: 11px;
+  margin: 4px 0;
+}
+.chat-sys {
+  /* Системные события — центрированные плашки-чипы, а не строки. */
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 5px 12px;
+  max-width: 88%;
+}
+.chat-sys.warn {
+  color: #e8b34b;
+  border-color: rgba(232, 179, 75, 0.45);
+}
+.chat-msg-row:not(.grp-last) {
+  margin-bottom: -5px;
+}
+.chat-msg-row:not(.mine):not(.grp-first) .chat-msg {
+  border-top-left-radius: 6px;
+}
+.chat-msg-row:not(.mine):not(.grp-last) .chat-msg {
+  border-bottom-left-radius: 6px;
+}
+.chat-msg-row.mine:not(.grp-first) .chat-msg {
+  border-top-right-radius: 6px;
+}
+.chat-msg-row.mine:not(.grp-last) .chat-msg {
+  border-bottom-right-radius: 6px;
+}
+.chat-msg.tail {
+  position: relative;
+}
+.chat-msg-row:not(.mine) .chat-msg.tail::after {
+  content: '';
+  position: absolute;
+  left: -4px;
+  bottom: 0;
+  border-style: solid;
+  border-width: 0 0 7px 6px;
+  border-color: transparent transparent var(--surface-2) transparent;
+}
+.chat-msg-row.mine .chat-msg.tail::after {
+  content: '';
+  position: absolute;
+  right: -4px;
+  bottom: 0;
+  border-style: solid;
+  border-width: 7px 0 0 6px;
+  border-color: transparent transparent transparent var(--accent-soft);
+}
+.chat-avatar.ghost {
+  visibility: hidden;
+}
+.chat-receipt {
+  color: var(--faint);
+}
+.chat-receipt.st-delivered {
+  color: var(--muted);
+}
+.chat-msg.mine .chat-receipt.st-read {
+  color: var(--accent, #8f8fff);
+}
+#chatroom .chat-input-bar {
+  /* Поле ввода — круглая «пилюля»: скрепка внутри слева, справа — круглые
+     кнопки микрофона/отправки (порядок элементов задан разметкой). */
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  padding: 4px;
+  align-items: center;
+}
+#chatroom .chat-input-bar input {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+#chatroom .chat-input-bar .btn {
+  border-radius: 20px;
+  flex: 0 0 auto;
+}
+#chatroom .chat-input-bar .btn.chat-attach,
+#chatroom .chat-input-bar .btn.chat-mic {
+  border-radius: 50%;
+}
+.chat-msg-menu {
+  border-radius: 16px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5);
+}
+.chat-toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 18px;
+  z-index: 1200;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: max-content;
+  max-width: min(92vw, 420px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+.chat-toast b {
+  font-size: 13.5px;
+  color: var(--text);
+}
+.chat-toast span {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#chatFallbackBadge {
+  color: #e8b34b;
+  border-color: rgba(232, 179, 75, 0.5);
+}
+.chat-member-call {
+  flex: 0 0 auto;
+}
+
 /* ---------- v26: PIN, эпохи, короткая ссылка, голосовые ---------- */
 .chat-pin-check {
   display: flex;

@@ -92,6 +92,11 @@ export function normalizeRoomRecord(rec) {
   if (typeof rec.ttlSec !== 'number' || rec.ttlSec < 0) rec.ttlSec = 0;
   if (!('pinned' in rec)) rec.pinned = null;
   if (typeof rec.draft !== 'string') rec.draft = '';
+  // v28: реестр увиденных устройств (видимость подключений без ника) и
+  // очередь сообщений, отправленных резервным каналом до ресинка в Worker.
+  if (!rec.seenDevices || typeof rec.seenDevices !== 'object') rec.seenDevices = {};
+  if (typeof rec.fallbackSince !== 'number' || rec.fallbackSince < 0) rec.fallbackSince = 0;
+  if (typeof rec.dialInfoSent !== 'boolean') rec.dialInfoSent = false;
   return rec;
 }
 

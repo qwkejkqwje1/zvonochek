@@ -17,7 +17,7 @@
 <link rel="icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=27">
+<link rel="stylesheet" href="style.css?v=28">
 </head>
 <body>
 
@@ -174,6 +174,11 @@
       <div id="chatBox" class="personal-box">
         <div class="personal-title"><svg class="ic"><use href="#i-chat"/></svg> Приватные чаты</div>
         <p class="personal-hint">Текстовый чат по ссылке, без регистрации: сервер хранит только зашифрованные сообщения. Открыли ссылку — ввели никнейм — вы в чате.</p>
+        <div class="row wrap">
+          <button id="chatNotifyBtn" class="btn small" title="Системные уведомления о сообщениях, пока приложение открыто"><span>🔔 Уведомления</span></button>
+          <label class="chat-pin-check" title="По умолчанию в уведомлении только «Новое сообщение» — без текста сообщения"><input type="checkbox" id="chatNotifyText"> Текст в уведомлениях</label>
+          <label class="chat-pin-check" title="Короткий звук при сообщении в неактивной комнате"><input type="checkbox" id="chatNotifySound"> Звук сообщений</label>
+        </div>
         <button id="btnCreateChat" class="btn primary"><svg class="ic"><use href="#i-chat"/></svg><span>Создать приватный чат</span></button>
         <label class="chat-pin-check"><input type="checkbox" id="chatPinProtect"> Защитить новый чат PIN-кодом (ссылка без PIN бесполезна)</label>
         <input id="chatPinInput" class="hidden" placeholder="PIN или слово/фраза круга — минимум 4 символа" autocomplete="off" spellcheck="false">
@@ -234,6 +239,7 @@
     <div class="hero-card chat-card">
       <div class="row">
         <button id="chatBack" class="btn small ghost"><svg class="ic"><use href="#i-arrow-left"/></svg><span>Назад</span></button>
+        <span id="chatRoomAvatar" class="chat-avatar chat-room-avatar" aria-hidden="true">💬</span>
         <div id="chatTitleBox" class="chat-title-box" title="Участники чата">
           <b id="chatRoomTitle">Чат</b>
           <span id="chatPresence" class="chat-presence"></span>
@@ -257,6 +263,8 @@
       <div class="row">
         <button id="chatInviteBtn" class="btn small"><svg class="ic"><use href="#i-users"/></svg><span>Пригласить</span></button>
         <button id="chatCallBtn" class="btn small primary"><svg class="ic"><use href="#i-bolt"/></svg><span>Позвонить</span></button>
+        <button id="chatGroupCallBtn" class="btn small hidden"><svg class="ic"><use href="#i-users"/></svg><span>Групповой звонок</span></button>
+        <button id="chatFallbackBadge" class="btn small hidden" disabled title="Воркер недоступен: сообщения идут через публичные резервные реле (MQTT и Nostr). Присутствие, отметки о прочтении, файлы и коды в этом режиме недоступны; сообщения подтянутся в воркер при его возврате."><span>Резервный канал</span></button>
         <button id="chatCopyLink" class="btn small"><svg class="ic"><use href="#i-link"/></svg><span>Ссылка</span></button>
         <button id="chatAliasBtn" class="btn small"><svg class="ic"><use href="#i-link"/></svg><span>Короткая ссылка</span></button>
         <button id="chatEpochBtn" class="btn small ghost"><svg class="ic"><use href="#i-lock"/></svg><span>Сменить эпоху</span></button>
@@ -356,6 +364,8 @@
       <button class="chat-react-emoji" data-emoji="🔥">🔥</button>
       <button class="chat-react-emoji" data-emoji="😂">😂</button>
       <button class="chat-react-emoji" data-emoji="😮">😮</button>
+      <button class="chat-react-emoji" data-emoji="💩">💩</button>
+      <button class="chat-react-emoji" data-emoji="👎">👎</button>
     </div>
     <button id="msgActPin" class="chat-menu-item"><span>Закрепить</span></button>
     <button id="msgActEdit" class="chat-menu-item"><span>Изменить</span></button>
@@ -643,6 +653,19 @@
     <div id="sTransports" class="mono status-box"></div>
     <button id="sDiag" class="btn full-w"><svg class="ic"><use href="#i-diag"/></svg><span>Открыть журнал диагностики</span></button>
   </div>
+
+  <div class="settings-sec">
+    <h4>5. Свой сервер</h4>
+    <label>URL своего воркера (необязательно)
+      <input id="sWorkerUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://zvonochek.zerewgwe.workers.dev">
+    </label>
+    <p class="sec-hint" id="sWorkerState">Сейчас используется сервер по умолчанию.</p>
+    <p class="sec-hint">Собственный Cloudflare Worker для чата, дозвона и сигналинга — инструкция «Свой сервер за 2 минуты» в README проекта. Смена сервера не переносит комнаты и резервные копии: они останутся на старом сервере.</p>
+    <div class="row wrap">
+      <button id="sWorkerApply" class="btn small"><span>Применить сервер</span></button>
+      <button id="sWorkerReset" class="btn small ghost"><span>Сбросить на сервер по умолчанию</span></button>
+    </div>
+  </div>
 </template>
 
 <template id="tplSafety">
@@ -671,11 +694,11 @@
 
 <script src="vendor/mqtt.min.js"></script>
 <script src="vendor/qrcode.js"></script>
-<script src="zvdiag.js?v=27"></script>
-<script type="module" src="app.js?v=27"></script>
-<script type="module" src="group.js?v=27"></script>
-<script type="module" src="chat.js?v=27"></script>
-<script type="module" src="backup.js?v=27"></script>
+<script src="zvdiag.js?v=28"></script>
+<script type="module" src="app.js?v=28"></script>
+<script type="module" src="group.js?v=28"></script>
+<script type="module" src="chat.js?v=28"></script>
+<script type="module" src="backup.js?v=28"></script>
 <!-- Входящий звонок (коммуникатор) -->
 <div id="incomingCall" class="call-modal hidden" role="dialog" aria-label="Входящий звонок">
   <div class="call-modal-card">

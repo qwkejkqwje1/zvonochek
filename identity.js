@@ -3,8 +3,9 @@
 // IndexedDB) удостоверяет ключи устройств; секрет личной ссылки зашифрован
 // vault-ключом устройства. Личная ссылка: #k=<секрет>&d=<fp>, где fp — первые
 // 32 hex SHA-256 от X9.62-представления master-публичного ключа.
-import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=27';
-import { kvGet, kvPut } from './store.js?v=27';
+import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=28';
+import { kvGet, kvPut } from './store.js?v=28';
+import { utils as secpUtils } from './vendor/secp256k1.js';
 
 const te = new TextEncoder();
 let cached = null; // {secret, masterPub, masterPriv, fp, devicePub, devicePriv, cert, label}
@@ -199,10 +200,21 @@ export async function ensureGuestDevice(label = 'Гость') {
 export async function getChatDevice() {
   const p = await getPersonal();
   if (p) {
-    return { devicePub: p.devicePub, devicePriv: p.devicePriv, cert: p.cert, guest: false };
+    return {
+      devicePub: p.devicePub,
+      devicePriv: p.devicePriv,
+      cert: p.cert,
+      guest: false,
+      // v28: публичные данные личной идентичности для дозвона из чата.
+      // masterPub/masterFp публичны; cert (и chain у восстановленной
+      // личности) доказывает, что это устройство принадлежит master.
+      masterPub: p.masterPub,
+      masterFp: p.fp,
+      chain: p.chain || null,
+    };
   }
   const g = await ensureGuestDevice();
-  return { devicePub: g.devicePub, devicePriv: g.devicePriv, cert: null, guest: true };
+  return { devicePub: g.devicePub, devicePriv: g.devicePriv, cert: null, guest: true, masterPub: null, masterFp: null, chain: null };
 }
 
 // v26, фаза 3: отдельная ECDH-пара устройства для обмена эпохами. Подписной
@@ -220,6 +232,25 @@ export async function getChatDeviceEcdh() {
   dev = { ecdhPub, ecdhPriv: pair.privateKey };
   await kvPut('devices', storeKey, dev);
   return dev;
+}
+
+// v28: стабильный Nostr-секрет устройства для резервного канала чата.
+// У устройства нет экспортируемого долговременного секрета, из которого
+// можно было бы вывести secp256k1-ключ, поэтому секрет создаётся один раз
+// (валидный скаляр из vendored noble) и хранится vault-зашифрованным в той
+// же записи устройства, что и остальные его материалы (как pinEnc в v26).
+export async function getChatNostrSecret() {
+  const p = await getPersonal();
+  const storeKey = p ? 'self' : 'guest';
+  if (!p) await ensureGuestDevice();
+  let dev = await kvGet('devices', storeKey);
+  if (!dev) throw new Error('устройство чата ещё не создано');
+  if (!dev.nostrSecretEnc) {
+    const secret = secpUtils.randomSecretKey();
+    dev = { ...dev, nostrSecretEnc: await encryptWithVault(b64u.enc(secret)) };
+    await kvPut('devices', storeKey, dev);
+  }
+  return b64u.dec(await decryptWithVault(dev.nostrSecretEnc));
 }
 
 export async function signChatText(text) {

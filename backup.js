@@ -15,7 +15,7 @@
 // SHA-256(recoveryPub). Личная ссылка при восстановлении перевыпускается:
 // секрет ссылки создаётся заново (старый остался на потерянном устройстве),
 // topic и ссылка меняются, master-личность — та же.
-import { CONFIG } from './config.js?v=27';
+import { CONFIG, getWorkerBase } from './config.js?v=28';
 import {
   b64u,
   newSecret,
@@ -28,8 +28,8 @@ import {
   sealBackup,
   openBackup,
   backupIdHash,
-} from './crypto.js?v=27';
-import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=27';
+} from './crypto.js?v=28';
+import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=28';
 import {
   getPersonal,
   ensurePersonal,
@@ -41,11 +41,11 @@ import {
   fpOfPubRaw,
   getRecoveryState,
   saveRecoveryState,
-} from './identity.js?v=27';
+} from './identity.js?v=28';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
-const workerBase = () => CONFIG.WORKER_URL.replace(/\/$/, '');
+const workerBase = () => getWorkerBase().replace(/\/$/, '');
 const CERT_TTL_MS = 10 * 365 * 24 * 3600_000;
 
 let pendingSeed = null; // seed только что сгенерированной фразы (память, до активации)

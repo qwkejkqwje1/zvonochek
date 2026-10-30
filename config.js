@@ -2,8 +2,9 @@
 export const CONFIG = {
   APP_NAME: 'ZVONochek',
 
-  // Способ №2: адрес Cloudflare Worker (WebSocket + HTTP-поллинг + выдача временных TURN-ключей).
-  // Пусто = работают публичные MQTT-брокеры и Nostr-реле.
+  // Способ №2: адрес Cloudflare Worker по умолчанию (WebSocket + HTTP-поллинг
+  // + выдача временных TURN-ключей). Пользователь может заменить его своим
+  // Worker в настройках (localStorage zvWorkerUrl, см. getWorkerBase ниже).
   WORKER_URL: 'https://zvonochek.zerewgwe.workers.dev',
 
   // Web Push (коммуникатор): публичный VAPID-ключ. Приватная часть — только
@@ -83,3 +84,52 @@ export const CONFIG = {
     },
   ],
 };
+
+// ---------- v28: «Свой сервер» — единый резолвер адреса Worker ----------
+// Все модули (чат, Inbox/дозвон, pairing/бэкап, сигналинг звонков и TURN)
+// обязаны ходить в Worker ТОЛЬКО через getWorkerBase(). Значение по
+// умолчанию — CONFIG.WORKER_URL выше; пользовательский адрес лежит в
+// localStorage zvWorkerUrl и применяется без перезагрузки конфига.
+export const DEFAULT_WORKER_URL = CONFIG.WORKER_URL;
+const WORKER_ENDPOINT_SEGMENTS = new Set(['chat', 'inbox', 'pair', 'room', 'turn', 'health']);
+
+export function normalizeWorkerUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' || !u.hostname) return null;
+  if (u.username || u.password || u.search || u.hash) return null;
+  const segments = u.pathname.split('/').filter(Boolean);
+  // Базовый путь допустим (например, прокси-подпуть), но адрес конкретного
+  // эндпоинта (/chat/…, /inbox/…) — нет: резолвер сам дописывает эндпоинты.
+  if (segments.some((s) => WORKER_ENDPOINT_SEGMENTS.has(s))) return null;
+  u.pathname = '/' + segments.join('/');
+  return u.toString().replace(/\/$/, '');
+}
+
+export function getWorkerBase() {
+  try {
+    return normalizeWorkerUrl(globalThis.localStorage?.getItem('zvWorkerUrl')) || DEFAULT_WORKER_URL;
+  } catch {
+    return DEFAULT_WORKER_URL;
+  }
+}
+
+export function setWorkerBase(value) {
+  const normalized = value == null || String(value).trim() === '' ? null : normalizeWorkerUrl(value);
+  if (value != null && String(value).trim() !== '' && !normalized) return null;
+  try {
+    if (normalized) globalThis.localStorage?.setItem('zvWorkerUrl', normalized);
+    else globalThis.localStorage?.removeItem('zvWorkerUrl');
+  } catch {}
+  return normalized || DEFAULT_WORKER_URL;
+}
+
+export function hasCustomWorker() {
+  return getWorkerBase() !== DEFAULT_WORKER_URL;
+}

@@ -1,20 +1,21 @@
-// ZVONochek Service Worker v27 — мгновенный старт, офлайн-оболочка и безопасные обновления
-const CACHE_NAME = 'zvonochek-v27';
+// ZVONochek Service Worker v28 — мгновенный старт, офлайн-оболочка и безопасные обновления
+const CACHE_NAME = 'zvonochek-v28';
 const CORE = [
   './',
   './index.html',
-  './style.css?v=27',
-  './app.js?v=27',
-  './group.js?v=27',
-  './store.js?v=27',
-  './identity.js?v=27',
-  './inbox.js?v=27',
-  './chat.js?v=27',
-  './backup.js?v=27',
-  './signaling.js?v=27',
-  './crypto.js?v=27',
-  './config.js?v=27',
-  './zvdiag.js?v=27',
+  './style.css?v=28',
+  './app.js?v=28',
+  './group.js?v=28',
+  './store.js?v=28',
+  './identity.js?v=28',
+  './inbox.js?v=28',
+  './chat.js?v=28',
+  './chat-transport.js?v=28',
+  './backup.js?v=28',
+  './signaling.js?v=28',
+  './crypto.js?v=28',
+  './config.js?v=28',
+  './zvdiag.js?v=28',
   './icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -23,7 +24,7 @@ const CORE = [
   './manifest.webmanifest',
   './vendor/mqtt.min.js',
   './vendor/qrcode.js',
-  './vendor/secp256k1.js?v=27',
+  './vendor/secp256k1.js?v=28',
 ];
 
 self.addEventListener('install', (e) => {
@@ -151,12 +152,18 @@ self.addEventListener('push', (e) => {
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   const ringId = e.notification.data?.ringId || '';
+  // v28: уведомления о сообщениях чата (data.chatRoom) — фокус приложения;
+  // комнату по seed откроет сама страница из списка комнат (seed в
+  // уведомление не кладём: это носитель доступа к комнате).
+  const chatRoom = e.notification.data?.chatRoom || '';
   e.waitUntil(
     (async () => {
       const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const w of wins) {
         await w.focus();
-        w.postMessage({ type: 'incoming-ring-push', ringId });
+        w.postMessage(
+          chatRoom ? { type: 'chat-notification', roomId: chatRoom } : { type: 'incoming-ring-push', ringId }
+        );
         return;
       }
       await clients.openWindow('./' + (ringId ? `?ring=${encodeURIComponent(ringId)}` : ''));

@@ -709,7 +709,7 @@ export async function openAliasPayload(code, blobB64) {
 // (type 'react' | 'edit' | 'del' | 'pin' | 'unpin' | 'ttl'), цель — по
 // хэшу blob целевого сообщения (entry.hash в локальном хранилище).
 // =======================================================================
-export const REACT_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮'];
+export const REACT_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮', '💩', '👎'];
 
 // Состояние реакций одного сообщения: {emoji: [devPub, ...]}.
 // Возвращает СЛЕДУЮЩУЮ операцию для dev: если dev уже ставил этот emoji —
