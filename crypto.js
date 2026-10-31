@@ -225,7 +225,7 @@ export async function deriveChatKeys(seedBytes, opts = {}) {
 // «не знает», PIN в ссылке не передаётся и на устройстве хранится только
 // зашифрованным vault-ключом (как seed).
 // =======================================================================
-export const PIN_PBKDF2_ITER = 600_000;
+export const PIN_PBKDF2_ITER = 600000;
 export const PIN_SALT_PREFIX = 'ZVONochek/chat/pin/v1';
 
 export async function derivePinIkm(pin, seedBytes) {
@@ -607,7 +607,7 @@ export async function decryptFileChunk(fileKey, salt, idx, ctBytes) {
 // =======================================================================
 export const GREET_SALT = 'zv-greet-v1';
 export const GREET_CODE_LEN = 9;
-const GREET_PBKDF2_ITER = 200_000;
+const GREET_PBKDF2_ITER = 200000;
 
 export function newGreetCode() {
   // 54 бита: 7 случайных байт → 10 base64url-символов, берём первые 9 (54 бита)
@@ -680,7 +680,7 @@ export async function openGreetPayload(code, blobB64) {
 // (фаза 2). Длинная ссылка остаётся главным ключом комнаты.
 // =======================================================================
 export const ALIAS_SALT = 'zv-alias-v1';
-const ALIAS_PBKDF2_ITER = 200_000;
+const ALIAS_PBKDF2_ITER = 200000;
 
 export function newJoinCode() {
   return newGreetCode(); // тот же формат: 9 символов base64url, ~54 бита
@@ -712,7 +712,7 @@ export async function openAliasPayload(code, blobB64) {
 // «Тихий  Синий Кран» и «тихий синий кран» были одной фразой.
 // =======================================================================
 export const WORD_SALT = 'zv-word-v1';
-const WORD_PBKDF2_ITER = 600_000;
+const WORD_PBKDF2_ITER = 600000;
 
 export function normalizeWordPhrase(phrase) {
   return String(phrase || '')

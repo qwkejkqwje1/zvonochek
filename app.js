@@ -1,11 +1,11 @@
-import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=32';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=32';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh } from './identity.js?v=32';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=32';
-import { kvPut, kvAll } from './store.js?v=32';
-import { Signaling } from './signaling.js?v=32';
+import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=35';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=35';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh } from './identity.js?v=35';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=35';
+import { kvPut, kvAll } from './store.js?v=35';
+import { Signaling } from './signaling.js?v=35';
 
-export const APP_VERSION = 32;
+export const APP_VERSION = 35;
 export const APP_BUILD = '2026-10-30';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -20,7 +20,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=32').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=35').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -84,6 +84,16 @@ const S = {
   isSpeaking: false,
   vadHoldUntil: 0,
   testingMic: false,
+
+  isMobile: /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || ''),
+  facingMode: localStorage.zvFacing || 'user', // 'user' (фронтальная) | 'environment' (задняя)
+  // Правка владельца (v34): Эко-режим — только ручная опция, по умолчанию ВЫКЛ на всех устройствах.
+  ecoMode: localStorage.zvEco === '1',
+  // Ручной выбор потолка качества видео: '1080' — стандарт (старт звонка), '1440' — 2K, '720' — экономно.
+  vq: localStorage.zvVQ || '1080',
+  callLocked: false,
+  callDimmed: false,
+  lastUnlockTap: 0,
 
   // Настройки устройств и звука в стиле Discord
   dev: {
@@ -160,7 +170,7 @@ const S = {
   helloTimer: null,
   callStart: 0,
   prevStats: null,
-  sigStatus: { mqttUp: 0, mqttTotal: 0, worker: 'off', workerHttp: 'off', nostrUp: 0, nostrTotal: 0 },
+  sigStatus: { mqttUp: 0, mqttTotal: 0, worker: 'off', workerHttp: 'off', nostrUp: 0, nostrTotal: 0, ntfyUp: 0, ntfyTotal: 0 },
   unread: 0,
   wakeLock: null,
   joined: false,
@@ -181,6 +191,7 @@ const S = {
 // ---------- Утилиты UI ----------
 function show(id) {
   ['home', 'prejoin', 'call'].forEach((s) => $('#' + s).classList.toggle('hidden', s !== id));
+  document.body.dataset.screen = id;
   if (id === 'home') refreshPersonalUI().catch(() => {});
 }
 function syncChatOpen() {
@@ -516,78 +527,101 @@ function syncAudioParams() {
   $('#cPtt')?.classList.toggle('hidden', S.audio.inputMode !== 'ptt' && !S.bridgeActive);
 }
 
+function stopMeterLoop() {
+  if (S.meterTimer) {
+    clearInterval(S.meterTimer);
+    S.meterTimer = null;
+  }
+}
+
+// v34: анти-перегрев — цикл анализатора работает в 3.5 раза реже (220 мс вместо 65 мс),
+// останавливается при выходе из звонка/лобби, не крутит FFT и перерисовку DOM при
+// заблокированном экране звонка (callLocked) или скрытой вкладке, если не нужен VAD/мост.
 function startMeterLoop() {
   if (S.meterTimer) return;
   const buf = new Float32Array(256);
   const rBuf = new Uint8Array(64);
   S.meterTimer = setInterval(() => {
-    // 0. Сторож AudioContext: браузеры усыпляют его при блокировке экрана,
-    //    входящем телефонном звонке и долгой тишине — а вместе с ним пропадал
-    //    весь входящий звук при живом соединении. Будим не чаще раза в секунду.
+    // 0. Сторож AudioContext (раз в секунду будит контекст, если мобильная ОС усыпила его)
     if (S.audioCtx && S.audioCtx.state !== 'running' && Date.now() - (S.ctxResumeAt || 0) > 1000) {
       S.ctxResumeAt = Date.now();
       S.audioCtx.resume().catch(() => {});
       updateRemoteAudibility();
     }
-    // 1. Анализ локального микрофона и работа гейта (VAD / PTT)
+    const hiddenOrLocked = document.hidden || S.callLocked;
+    const prejoinVis = !$('#prejoin')?.classList.contains('hidden');
+    const qaVis = !$('#quickAudioPop')?.classList.contains('hidden');
+    const modalVis = !$('#modal')?.classList.contains('hidden');
+    const barsVis = !hiddenOrLocked && (prejoinVis || qaVis || modalVis);
+    const needVadOrBridge = S.audio.inputMode !== 'open' || S.bridgeActive || S.testingMic;
+
+    // 1. Анализ локального микрофона
     if (S.micAnalyser && S.rawAudioTrack && S.rawAudioTrack.readyState === 'live') {
-      S.micAnalyser.getFloatTimeDomainData(buf);
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-      const rms = Math.sqrt(sum / buf.length);
-      const db = rms > 0.00001 ? Math.max(-75, Math.min(0, 20 * Math.log10(rms))) : -75;
-      const pct = Math.max(0, Math.min(100, ((db + 75) / 60) * 100));
-
-      for (const id of ['#pVadBar', '#qaVadBar', '#sVadBar']) {
-        const el = $(id);
-        if (el) el.style.width = (S.micOn && !S.deafened ? pct : 0) + '%';
-      }
-      if ($('#pDbVal')) {
-        $('#pDbVal').textContent = db <= -74 ? '-∞ дБ' : Math.round(db) + ' дБ';
-      }
-
-      const now = Date.now();
-      let pass = false;
-      if (!S.micOn || S.deafened) {
-        pass = false;
-      } else if (S.audio.inputMode === 'open') {
-        // Открытый микрофон (дефолт v14): гейта на пути звука нет вообще.
-        // isSpeaking считаем по энергии только для индикации и моста.
-        pass = true;
-        S.isSpeaking = db > -55;
-      } else if (S.audio.inputMode === 'ptt') {
-        pass = S.pttPressed;
-      } else {
-        // Гистерезис: открываемся по порогу, закрываемся на 7 дБ ниже и с
-        // длинным хвостом. Раньше гейт (280 мс, без гистерезиса, крутой срез
-        // за 15 мс) глотал тихие слова и окончания фраз — собеседнику казалось,
-        // что «громкость то пропадает, то возвращается».
-        if (db >= S.audio.vadGate) {
-          S.vadHoldUntil = now + 900;
-        } else if (db >= S.audio.vadGate - 7 && now < S.vadHoldUntil) {
-          S.vadHoldUntil = now + 300;
+      if (!barsVis && !needVadOrBridge) {
+        // В режиме открытого микрофона во время звонка без открытых шкал не тратим CPU на FFT
+        S.isSpeaking = S.micOn && !S.deafened;
+        if (S.gateGainNode && S.audioCtx) {
+          S.gateGainNode.gain.setTargetAtTime(S.isSpeaking ? 1 : 0, S.audioCtx.currentTime, 0.07);
         }
-        pass = now < S.vadHoldUntil;
+      } else {
+        S.micAnalyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / buf.length);
+        const db = rms > 0.00001 ? Math.max(-75, Math.min(0, 20 * Math.log10(rms))) : -75;
+        const pct = Math.max(0, Math.min(100, ((db + 75) / 60) * 100));
+
+        if (barsVis) {
+          for (const id of ['#pVadBar', '#qaVadBar', '#sVadBar']) {
+            const el = $(id);
+            if (el) el.style.width = (S.micOn && !S.deafened ? pct : 0) + '%';
+          }
+          if (prejoinVis && $('#pDbVal')) {
+            $('#pDbVal').textContent = db <= -74 ? '-∞ дБ' : Math.round(db) + ' дБ';
+          }
+        }
+
+        const now = Date.now();
+        let pass = false;
+        if (!S.micOn || S.deafened) {
+          pass = false;
+        } else if (S.audio.inputMode === 'open') {
+          pass = true;
+          S.isSpeaking = db > -55;
+        } else if (S.audio.inputMode === 'ptt') {
+          pass = S.pttPressed;
+        } else {
+          if (db >= S.audio.vadGate) {
+            S.vadHoldUntil = now + 900;
+          } else if (db >= S.audio.vadGate - 7 && now < S.vadHoldUntil) {
+            S.vadHoldUntil = now + 300;
+          }
+          pass = now < S.vadHoldUntil;
+        }
+        if (S.audio.inputMode !== 'open') S.isSpeaking = pass;
+        if (S.gateGainNode && S.audioCtx) {
+          S.gateGainNode.gain.setTargetAtTime(pass ? 1 : 0, S.audioCtx.currentTime, 0.07);
+        }
+        if (!hiddenOrLocked) {
+          $('#cMic')?.classList.toggle('speaking', S.isSpeaking && S.micOn && !S.deafened);
+          if (prejoinVis) $('#preAvatarRing')?.classList.toggle('speaking', S.isSpeaking);
+        }
       }
-      if (S.audio.inputMode !== 'open') S.isSpeaking = pass;
-      if (S.gateGainNode && S.audioCtx) {
-        S.gateGainNode.gain.setTargetAtTime(pass ? 1 : 0, S.audioCtx.currentTime, 0.07);
-      }
-      $('#cMic')?.classList.toggle('speaking', pass);
-      $('#preAvatarRing')?.classList.toggle('speaking', pass);
     }
 
-    // 2. Индикация голоса собеседника (зеленое кольцо вокруг аватара как в Discord)
-    let peerTalking = Date.now() < S.bridgeSpeakingUntil;
-    if (!peerTalking && S.remoteAnalyser && S.pc?.connectionState === 'connected') {
-      S.remoteAnalyser.getByteFrequencyData(rBuf);
-      let rSum = 0;
-      for (let i = 0; i < rBuf.length; i++) rSum += rBuf[i];
-      if (rSum / rBuf.length > 14) peerTalking = true;
+    // 2. Индикация голоса собеседника (только когда аватар собеседника реально виден на экране!)
+    if (!hiddenOrLocked && !$('#remoteOff')?.classList.contains('hidden')) {
+      let peerTalking = Date.now() < S.bridgeSpeakingUntil;
+      if (!peerTalking && S.remoteAnalyser && S.pc?.connectionState === 'connected') {
+        S.remoteAnalyser.getByteFrequencyData(rBuf);
+        let rSum = 0;
+        for (let i = 0; i < rBuf.length; i++) rSum += rBuf[i];
+        if (rSum / rBuf.length > 14) peerTalking = true;
+      }
+      $('#peerAvatarRing')?.classList.toggle('speaking', peerTalking);
+      $('#voiceWave')?.classList.toggle('hidden', !peerTalking && !S.bridgeActive);
     }
-    $('#peerAvatarRing')?.classList.toggle('speaking', peerTalking);
-    $('#voiceWave')?.classList.toggle('hidden', !peerTalking && !S.bridgeActive);
-  }, 65);
+  }, 220);
 }
 
 function toggleMicTest(btnEl) {
@@ -633,17 +667,31 @@ const audioC = () => ({
   noiseSuppression: S.audio.noise,
   autoGainControl: S.audio.agc,
 });
-const videoC = () => ({
-  deviceId: S.dev.cam ? { ideal: S.dev.cam } : undefined,
-  // Хорошее качество по умолчанию: просим Full HD, браузер сам снизит
-  // разрешение, если камера/сеть слабее; адаптация качества ниже тоже работает.
-  width: { ideal: 1920 },
-  height: { ideal: 1080 },
-  frameRate: { ideal: 30 },
-});
+// v34: разрешение захвата + поддержка facingMode (фронт / тыл).
+// Стандарт старта (правка владельца) — 1080p @ 30 на всех устройствах; адаптивная
+// лестница adaptQuality при плохой сети сама шагнёт вниз (вплоть до 720p и ниже).
+// Потолок захвата задаётся ручным выбором качества (S.vq): '1080' стандарт,
+// '1440' — 2K (2560×1440), '720' — экономно. Эко-режим (только вручную) — 720p @ 24.
+const VQ_TIERS = {
+  '1440': { w: 2560, h: 1440 },
+  '1080': { w: 1920, h: 1080 },
+  '720': { w: 1280, h: 720 },
+};
+const videoC = (forceFacing = false) => {
+  const eco = !!S.ecoMode;
+  const t = VQ_TIERS[S.vq] || VQ_TIERS['1080'];
+  const base = eco
+    ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 24 } }
+    : { width: { ideal: t.w }, height: { ideal: t.h }, frameRate: { ideal: 30, max: 30 } };
+  if (!forceFacing && S.dev.cam) {
+    return { ...base, deviceId: { exact: S.dev.cam } };
+  }
+  return { ...base, facingMode: { ideal: S.facingMode || 'user' } };
+};
 
 function stopLocal() {
   stopMicTest();
+  stopMeterLoop();
   if (S.rawAudioTrack) {
     try { S.rawAudioTrack.stop(); } catch {}
     S.rawAudioTrack = null;
@@ -862,13 +910,114 @@ async function stopScreen() {
 
 function refreshLocalView() {
   const v = localTrack('video');
+  const settings = v?.getSettings?.() || {};
+  // Определяем, задняя ли это камера: по настройке трека или нашему S.facingMode
+  const isRear = !S.screenTrack && (settings.facingMode === 'environment' || (!settings.facingMode && S.facingMode === 'environment'));
   for (const el of [$('#preview'), $('#local')]) {
     if (!el) continue;
     if (el.id === 'local' && S.screenTrack) continue;
     el.srcObject = v ? new MediaStream([v]) : null;
+    // v34: зеркалим только фронтальную камеру; заднюю камеру показывать зеркально нельзя!
+    el.classList.toggle('rear-cam', isRear);
   }
   $('#previewOff')?.classList.toggle('hidden', !!v);
   $('#local')?.classList.toggle('hidden', !v && !S.screenTrack);
+}
+
+// v34: Полноценный свап фронтальной и задней камеры (Android / iOS / ноутбуки с 2 камерами)
+let flippingCam = false;
+async function flipCamera() {
+  if (flippingCam) return;
+  if (S.screenTrack) return toast('Сначала остановите демонстрацию экрана');
+  flippingCam = true;
+  try {
+    const nextFacing = S.facingMode === 'environment' ? 'user' : 'environment';
+    S.facingMode = nextFacing;
+    try { localStorage.zvFacing = nextFacing; } catch {}
+    // Сбрасываем жёстко привязанный deviceId, чтобы браузер переключил объектив по facingMode
+    const prevTrack = localTrack('video');
+    const prevDevId = prevTrack?.getSettings?.().deviceId || S.dev.cam || '';
+    S.dev.cam = '';
+    try { localStorage.removeItem('zvCam'); } catch {}
+
+    // Если камера была выключена — включаем её сразу на выбранной стороне
+    if (!S.camOn) S.camOn = true;
+
+    // На многих Android-устройствах второй объектив не открывается, пока старый видео-трек не остановлен!
+    if (prevTrack) {
+      prevTrack.stop();
+      S.local.removeTrack(prevTrack);
+    }
+
+    let newTrack = null;
+    // Попытка 1: через facingMode (exact -> ideal)
+    try {
+      const st = await navigator.mediaDevices.getUserMedia({
+        video: { ...videoC(true), facingMode: { exact: nextFacing } },
+      });
+      newTrack = st.getVideoTracks()[0];
+    } catch {
+      try {
+        const st = await navigator.mediaDevices.getUserMedia({
+          video: videoC(true),
+        });
+        newTrack = st.getVideoTracks()[0];
+      } catch {}
+    }
+
+    // Попытка 2: если браузер вернул тот же самый объектив (бывает в некоторых WebView на Android),
+    // перебираем список видеокамер enumerateDevices() и выбираем следующую
+    const allDevs = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    const videoDevs = allDevs.filter((d) => d.kind === 'videoinput');
+    if (newTrack && prevDevId && newTrack.getSettings?.().deviceId === prevDevId && videoDevs.length > 1) {
+      newTrack.stop();
+      newTrack = null;
+    }
+    if (!newTrack && videoDevs.length > 0) {
+      const wantBack = nextFacing === 'environment';
+      const byLabel = videoDevs.find((d) =>
+        wantBack ? /back|rear|environment|задн|тыл/i.test(d.label) : /front|user|selfie|фронт|передн/i.test(d.label)
+      );
+      const curIdx = videoDevs.findIndex((d) => d.deviceId === prevDevId);
+      const targetDev = byLabel && byLabel.deviceId !== prevDevId
+        ? byLabel
+        : videoDevs[(curIdx + 1) % videoDevs.length];
+      if (targetDev) {
+        try {
+          const st = await navigator.mediaDevices.getUserMedia({
+            video: { ...videoC(true), facingMode: undefined, deviceId: { exact: targetDev.deviceId } },
+          });
+          newTrack = st.getVideoTracks()[0];
+          S.dev.cam = targetDev.deviceId;
+        } catch {}
+      }
+    }
+
+    if (!newTrack) {
+      toast('Не удалось переключить камеру');
+      S.camOn = false;
+      syncButtons();
+      refreshLocalView();
+      return;
+    }
+
+    const actualFacing = newTrack.getSettings?.().facingMode;
+    if (actualFacing === 'user' || actualFacing === 'environment') {
+      S.facingMode = actualFacing;
+      try { localStorage.zvFacing = actualFacing; } catch {}
+    }
+
+    S.local.addTrack(newTrack);
+    await setSendTrack('video', newTrack);
+    refreshLocalView();
+    syncButtons();
+    await fillDevices();
+    await fillDevices('s');
+    applyQuality();
+    toast(S.facingMode === 'environment' ? '📷 Включена задняя камера' : '🤳 Включена фронтальная камера');
+  } finally {
+    flippingCam = false;
+  }
 }
 function syncButtons() {
   const micOff = !S.micOn || S.deafened;
@@ -962,6 +1111,11 @@ async function preJoin() {
 }
 $('#pMic').onclick = toggleMic;
 $('#pCam').onclick = toggleCam;
+$('#pFlipCam') && ($('#pFlipCam').onclick = flipCamera);
+$('#cFlipCam') && ($('#cFlipCam').onclick = flipCamera);
+$('#local') && ($('#local').onclick = () => {
+  if (!S.screenTrack && S.camOn) flipCamera();
+});
 $('#pTestMic').onclick = () => toggleMicTest($('#pTestMic'));
 $('#pOpenSettings').onclick = openSettingsModal;
 $('#pMicSel').onchange = (e) => switchDevice('mic', e.target.value);
@@ -1138,6 +1292,7 @@ async function join() {
     brokers: CONFIG.MQTT_BROKERS,
     workerUrl: getWorkerBase(),
     relays: CONFIG.NOSTR_RELAYS,
+    ntfyBase: CONFIG.NTFY_BASE,
     onMessage: onSignal,
     onStatus: (st) => {
       S.sigStatus = st;
@@ -1155,7 +1310,7 @@ async function join() {
   log(
     `Вход в комнату. Сигнал: MQTT (${CONFIG.MQTT_BROKERS.length}), ${
       getWorkerBase() ? 'Worker (WS+HTTP), ' : ''
-    }Nostr (${CONFIG.NOSTR_RELAYS.length}); TURN: ${S.hasTurn ? 'есть' : 'нет'} (${S.turnInfo || '—'})`
+    }Nostr (${CONFIG.NOSTR_RELAYS.length})${CONFIG.NTFY_BASE ? ', ntfy' : ''}; TURN: ${S.hasTurn ? 'есть' : 'нет'} (${S.turnInfo || '—'})`
   );
   progress(10, 'Подключение к каналам сигналинга…');
   S.sig.start();
@@ -1769,7 +1924,7 @@ function setPeer(m) {
       if (cs !== 'connected' && (cs === 'failed' || cs === 'disconnected' || ice === 'checking' || ice === 'failed')) {
         activateBridge('Прямой P2P заблокирован или нет TURN — включён авто-мост через сигнал');
       }
-    }, 10_000);
+    }, 10000);
   }
 }
 
@@ -2205,6 +2360,7 @@ function progressDetail() {
     `MQTT ${sg.mqttUp}/${sg.mqttTotal}`,
     workerTag,
     `Nostr ${sg.nostrUp || 0}/${sg.nostrTotal || 0}`,
+    sg.ntfyTotal ? `ntfy ${sg.ntfyUp || 0}/${sg.ntfyTotal}` : null,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -2350,6 +2506,7 @@ setInterval(() => {
   const sec = Math.floor((Date.now() - S.callStart) / 1000);
   const txt = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
   if ($('#timerText')) $('#timerText').textContent = txt;
+  if (S.callLocked && $('#callLockTimer')) $('#callLockTimer').textContent = txt;
 }, 1000);
 
 function startStats(now) {
@@ -2458,7 +2615,10 @@ const QLEVELS = [
 ];
 async function applyQuality() {
   if (!S.pc) return;
-  const L = QLEVELS[S.qLevel || 0];
+  // v34: в Эко-режиме (только ручном) не поднимаемся выше уровня 1 лестницы;
+  // стандарт — уровень 0. Для захвата 2K верхний уровень шлём 5.5 Мбит/с (см. ниже).
+  const minIdx = S.ecoMode ? Math.max(1, S.qLevel || 0) : (S.qLevel || 0);
+  const L = QLEVELS[Math.min(QLEVELS.length - 1, minIdx)];
   const audioBps = (S.audio.bitrate || 48) * 1000;
   for (const snd of S.pc.getSenders()) {
     if (!snd.track) continue;
@@ -2471,7 +2631,8 @@ async function applyQuality() {
       if (S.audio.opusTune) p.encodings[0].maxBitrate = audioBps;
       else delete p.encodings[0].maxBitrate;
     } else {
-      p.encodings[0].maxBitrate = L.maxBitrate;
+      // Правка владельца (v34): верхний уровень лестницы при захвате 2K — 5.5 Мбит/с, иначе — по лестнице (Full HD 2.5 Мбит/с).
+      p.encodings[0].maxBitrate = minIdx === 0 && S.vq === '1440' ? 5500000 : L.maxBitrate;
       p.encodings[0].scaleResolutionDownBy = L.scale;
       p.encodings[0].maxFramerate = L.fps;
     }
@@ -2481,9 +2642,9 @@ async function applyQuality() {
   }
 }
 function adaptQuality(outLoss, rtt) {
-  S.qLevel ??= 0;
-  S.qBad ??= 0;
-  S.qGood ??= 0;
+  S.qLevel = S.qLevel ?? 0;
+  S.qBad = S.qBad ?? 0;
+  S.qGood = S.qGood ?? 0;
   if (outLoss > 6 || rtt > 700) {
     S.qBad++;
     S.qGood = 0;
@@ -2746,6 +2907,83 @@ $('#cMic').onclick = toggleMic;
 $('#cDeaf').onclick = toggleDeafen;
 $('#cCam').onclick = toggleCam;
 $('#cScreen').onclick = toggleScreen;
+
+// ---------- v34: Блокировка экрана звонка от случайных нажатий (Pocket / Ear Lock) ----------
+function setCallLock(locked) {
+  S.callLocked = !!locked;
+  if (!S.callLocked) S.callDimmed = false;
+  const ov = $('#callLockOverlay');
+  if (ov) {
+    ov.classList.toggle('hidden', !S.callLocked);
+    ov.classList.toggle('oled-dim', S.callDimmed);
+  }
+  $('#call')?.classList.toggle('is-locked', S.callLocked);
+  if (S.callLocked) {
+    const peerName = S.peer?.name || 'Активный звонок';
+    if ($('#callLockPeer')) $('#callLockPeer').textContent = `${peerName} · экран заблокирован`;
+    if ($('#callLockTimer') && $('#timerText')) $('#callLockTimer').textContent = $('#timerText').textContent;
+    $('#quickAudioPop')?.classList.add('hidden');
+    toast('🔒 Экран заблокирован от случайных нажатий');
+  } else {
+    toast('🔓 Экран звонка разблокирован');
+  }
+}
+
+$('#cLock') && ($('#cLock').onclick = () => setCallLock(true));
+$('#btnLockTop') && ($('#btnLockTop').onclick = () => setCallLock(true));
+$('#btnCallDimToggle') && ($('#btnCallDimToggle').onclick = (e) => {
+  e.stopPropagation();
+  S.callDimmed = !S.callDimmed;
+  $('#callLockOverlay')?.classList.toggle('oled-dim', S.callDimmed);
+  const span = $('#btnCallDimToggle span');
+  if (span) span.textContent = S.callDimmed ? '☀️ Включить подсветку' : '🌙 Погасить экран (OLED)';
+});
+$('#btnUnlockCall') && ($('#btnUnlockCall').onclick = (e) => {
+  e.stopPropagation();
+  const now = Date.now();
+  if (now - S.lastUnlockTap < 650) {
+    S.lastUnlockTap = 0;
+    setCallLock(false);
+  } else {
+    S.lastUnlockTap = now;
+    const span = $('#btnUnlockCall span');
+    if (span) {
+      span.textContent = 'Ещё одно нажатие для разблокировки…';
+      setTimeout(() => {
+        if (S.callLocked && span) span.textContent = 'Нажмите дважды для разблокировки';
+      }, 700);
+    }
+  }
+});
+
+// ---------- v34: Эко-режим (против нагрева телефона в долгих звонках) ----------
+function syncEcoUI() {
+  document.body.classList.toggle('eco-mode', !!S.ecoMode);
+  const topBtn = $('#btnEcoToggle');
+  if (topBtn) {
+    topBtn.classList.toggle('good', !!S.ecoMode);
+    const lbl = $('#ecoLabel');
+    if (lbl) lbl.textContent = S.ecoMode ? 'Эко ВКЛ' : 'Эко';
+  }
+  if ($('#qaEcoMode')) $('#qaEcoMode').checked = !!S.ecoMode;
+  if ($('#sEcoMode')) $('#sEcoMode').checked = !!S.ecoMode;
+}
+async function setEcoMode(on) {
+  S.ecoMode = !!on;
+  try { localStorage.zvEco = S.ecoMode ? '1' : '0'; } catch {}
+  syncEcoUI();
+  const v = localTrack('video');
+  if (v && !S.screenTrack) {
+    try {
+      await v.applyConstraints(videoC());
+    } catch {}
+  }
+  applyQuality();
+  toast(S.ecoMode ? '❄️ Эко-режим включён: снижен нагрев и расход батареи' : 'Эко-режим выключен (максимальное качество)');
+}
+syncEcoUI();
+$('#btnEcoToggle') && ($('#btnEcoToggle').onclick = () => setEcoMode(!S.ecoMode));
+$('#qaEcoMode') && ($('#qaEcoMode').onchange = (e) => setEcoMode(e.target.checked));
 $('#cChat').onclick = () => {
   $('#chat').classList.toggle('hidden');
   syncChatOpen();
@@ -2805,6 +3043,22 @@ async function openSettingsModal() {
 
   $('#sMic', b).onchange = (e) => switchDevice('mic', e.target.value);
   $('#sCam', b).onchange = (e) => switchDevice('cam', e.target.value);
+  if ($('#sFlipCamBtn', b)) $('#sFlipCamBtn', b).onclick = () => flipCamera();
+  if ($('#sEcoMode', b)) {
+    $('#sEcoMode', b).checked = !!S.ecoMode;
+    $('#sEcoMode', b).onchange = (e) => setEcoMode(e.target.checked);
+  }
+  if ($('#sVideoQ', b)) {
+    $('#sVideoQ', b).value = S.vq || '1080';
+    $('#sVideoQ', b).onchange = async (e) => {
+      S.vq = e.target.value;
+      try { localStorage.zvVQ = S.vq; } catch {}
+      const v = localTrack('video');
+      if (v) { try { await v.applyConstraints(videoC()); } catch {} }
+      applyQuality();
+      toast('Качество видео: ' + (S.vq === '1440' ? '2K (1440p)' : S.vq === '720' ? '720p' : '1080p'));
+    };
+  }
   $('#sSpk', b).onchange = (e) => {
     S.dev.spk = localStorage.zvSpk = e.target.value;
     $('#remote').setSinkId?.(e.target.value).catch(() => {});
@@ -3057,6 +3311,7 @@ async function hangup() {
   $('#msgs').replaceChildren();
   $('#chat').classList.add('hidden');
   syncChatOpen();
+  if (S.callLocked) setCallLock(false);
   $('#quickAudioPop')?.classList.add('hidden');
   history.replaceState(null, '', location.pathname);
   show('home');
@@ -3607,7 +3862,7 @@ async function ringPersonalFromChat(masterPub, link, opts = {}) {
         clearInterval(rec.poll);
         chatRings.delete(ringId);
         rec.onState?.(state, { ringId });
-      } else if (Date.now() - started > 90_000) {
+      } else if (Date.now() - started > 90000) {
         rec.done = true;
         clearInterval(rec.poll);
         chatRings.delete(ringId);
@@ -3680,4 +3935,78 @@ if (action === 'new' && !location.hash) {
   preJoin();
 } else {
   route();
+}
+
+// ---------- v34: Установка PWA на рабочий стол (Android / iOS / Desktop) и кнопка «Назад» Android ----------
+let deferredPwaPrompt = null;
+const isStandalonePwa = () =>
+  window.matchMedia?.('(display-mode: standalone)')?.matches ||
+  window.navigator?.standalone === true;
+
+function syncPwaUI() {
+  const installed = isStandalonePwa();
+  const topBtn = $('#btnInstallPwaTop');
+  if (topBtn) topBtn.classList.toggle('hidden', installed);
+  const banner = $('#pwaInstallBanner');
+  if (banner) {
+    let dismissed = false;
+    try { dismissed = sessionStorage.getItem('zvPwaDismissed') === '1'; } catch {}
+    banner.classList.toggle('hidden', installed || dismissed);
+  }
+}
+
+async function triggerPwaInstall() {
+  if (deferredPwaPrompt) {
+    try {
+      deferredPwaPrompt.prompt();
+      const res = await deferredPwaPrompt.userChoice;
+      if (res?.outcome === 'accepted') {
+        deferredPwaPrompt = null;
+        toast('Приложение устанавливается на рабочий стол!');
+        $('#pwaInstallBanner')?.classList.add('hidden');
+        $('#btnInstallPwaTop')?.classList.add('hidden');
+        closeModal();
+        return;
+      }
+    } catch {}
+  }
+  const b = openModal('#tplPwaInstall');
+  const nativeBox = $('#pwaNativeBox', b);
+  if (nativeBox) nativeBox.classList.toggle('hidden', !deferredPwaPrompt);
+  const modalBtn = $('#btnPwaModalInstall', b);
+  if (modalBtn) {
+    modalBtn.onclick = async () => {
+      if (!deferredPwaPrompt) return;
+      deferredPwaPrompt.prompt();
+      const r = await deferredPwaPrompt.userChoice.catch(() => null);
+      if (r?.outcome === 'accepted') {
+        deferredPwaPrompt = null;
+        closeModal();
+      }
+    };
+  }
+}
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPwaPrompt = e;
+  syncPwaUI();
+});
+window.addEventListener('appinstalled', () => {
+  deferredPwaPrompt = null;
+  syncPwaUI();
+  toast('ZVONochek установлен на рабочий стол!');
+});
+$('#btnInstallPwaTop') && ($('#btnInstallPwaTop').onclick = triggerPwaInstall);
+$('#btnInstallPwaBanner') && ($('#btnInstallPwaBanner').onclick = triggerPwaInstall);
+$('#btnDismissPwaBanner') && ($('#btnDismissPwaBanner').onclick = () => {
+  try { sessionStorage.setItem('zvPwaDismissed', '1'); } catch {}
+  $('#pwaInstallBanner')?.classList.add('hidden');
+});
+syncPwaUI();
+
+// v34: Поддержка ярлыка PWA ?action=newchat (быстрое создание чата с иконки рабочего стола)
+if (action === 'newchat' && !location.hash) {
+  history.replaceState(null, '', location.pathname);
+  setTimeout(() => $('#btnCreateChat')?.click(), 120);
 }

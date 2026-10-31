@@ -1,19 +1,51 @@
-// Четыре независимых транспорта сигналинга и аварийного аудио-моста, работающих параллельно:
+// Пять независимых транспортов сигналинга и аварийного аудио-моста, работающих параллельно:
 //   1) Публичные MQTT-брокеры поверх WSS (включая порт 443)
 //   2) Cloudflare Worker WebSocket (с ротацией окна каждые 9 КБ против зависаний ТСПУ)
 //   3) Cloudflare Worker HTTP-поллинг + POST (работает даже при полной блокировке WebSocket)
 //   4) Публичные Nostr-реле поверх WSS (порт 443, подписанные эфемерные события)
+//   5) Публичный ntfy.sh (POST + WebSocket; «слепой» pub/sub без регистрации)
 // Каждое сообщение сжимается и шифруется AES-256-GCM; дубли отсекаются по mid.
-import { seal, open } from './crypto.js?v=32';
-import { schnorr, utils } from './vendor/secp256k1.js?v=32';
+import { seal, open, sha256hex } from './crypto.js?v=35';
+import { schnorr, utils } from './vendor/secp256k1.js?v=35';
 
 const hexs = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 const NOSTR_KIND = 29333; // эфемерные события: реле их не хранят, только пересылают
 
 const rid = () => crypto.getRandomValues(new Uint32Array(2)).join('-');
 
+// ---------- v35: ntfy ----------
+// Имя топика в ntfy: префикс + SHA-256 от топика комнаты — по образцу
+// MQTT-топика в chat-transport.js. Сам топик комнаты (производный секрета
+// ссылки) публичному серверу не показывается.
+export async function ntfyTopicForSignaling(topic) {
+  return 'zv1-' + (await sha256hex(String(topic)));
+}
+
+// URL подписки: WebSocket ntfy + параметр since (unix-время, окно 30 с).
+// Публичный сервер хранит сообщения 12 часов — без since каждое
+// (пере)подключение получало бы весь кэш топика, включая вчерашние
+// конверты. 30 с — свежее, чем окно Nostr-подписки выше (60 с). Давность
+// сверх окна внутри сессии добивает дедуп по mid в _recv.
+export function ntfySubscribeUrl(base, topic, nowSec = Math.floor(Date.now() / 1000)) {
+  const b = String(base || '').replace(/\/$/, '').replace(/^http/, 'ws');
+  return b + '/' + topic + '/ws?since=' + Math.max(0, Math.floor(nowSec) - 30);
+}
+
+// Кадр ntfy по WebSocket — JSON {id, time, event, topic, message}. Нужны
+// только кадры event === 'message' со строкой message (наш запечатанный
+// конверт); служебные open/keepalive — null.
+export function parseNtfyFrame(data) {
+  try {
+    const j = typeof data === 'string' ? JSON.parse(data) : data;
+    if (!j || typeof j !== 'object' || j.event !== 'message' || typeof j.message !== 'string') return null;
+    return { id: j.id || '', time: j.time || 0, message: j.message };
+  } catch {
+    return null;
+  }
+}
+
 export class Signaling {
-  constructor({ topic, key, selfId, inst, brokers, workerUrl, relays, onMessage, onStatus, onPeerJoined }) {
+  constructor({ topic, key, selfId, inst, brokers, workerUrl, relays, ntfyBase, onMessage, onStatus, onPeerJoined }) {
     Object.assign(this, {
       topic,
       key,
@@ -26,6 +58,10 @@ export class Signaling {
       onPeerJoined,
     });
     this.relays = relays || [];
+    this.ntfyBase = (ntfyBase || '').replace(/\/$/, '');
+    this.ntfyTopic = null; // выводится асинхронно (SHA-256), см. _ntfyTopic()
+    this.ntfyWs = null;
+    this.ntfyTimer = null;
     this.nostr = new Map(); // url -> текущий сокет
     this.nsk = utils.randomSecretKey();
     this.npk = hexs(schnorr.getPublicKey(this.nsk));
@@ -53,6 +89,7 @@ export class Signaling {
       }, 1800);
     }
     this.relays.forEach((u) => this._nostr(u, 0));
+    if (this.ntfyBase) this._ntfy(0);
     this._status();
   }
 
@@ -66,6 +103,8 @@ export class Signaling {
       workerHttp: this.httpState,
       nostrUp: nUp,
       nostrTotal: this.relays.length,
+      ntfyUp: this.ntfyWs && this.ntfyWs.readyState === 1 ? 1 : 0,
+      ntfyTotal: this.ntfyBase ? 1 : 0,
     });
   }
 
@@ -313,6 +352,67 @@ export class Signaling {
     }
   }
 
+  // 5) ntfy.sh — резервный «слепой» pub/sub: подписка по WebSocket,
+  // публикация обычным POST (см. send). Канал именно резервный: публичный
+  // сервер троттлит по IP, поэтому голосовой мост (_sendVoice, несколько
+  // чанков в секунду) через ntfy НЕ ходит — только сигналинг.
+  async _ntfyTopic() {
+    if (!this.ntfyTopic) this.ntfyTopic = await ntfyTopicForSignaling(this.topic);
+    return this.ntfyTopic;
+  }
+
+  async _ntfy(attempt) {
+    if (this.closed || !this.ntfyBase) return;
+    let topic;
+    try {
+      topic = await this._ntfyTopic();
+    } catch {
+      return;
+    }
+    if (this.closed) return;
+    let ws;
+    try {
+      // since пересчитывается на каждое подключение: переподключение
+      // не тянет кэш старше 30 секунд.
+      ws = new WebSocket(ntfySubscribeUrl(this.ntfyBase, topic));
+    } catch {
+      return;
+    }
+    this.ntfyWs = ws;
+    ws.onopen = () => {
+      if (this.closed) {
+        try { ws.close(); } catch {}
+        return;
+      }
+      this._status();
+      this.onTransportUp();
+    };
+    ws.onmessage = (e) => {
+      const f = parseNtfyFrame(e.data);
+      if (f) this._recv(f.message, 'ntfy');
+    };
+    ws.onclose = () => {
+      if (this.ntfyWs === ws) this.ntfyWs = null;
+      this._status();
+      if (this.closed) return;
+      const n = attempt + 1;
+      this.ntfyTimer = setTimeout(() => this._ntfy(n), Math.min(25000, 1200 * 2 ** Math.min(n, 5)));
+    };
+    ws.onerror = () => {};
+  }
+
+  _ntfyPost(data) {
+    if (!this.ntfyBase || this.closed) return;
+    this._ntfyTopic()
+      .then((t) => {
+        if (this.closed) return;
+        // Троттлинг публичного ntfy (429 по IP) — не ошибка для нас:
+        // гонку каналов в этот момент несут MQTT/Nostr/Worker.
+        fetch(this.ntfyBase + '/' + t, { method: 'POST', body: data }).catch(() => {});
+      })
+      .catch(() => {});
+  }
+
   async _nostrEvent(content) {
     const e = {
       pubkey: this.npk,
@@ -425,6 +525,9 @@ export class Signaling {
         console.warn('nostr', e);
       }
     }
+
+    // Г) ntfy.sh — POST тем же запечатанным конвертом, байт-в-байт как в MQTT
+    if (this.ntfyBase) this._ntfyPost(data);
   }
 
   // Мгновенный сигнал выхода при закрытии вкладки на смартфоне/ПК
@@ -467,6 +570,10 @@ export class Signaling {
   close() {
     this.closed = true;
     this._stopPoll();
+    if (this.ntfyTimer) {
+      clearTimeout(this.ntfyTimer);
+      this.ntfyTimer = null;
+    }
     this.clients.forEach((c) => {
       try { c.end(true); } catch {}
     });
@@ -474,5 +581,6 @@ export class Signaling {
     for (const w of this.nostr.values()) {
       try { w.close(); } catch {}
     }
+    try { this.ntfyWs?.close(); } catch {}
   }
 }

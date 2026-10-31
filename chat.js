@@ -61,7 +61,7 @@
 //     цепочки — транзитом через 'drx'); при живой DR-сессии контент не
 //     в режиме d1 от собеседника не принимается (анти-downgrade);
 //   · сообщения ≤v30 расшифровываются статичными ключами, как раньше.
-import { CONFIG, getWorkerBase } from './config.js?v=32';
+import { CONFIG, getWorkerBase } from './config.js?v=35';
 import {
   b64u,
   newSecret,
@@ -123,8 +123,8 @@ import {
   DR_CONTENT_TYPES,
   drDowngradeBlocked,
   genP256KeyPair,
-} from './crypto.js?v=32';
-import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=32';
+} from './crypto.js?v=35';
+import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=35';
 import {
   getChatDevice,
   getChatDeviceEcdh,
@@ -133,7 +133,7 @@ import {
   verifyChatSig,
   encryptWithVault,
   decryptWithVault,
-} from './identity.js?v=32';
+} from './identity.js?v=35';
 import {
   ChatTransportManager,
   FallbackTransport,
@@ -147,7 +147,7 @@ import {
   aggregateGcallState,
   gcallEventsFromEntries,
   shouldSweepRoom,
-} from './chat-transport.js?v=32';
+} from './chat-transport.js?v=35';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -400,7 +400,7 @@ const fmtSize = (b) =>
 const dayLabel = (ts) => {
   const d = new Date(ts);
   const today = new Date();
-  const yesterday = new Date(Date.now() - 24 * 3600_000);
+  const yesterday = new Date(Date.now() - 24 * 3600000);
   if (d.toDateString() === today.toDateString()) return 'Сегодня';
   if (d.toDateString() === yesterday.toDateString()) return 'Вчера';
   return d.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
@@ -1384,14 +1384,14 @@ async function openRoomBySeed(seedStr, opts = {}) {
     if (cur) cur.syncingInitial = false;
     // v29: периодический прунинг участников звонка и плашка (20 с).
     if (cur) {
-      cur.gcallTimer = setInterval(() => updateGcallBanner().catch(() => {}), 20_000);
+      cur.gcallTimer = setInterval(() => updateGcallBanner().catch(() => {}), 20000);
       updateGcallBanner().catch(() => {});
       renderRoomMenuState();
     }
     status(cur && cur.transportMode === 'fallback' ? 'Резервный канал' : 'На связи');
     // v27: локальная чистка истёкших исчезающих сообщений.
     if (cur) {
-      cur.expireTimer = setInterval(() => pruneExpired().catch(() => {}), 30_000);
+      cur.expireTimer = setInterval(() => pruneExpired().catch(() => {}), 30000);
       pruneExpired().catch(() => {});
     }
     if (epochMissing) {
@@ -2411,6 +2411,7 @@ async function setupTransport() {
     roomId: cur.keys.roomId,
     brokers: CONFIG.MQTT_BROKERS || [],
     relays: CONFIG.NOSTR_RELAYS || [],
+    ntfyBase: CONFIG.NTFY_BASE || '',
     secret,
     onBlob: (blob) => {
       ingest({ blob }).catch(() => {});
@@ -2657,7 +2658,7 @@ function renderFileCardState(meta, card, st) {
 }
 
 // ---------- Голосовые сообщения (v26) ----------
-const VOICE_MAX_MS = 10 * 60_000;
+const VOICE_MAX_MS = 10 * 60000;
 let voiceRec = null; // {mr, chunks, stream, startedAt, timer, discard}
 
 const fmtDur = (sec) => {
@@ -2814,7 +2815,7 @@ async function createInvite() {
     const r = await pairApi('/pair/create', {
       codeHash,
       blob,
-      exp: Date.now() + 15 * 60_000,
+      exp: Date.now() + 15 * 60000,
     });
     if (r.status !== 200 && r.status !== 201) {
       throw new Error('сервер пар недоступен (' + r.status + ') — воркер v25 задеплоен?');
@@ -2992,7 +2993,7 @@ async function redeemCode(code) {
 // PBKDF2(фраза, 'zv-word-v1', 600k). Встреча одноразовая, TTL 24 часа,
 // отзыв — тем же /pair/revoke по admin, что и алиас. Фраза на сервере не
 // бывает: только SHA-256 её нормализованной формы как адрес DO.
-const WORD_TTL_MS_CLIENT = 24 * 3_600_000;
+const WORD_TTL_MS_CLIENT = 24 * 3600000;
 
 const wordParts = (phraseRaw) => {
   const norm = normalizeWordPhrase(phraseRaw);
@@ -3452,7 +3453,7 @@ async function renderMessages() {
       !!a &&
       !!b &&
       a.msg.devPub === b.msg.devPub &&
-      Math.abs(b.msg.ts - a.msg.ts) < 5 * 60_000 &&
+      Math.abs(b.msg.ts - a.msg.ts) < 5 * 60000 &&
       new Date(a.msg.ts).toDateString() === new Date(b.msg.ts).toDateString();
     grp.set(x.hash, { first: !same(bubbleItems[i - 1], x), last: !same(x, bubbleItems[i + 1]) });
   });
@@ -3833,7 +3834,7 @@ function adoptGcall(callId) {
     if (cur && !cur.closed && cur.gcall?.callId === callId) {
       gcallPost('hb', callId).catch(() => {});
     }
-  }, 20_000);
+  }, 20000);
   cur.gcall = { callId, hbTimer };
 }
 function dropGcall() {

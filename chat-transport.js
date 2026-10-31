@@ -4,7 +4,8 @@
 // subscribe(cb), close() }. WorkerTransport ниже — адаптер к функциям,
 // которые предоставляет chat.js (его HTTP/WS-шов исторически живёт там),
 // FallbackTransport — полностью автономный резервный канал: MQTT (только
-// live) + Nostr kind 1 (хранимая лента). Fallback не знает ни ключей комнат,
+// live) + Nostr kind 1 (хранимая лента) + ntfy (только live, v35). Fallback
+// не знает ни ключей комнат,
 // ни plaintext: на входе и выходе только тот же base64-шифротекст blob,
 // который ходит в Worker.
 //
@@ -12,8 +13,8 @@
 // об уведомлениях, реестр увиденных устройств, менеджер каналов) покрыты
 // Node-тестами test-v28.mjs: chat.js при импорте трогает DOM и в тестах не
 // поднимается.
-import { b64u, sha256hex } from './crypto.js?v=32';
-import { schnorr } from './vendor/secp256k1.js?v=32';
+import { b64u, sha256hex } from './crypto.js?v=35';
+import { schnorr } from './vendor/secp256k1.js?v=35';
 
 const te = new TextEncoder();
 export const bytesToHex = (bytes) =>
@@ -35,6 +36,37 @@ export async function chatRoomHash(roomId) {
 
 export async function mqttTopicForRoom(roomId) {
   return 'zvchat1/' + (await chatRoomHash(roomId));
+}
+
+// ---------- v35: ntfy (третий канал fallback) ----------
+// Отдельный префикс 'zvchat1n-', чтобы топики чата в ntfy не пересекались
+// ни с MQTT ('zvchat1/'), ни с сигналингом звонков ('zv1-'). Хэш — тот же
+// SHA-256(roomId), что и у остальных резервных каналов.
+export const NTFY_CHAT_TOPIC_PREFIX = 'zvchat1n-';
+
+export async function ntfyTopicForRoom(roomId) {
+  return NTFY_CHAT_TOPIC_PREFIX + (await chatRoomHash(roomId));
+}
+
+// URL подписки ntfy: WebSocket + since (unix-время, окно 30 с) — публичный
+// сервер кэширует сообщения 12 часов, и без since каждое переподключение
+// получало бы весь кэш. Значение пересчитывается на каждое подключение.
+export function ntfySubscribeUrl(base, topic, nowSec = Math.floor(Date.now() / 1000)) {
+  const b = String(base || '').replace(/\/$/, '').replace(/^http/, 'ws');
+  return b + '/' + topic + '/ws?since=' + Math.max(0, Math.floor(nowSec) - 30);
+}
+
+// Кадр ntfy по WebSocket — JSON {id, time, event, topic, message}. Нужны
+// только кадры event === 'message' со строкой message (наш blob);
+// служебные open/keepalive — null.
+export function parseNtfyFrame(data) {
+  try {
+    const j = typeof data === 'string' ? JSON.parse(data) : data;
+    if (!j || typeof j !== 'object' || j.event !== 'message' || typeof j.message !== 'string') return null;
+    return { id: j.id || '', time: j.time || 0, message: j.message };
+  } catch {
+    return null;
+  }
 }
 
 export const NOSTR_CHAT_KIND = 1;
@@ -250,7 +282,7 @@ export const RECEIPT_LABELS = {
 // Участник без heartbeat дольше GCALL_HB_TIMEOUT_MS считается вышедшим;
 // когда множество участников пустеет, звонок завершён (явным 'end' или
 // автоматически — end при этом дописывает любой клиент, заметивший пустоту).
-export const GCALL_HB_TIMEOUT_MS = 60_000;
+export const GCALL_HB_TIMEOUT_MS = 60000;
 
 // Извлечь события звонка из сохранённых записей ленты (entry.msg).
 export function gcallEventsFromEntries(items) {
@@ -370,7 +402,7 @@ export function aggregateGcallState(events, now = Date.now()) {
 // ---------- v29: автоудаление неактивных чатов (локальный свип) ----------
 // Срок — цифра владельца: 30 дней без активности. Активность комнаты —
 // последнее сообщение любого типа или момент создания записи.
-export const CHAT_INACTIVE_MS = 30 * 24 * 3600_000;
+export const CHAT_INACTIVE_MS = 30 * 24 * 3600000;
 
 export function roomLastActivityTs(rec, items) {
   let t = rec?.createdAt || 0;
@@ -508,17 +540,19 @@ export class WorkerTransport {
   }
 }
 
-// ---------- Резервный канал: MQTT live + Nostr store ----------
+// ---------- Резервный канал: MQTT live + Nostr store + ntfy live ----------
 export class FallbackTransport {
   constructor({
     roomId,
     brokers = [],
     relays = [],
     secret,
+    ntfyBase = '',
     onBlob,
     onStatus,
     mqttConnect,
     webSocketFactory,
+    fetchFn,
     historyTimeoutMs = 1500,
   } = {}) {
     this.kind = 'fallback';
@@ -526,13 +560,19 @@ export class FallbackTransport {
     this.brokers = brokers;
     this.relays = relays.slice(0, 3);
     this.secret = secret;
+    this.ntfyBase = String(ntfyBase || '').replace(/\/$/, '');
     this.onBlob = onBlob || (() => {});
     this.onStatus = onStatus || (() => {});
     this.mqttConnect = mqttConnect || ((url, opts) => globalThis.mqtt?.connect(url, opts));
     this.webSocketFactory = webSocketFactory || ((url) => new WebSocket(url));
+    this.fetchFn = fetchFn || ((url, opts) => globalThis.fetch(url, opts));
     this.historyTimeoutMs = historyTimeoutMs;
     this.roomHash = null;
     this.topic = null;
+    this.ntfyTopic = null;
+    this.ntfyWs = null;
+    this.ntfyTimer = null;
+    this.ntfySeen = new Set(); // id сообщений ntfy (дедуп реплеев кэша)
     this.pubkey = null;
     this.mqttClients = [];
     this.sockets = new Map(); // url -> ws
@@ -549,6 +589,10 @@ export class FallbackTransport {
     if (this.secret) this.pubkey = await nostrPublicKeyHex(this.secret);
     for (const b of this.brokers) this._connectMqtt(b);
     for (const url of this.relays) this._connectRelay(url);
+    if (this.ntfyBase) {
+      this.ntfyTopic = await ntfyTopicForRoom(this.roomId);
+      this._connectNtfy();
+    }
     return this;
   }
 
@@ -627,6 +671,48 @@ export class FallbackTransport {
     ws.onerror = () => {};
   }
 
+  // v35: подписка ntfy (только live, как MQTT; хранимая лента — Nostr).
+  // Дедуп: публичный сервер при переподключении может отдать то же
+  // сообщение ещё раз (кэш 12 ч минус окно since) — отсекаем по id
+  // сообщения ntfy; глобальный дедуп по хэшу blob по-прежнему делает
+  // chat.js на ingest.
+  _connectNtfy() {
+    if (this.closed || !this.ntfyBase || !this.ntfyTopic) return;
+    let ws;
+    try {
+      ws = this.webSocketFactory(ntfySubscribeUrl(this.ntfyBase, this.ntfyTopic));
+    } catch {
+      return;
+    }
+    if (!ws) return;
+    this.ntfyWs = ws;
+    ws.onopen = () => {
+      if (this.closed) return;
+      this.onStatus({ ntfy: true });
+    };
+    ws.onmessage = (e) => {
+      if (this.closed) return;
+      const f = parseNtfyFrame(e.data);
+      if (!f) return;
+      const dedupKey = f.id || 'b:' + f.message;
+      if (this.ntfySeen.has(dedupKey)) return;
+      this.ntfySeen.add(dedupKey);
+      if (this.ntfySeen.size > 2000) {
+        // Грубая чистка: сбрасываем старейшую тысячу ключей (Set хранит
+        // порядок вставки), свежая половина остаётся.
+        const it = this.ntfySeen.values();
+        for (let i = 0; i < 1000; i++) this.ntfySeen.delete(it.next().value);
+      }
+      this.onBlob(f.message, { via: 'ntfy', ts: f.time ? f.time * 1000 : Date.now() });
+    };
+    ws.onclose = () => {
+      if (this.ntfyWs === ws) this.ntfyWs = null;
+      if (this.closed || !this.started) return;
+      this.ntfyTimer = setTimeout(() => this._connectNtfy(), 4000);
+    };
+    ws.onerror = () => {};
+  }
+
   async publish(blob) {
     return this.send(blob);
   }
@@ -656,12 +742,25 @@ export class FallbackTransport {
         }
       }
     }
-    if (!mqttSent && !nostrSent) throw new Error('резервный канал: нет живых брокеров/реле');
-    return { via: 'fallback', mqttSent, nostrSent, pendingWorkerSync: true };
+    let ntfySent = 0;
+    if (this.ntfyBase && this.ntfyTopic) {
+      try {
+        // Публикация — POST, тело = тот же blob байт-в-байт, что в MQTT.
+        // Троттлинг публичного ntfy (429 по IP) просто обнуляет ntfySent:
+        // сообщение в этот момент несут MQTT/Nostr.
+        const r = await this.fetchFn(this.ntfyBase + '/' + this.ntfyTopic, {
+          method: 'POST',
+          body: payload,
+        });
+        if (r && (r.ok === undefined || r.ok)) ntfySent = 1;
+      } catch {}
+    }
+    if (!mqttSent && !nostrSent && !ntfySent) throw new Error('резервный канал: нет живых брокеров/реле');
+    return { via: 'fallback', mqttSent, nostrSent, ntfySent, pendingWorkerSync: true };
   }
 
   // Хранимая лента Nostr: REQ с since по открытым реле, ждём EOSE или
-  // таймаут. MQTT истории не имеет — он только live.
+  // таймаут. MQTT и ntfy истории здесь не дают — они только live.
   async fetchSince(cursorSec = 0) {
     if (!this.started) await this.start();
     const open = [...this.sockets.values()].filter((w) => w?.readyState === 1);
@@ -705,6 +804,14 @@ export class FallbackTransport {
 
   async close() {
     this.closed = true;
+    if (this.ntfyTimer) {
+      clearTimeout(this.ntfyTimer);
+      this.ntfyTimer = null;
+    }
+    try {
+      this.ntfyWs?.close();
+    } catch {}
+    this.ntfyWs = null;
     for (const c of this.mqttClients) {
       try {
         c.end?.(true);

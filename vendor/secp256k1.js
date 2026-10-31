@@ -246,11 +246,6 @@ const lift_x = (x) => {
  * ```
  */
 class Point {
-    static BASE;
-    static ZERO;
-    X;
-    Y;
-    Z;
     constructor(X, Y, Z) {
         this.X = FpIsValid(X);
         this.Y = FpIsValidNot0(Y); // Y can't be 0 in Projective
@@ -549,9 +544,6 @@ const assertSigLength = (sig, format = SIG_COMPACT) => {
  * ```
  */
 class Signature {
-    r;
-    s;
-    recovery;
     constructor(r, s, recovery) {
         this.r = FnIsValidNot0(r); // 1 <= r < N
         this.s = FnIsValidNot0(s); // 1 <= s < N

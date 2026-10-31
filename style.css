@@ -3923,3 +3923,278 @@ label.disabled select {
     max-width: 84%;
   }
 }
+
+/* ==========================================================================
+   v34: Anti-Overheat Engine, In-Call Touch Lock, Camera Flip & Android PWA
+   ========================================================================== */
+
+/* 1. Android / Mobile PWA Ergonomics & App-Like Behavior */
+html,
+body {
+  overscroll-behavior-y: none;
+  -webkit-touch-callout: none;
+}
+
+button,
+.btn,
+.round,
+.pill,
+.tg-tab,
+.tg-chat-item,
+.chat-menu-item {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 2. Anti-Overheat GPU Optimization:
+   Отключаем размытые орбы (.page-bg) во время звонка или в Эко-режиме,
+   а также убираем дорогой backdrop-filter поверх живого 30fps видеопотока на мобильных! */
+body[data-screen="call"] .page-bg,
+body.eco-mode .page-bg {
+  display: none !important;
+}
+
+body.eco-mode .pill,
+body.eco-mode .controls,
+body.eco-mode .round,
+body.eco-mode .panel,
+body.eco-mode .quick-audio-pop,
+body.eco-mode .conn,
+body.eco-mode .hud-tag,
+body.eco-mode .meter-card,
+body.eco-mode .side {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+body.eco-mode .controls {
+  background: rgba(14, 17, 28, 0.94);
+}
+body.eco-mode .pill {
+  background: rgba(12, 15, 24, 0.92);
+}
+
+@media (max-width: 919px) {
+  #call .pill,
+  #call .controls,
+  #call .round,
+  #call .panel,
+  #call .quick-audio-pop,
+  #call .conn {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  #call .controls {
+    background: rgba(14, 17, 28, 0.94);
+  }
+  #call .pill {
+    background: rgba(12, 15, 24, 0.92);
+  }
+}
+
+/* 3. Правильное зеркалирование камеры:
+   Фронтальная камера зеркалится (scaleX(-1)), задняя камера (.rear-cam) НЕ зеркалится! */
+.preview video.rear-cam,
+#local.rear-cam {
+  transform: none !important;
+}
+
+#local {
+  cursor: pointer;
+}
+
+/* 4. Оверлей блокировки экрана звонка (Pocket / Ear Lock) */
+.call-lock-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(5, 7, 12, 0.86);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  touch-action: none;
+  user-select: none;
+  transition: background 0.2s ease;
+}
+
+/* OLED-режим полного погашения пикселей (экономия экрана у уха / в кармане) */
+.call-lock-overlay.oled-dim {
+  background: #000000;
+}
+.call-lock-overlay.oled-dim .call-lock-card {
+  background: rgba(10, 12, 18, 0.45);
+  border-color: rgba(255, 255, 255, 0.06);
+  opacity: 0.42;
+}
+
+.call-lock-card {
+  max-width: 340px;
+  width: 100%;
+  background: rgba(18, 24, 34, 0.96);
+  border: 1px solid rgba(100, 181, 239, 0.28);
+  border-radius: 24px;
+  padding: 26px 22px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85);
+}
+
+.call-lock-icon {
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: rgba(82, 136, 193, 0.18);
+  color: var(--tg-accent-bright, #64b5ef);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 2px;
+}
+
+.call-lock-card b {
+  font-size: 16.5px;
+  color: var(--text);
+}
+
+.call-lock-card p {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.45;
+  margin: 2px 0 8px;
+}
+
+.call-lock-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.call-unlock-btn {
+  min-height: 50px;
+  border-radius: 16px;
+  font-size: 14px;
+  width: 100%;
+}
+
+/* 5. Док звонка на Android / телефонах (10 кнопок = аккуратная сетка 5×2) */
+@media (max-width: 780px) {
+  .controls {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 5px;
+    padding: 7px;
+  }
+  .controls .round {
+    height: 52px;
+    border-radius: 13px;
+  }
+  .controls .lbl {
+    font-size: 9px;
+  }
+  #ecoLabel,
+  #lockTopLabel {
+    display: none;
+  }
+  #btnEcoToggle,
+  #btnLockTop {
+    padding: 7px 9px;
+  }
+}
+
+/* 6. PWA Install Banner & Button on Home Screen */
+.tg-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tg-pwa-top-btn {
+  border-radius: 18px;
+  padding: 5px 11px;
+  font-size: 12px;
+  min-height: 32px;
+  background: rgba(82, 136, 193, 0.22) !important;
+  border: 1px solid rgba(100, 181, 239, 0.4) !important;
+  color: var(--tg-accent-bright, #64b5ef) !important;
+}
+.tg-pwa-top-btn:hover {
+  background: rgba(82, 136, 193, 0.35) !important;
+}
+
+.tg-pwa-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  background: linear-gradient(90deg, rgba(43, 82, 120, 0.48), rgba(23, 33, 43, 0.92));
+  border-bottom: 1px solid var(--tg-border);
+  flex: 0 0 auto;
+}
+
+.tg-pwa-banner-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tg-pwa-banner-ic {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgba(100, 181, 239, 0.18);
+  color: var(--tg-accent-bright, #64b5ef);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 34px;
+}
+
+.tg-pwa-banner-info b {
+  display: block;
+  font-size: 13px;
+  color: var(--tg-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tg-pwa-banner-info span {
+  display: block;
+  font-size: 11.5px;
+  color: var(--tg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tg-pwa-banner-acts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.pwa-steps {
+  margin: 8px 0 4px;
+  padding-left: 20px;
+  font-size: 13.5px;
+  color: var(--text);
+  line-height: 1.55;
+}
+.pwa-steps li {
+  margin-bottom: 6px;
+}
+
+/* В уже установленном PWA скрываем кнопки установки */
+@media (display-mode: standalone) {
+  #btnInstallPwaTop,
+  #pwaInstallBanner {
+    display: none !important;
+  }
+}

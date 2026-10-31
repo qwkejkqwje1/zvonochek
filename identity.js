@@ -3,9 +3,9 @@
 // IndexedDB) удостоверяет ключи устройств; секрет личной ссылки зашифрован
 // vault-ключом устройства. Личная ссылка: #k=<секрет>&d=<fp>, где fp — первые
 // 32 hex SHA-256 от X9.62-представления master-публичного ключа.
-import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=32';
-import { kvGet, kvPut } from './store.js?v=32';
-import { utils as secpUtils } from './vendor/secp256k1.js?v=32';
+import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=35';
+import { kvGet, kvPut } from './store.js?v=35';
+import { utils as secpUtils } from './vendor/secp256k1.js?v=35';
 
 const te = new TextEncoder();
 let cached = null; // {secret, masterPub, masterPriv, fp, devicePub, devicePriv, cert, label}
@@ -64,7 +64,7 @@ async function ensureDevice(masterPriv, label) {
   }
   const pair = await genP256KeyPair();
   const devicePub = b64u.enc(await crypto.subtle.exportKey('raw', pair.publicKey));
-  const exp = Date.now() + 10 * 365 * 24 * 3600_000; // сертификат устройства на 10 лет
+  const exp = Date.now() + 10 * 365 * 24 * 3600000; // сертификат устройства на 10 лет
   const cert = await signDeviceCert(masterPriv, devicePub, label, exp);
   dev = {
     devicePub,

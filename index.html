@@ -8,6 +8,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#17212b">
 <meta name="description" content="ZVONochek — защищённые аудио- и видеозвонки по ссылке. E2EE, без регистрации, прямо в браузере.">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="ZVONochek">
@@ -17,7 +18,7 @@
 <link rel="icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=32">
+<link rel="stylesheet" href="style.css?v=35">
 </head>
 <body>
 
@@ -82,6 +83,10 @@
 <symbol id="i-arrow-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
   <symbol id="i-loader" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9" /></symbol>
   <symbol id="i-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10v4M7 7v10M11 4v16M15 7v10M19 10v4"/></symbol>
+  <symbol id="i-flip-cam" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3l-2-2H9L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><path d="M15 13a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/><path d="M17 11l1.5-1.5L20 11"/></symbol>
+  <symbol id="i-smartphone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2.5"/><path d="M12 18h.01"/><path d="M12 6v6m-2.5-2l2.5 2.5 2.5-2.5"/></symbol>
+  <symbol id="i-leaf" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.4 19 2c1 2 2 4.2 2 8 0 5.5-4.8 10-10 10Z"/><path d="M2 21c0-3 1.8-5.4 5.1-6C9.5 14.5 12 13 13 12"/></symbol>
+  <symbol id="i-unlock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 7.4-2.1"/><circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/></symbol>
 </svg>
 
 <div class="page-bg" aria-hidden="true">
@@ -103,9 +108,25 @@
           </div>
         </div>
         <div class="tg-header-actions">
+          <button id="btnInstallPwaTop" class="btn small primary tg-pwa-top-btn" title="Установить ярлык ZVONochek на рабочий стол как приложение"><svg class="ic"><use href="#i-smartphone"/></svg><span>В приложение</span></button>
           <button id="btnHomeSettings" class="btn small ghost tg-icon-btn" title="Настройки звука, сети и сервера" aria-label="Настройки"><svg class="ic"><use href="#i-settings"/></svg></button>
         </div>
       </header>
+
+      <!-- v34: Баннер установки приложения (PWA) на рабочий стол -->
+      <div id="pwaInstallBanner" class="tg-pwa-banner hidden">
+        <div class="tg-pwa-banner-info">
+          <span class="tg-pwa-banner-ic"><svg class="ic"><use href="#i-smartphone"/></svg></span>
+          <div>
+            <b>Установите ZVONochek на главный экран</b>
+            <span>Полноэкранный режим без адресной строки и быстрый запуск</span>
+          </div>
+        </div>
+        <div class="tg-pwa-banner-acts">
+          <button id="btnInstallPwaBanner" class="btn small primary"><span>Установить</span></button>
+          <button id="btnDismissPwaBanner" class="btn small ghost tg-icon-btn" title="Скрыть" aria-label="Скрыть"><svg class="ic"><use href="#i-close"/></svg></button>
+        </div>
+      </div>
 
       <!-- Переключатель разделов в стиле Telegram -->
       <nav class="tg-tabs" aria-label="Разделы приложения">
@@ -550,6 +571,7 @@
         <div class="preview-ctrls">
           <button id="pMic" class="round" title="Микрофон" aria-label="Микрофон"><svg class="ic"><use href="#i-mic"/></svg></button>
           <button id="pCam" class="round" title="Камера" aria-label="Камера"><svg class="ic"><use href="#i-cam"/></svg></button>
+          <button id="pFlipCam" class="round" title="Переключить фронтальную / заднюю камеру" aria-label="Сменить камеру"><svg class="ic"><use href="#i-flip-cam"/></svg></button>
           <button id="pTestMic" class="btn small pill-btn" title="Услышать свой голос"><svg class="ic"><use href="#i-volume"/></svg><span class="lbl">Проверить микрофон</span></button>
           <button id="pOpenSettings" class="round" title="Настройки звука и связи" aria-label="Настройки"><svg class="ic"><use href="#i-settings"/></svg></button>
         </div>
@@ -666,6 +688,8 @@
       <span id="bridgeBadge" class="pill bridge-pill hidden" title="Голос передаётся через зашифрованный канал сигналинга (без TURN/UDP)"><svg class="ic"><use href="#i-shield"/></svg><span>Мост (без TURN)</span></span>
     </div>
     <div class="tb-right">
+      <button id="btnEcoToggle" class="pill pill-btn" title="Эко-режим: защита телефона от перегрева и экономия батареи" aria-label="Эко-режим"><svg class="ic"><use href="#i-leaf"/></svg><span id="ecoLabel">Эко</span></button>
+      <button id="btnLockTop" class="pill pill-btn" title="Заблокировать экран звонка от случайных нажатий" aria-label="Заблокировать экран"><svg class="ic"><use href="#i-lock"/></svg><span id="lockTopLabel">Блок</span></button>
       <button id="btnQuickAudio" class="pill pill-btn" title="Быстрая настройка громкости (0–200%)" aria-label="Быстрая настройка громкости"><svg class="ic"><use href="#i-volume"/></svg><span id="quickVolLabel">100%</span></button>
       <span id="quality" class="pill hidden" aria-label="Качество связи"><svg class="ic"><use href="#i-wifi"/></svg><span id="qualityText"></span></span>
       <button id="safety" class="pill pill-btn hidden" title="Код безопасности E2EE" aria-label="Код безопасности E2EE"><svg class="ic"><use href="#i-shield"/></svg><span id="safetyPill"></span></button>
@@ -693,6 +717,7 @@
       </div>
     </div>
     <div class="qa-toggles">
+      <label class="check"><input type="checkbox" id="qaEcoMode"> ❄️ Эко-режим (против нагрева телефона)</label>
       <label class="check"><input type="checkbox" id="qaBoost"> Выравнивание тихого голоса</label>
       <label class="check"><input type="checkbox" id="qaBridgeMode"> Принудительный мост без TURN</label>
     </div>
@@ -704,12 +729,28 @@
     <button id="cDeaf" class="round" title="Оглушить звук" aria-label="Оглушить звук"><svg class="ic"><use href="#i-headphones"/></svg><span class="lbl">Звук</span></button>
     <button id="cPtt" class="ptt-btn hidden" title="Удерживайте для передачи голоса (или Пробел)"><svg class="ic"><use href="#i-radio"/></svg><span id="pttLabel">Держите для речи</span></button>
     <button id="cCam" class="round" title="Камера" aria-label="Камера"><svg class="ic"><use href="#i-cam"/></svg><span class="lbl">Камера</span></button>
-    <button id="cScreen" class="round" title="Демонстрация экрана" aria-label="Демонстрация экрана"><svg class="ic"><use href="#i-screen"/></svg><span class="lbl">Экран</span></button>
+    <button id="cFlipCam" class="round" title="Повернуть камеру (фронтальная / задняя)" aria-label="Сменить камеру"><svg class="ic"><use href="#i-flip-cam"/></svg><span class="lbl">Поворот</span></button>
+    <button id="cLock" class="round" title="Блокировка экрана от случайных нажатий (карманный режим)" aria-label="Блокировка"><svg class="ic"><use href="#i-lock"/></svg><span class="lbl">Блок</span></button>
     <button id="cChat" class="round" title="Чат и файлы" aria-label="Чат"><svg class="ic"><use href="#i-chat"/></svg><span class="lbl">Чат</span><span id="unread" class="badge hidden">0</span></button>
+    <button id="cScreen" class="round" title="Демонстрация экрана" aria-label="Демонстрация экрана"><svg class="ic"><use href="#i-screen"/></svg><span class="lbl">Экран</span></button>
     <button id="cInvite" class="round" title="Ссылка и QR-код" aria-label="Приглашение"><svg class="ic"><use href="#i-link"/></svg><span class="lbl">Ссылка</span></button>
     <button id="cSettings" class="round" title="Настройки" aria-label="Настройки"><svg class="ic"><use href="#i-settings"/></svg><span class="lbl">Настройки</span></button>
     <button id="cHang" class="round red" title="Завершить звонок" aria-label="Завершить звонок"><svg class="ic"><use href="#i-hangup"/></svg><span class="lbl">Выйти</span></button>
   </nav>
+
+  <!-- v34: Оверлей блокировки экрана в звонке (защита от случайных нажатий у уха / в кармане + OLED-затемнение против нагрева) -->
+  <div id="callLockOverlay" class="call-lock-overlay hidden" role="dialog" aria-label="Экран звонка заблокирован">
+    <div class="call-lock-card">
+      <div class="call-lock-icon"><svg class="ic lg"><use href="#i-lock"/></svg></div>
+      <b id="callLockPeer">Звонок защищён от нажатий</b>
+      <span id="callLockTimer" class="mono">00:00</span>
+      <p>Все кнопки отключены, экран приглушён для экономии заряда и снижения нагрева телефона.</p>
+      <div class="call-lock-actions">
+        <button id="btnCallDimToggle" class="btn small ghost"><span>🌙 Погасить экран (OLED)</span></button>
+        <button id="btnUnlockCall" class="btn primary call-unlock-btn"><svg class="ic"><use href="#i-unlock"/></svg><span>Нажмите дважды для разблокировки</span></button>
+      </div>
+    </div>
+  </div>
 
   <aside id="chat" class="panel hidden">
     <div class="panel-head">
@@ -752,6 +793,16 @@
     </label>
 
     <label>Камера<select id="sCam"></select></label>
+    <label>Качество видео<select id="sVideoQ">
+      <option value="1080">1080p — стандарт</option>
+      <option value="1440">2K (1440p) — максимум</option>
+      <option value="720">720p — экономно</option>
+    </select></label>
+    <div class="row wrap">
+      <button type="button" id="sFlipCamBtn" class="btn small"><svg class="ic"><use href="#i-flip-cam"/></svg><span>Повернуть камеру (фронт / тыл)</span></button>
+    </div>
+    <label class="check"><input type="checkbox" id="sEcoMode"> ❄️ Эко-режим (защита телефона от перегрева в звонке)</label>
+    <p class="sec-hint">Эко-режим включается вручную и снижает нагрев смартфона: ограничивает видео до 720p при 24 к/с и отключает тяжёлое размытие фона. По умолчанию выключен — звонок стартует в 1080p, а при слабой сети качество само шагнёт вниз.</p>
   </div>
 
   <div class="settings-sec">
@@ -841,6 +892,31 @@
   <button id="diagCopy" class="btn primary full-w"><svg class="ic"><use href="#i-copy"/></svg><span>Скопировать отчёт</span></button>
 </template>
 
+<template id="tplPwaInstall">
+  <h3><svg class="ic"><use href="#i-smartphone"/></svg> Установка ZVONochek на рабочий стол</h3>
+  <p>Сохраните ZVONochek на главный экран телефона — он будет открываться на весь экран как полноценное нативное приложение, без адресной строки браузера.</p>
+  <div id="pwaNativeBox" class="settings-sec hidden">
+    <h4>Быстрая установка в 1 клик</h4>
+    <button id="btnPwaModalInstall" class="btn primary full-w"><svg class="ic"><use href="#i-smartphone"/></svg><span>Установить приложение сейчас</span></button>
+  </div>
+  <div class="settings-sec">
+    <h4>Как добавить на Android (Chrome / Yandex / Samsung / Firefox)</h4>
+    <ol class="pwa-steps">
+      <li>Нажмите на меню браузера <b>⋮</b> (три точки в правом верхнем или нижнем углу).</li>
+      <li>Выберите пункт <b>«Установить приложение»</b> или <b>«Добавить на главный экран»</b>.</li>
+      <li>Подтвердите нажатием <b>«Установить»</b> — иконка ZVONochek появится среди ваших приложений!</li>
+    </ol>
+  </div>
+  <div class="settings-sec">
+    <h4>Как добавить на iPhone / iPad (Safari)</h4>
+    <ol class="pwa-steps">
+      <li>Нажмите кнопку <b>«Поделиться»</b> (квадрат со стрелкой вверх внизу экрана).</li>
+      <li>Прокрутите список вниз и выберите <b>«На экран «Домой»»</b>.</li>
+      <li>Нажмите <b>«Добавить»</b> в правом верхнем углу.</li>
+    </ol>
+  </div>
+</template>
+
 <template id="tplInvite">
   <h3><svg class="ic"><use href="#i-link"/></svg> Пригласить собеседника</h3>
   <p>Отправьте эту ссылку собеседнику. Секретный ключ находится после символа <code>#</code> и никогда не передаётся на сервер.</p>
@@ -850,13 +926,13 @@
 
 <noscript><p style="padding:24px;text-align:center">Для звонков ZVONochek нужен JavaScript.</p></noscript>
 
-<script src="vendor/mqtt.min.js"></script>
-<script src="vendor/qrcode.js"></script>
-<script src="zvdiag.js?v=32"></script>
-<script type="module" src="app.js?v=32"></script>
-<script type="module" src="group.js?v=32"></script>
-<script type="module" src="chat.js?v=32"></script>
-<script type="module" src="backup.js?v=32"></script>
+<script src="vendor/mqtt.min.js?v=35"></script>
+<script src="vendor/qrcode.js?v=35"></script>
+<script src="zvdiag.js?v=35"></script>
+<script type="module" src="app.js?v=35"></script>
+<script type="module" src="group.js?v=35"></script>
+<script type="module" src="chat.js?v=35"></script>
+<script type="module" src="backup.js?v=35"></script>
 <!-- Входящий звонок (коммуникатор) -->
 <div id="incomingCall" class="call-modal hidden" role="dialog" aria-label="Входящий звонок">
   <div class="call-modal-card">
