@@ -1,14 +1,16 @@
 // Сквозной прогон в настоящем Chromium: два независимых профиля (Анна и
 // Борис) общаются через локальный Worker. Проверяются чат (ник, сообщения,
-// ответ, реакция, список комнат) и звонок (соединение, статистика,
-// журнал). Скриншоты — в tests/e2e/shots при SHOTS=1.
+// ответ, реакция, список комнат), звонок (соединение, статистика,
+// журнал) и v38-сценарий «номер» (дозвон по личной ссылке, контакт из
+// журнала, смена номера, стирание данных). Скриншоты — в tests/e2e/shots при SHOTS=1.
 //
 //   npm run worker:dev            # локальный Worker на :8787 (отдельный терминал)
 //   npm run e2e                   # CHROMIUM_PATH=… — свой Chromium, если нужно
 //
 // Переменные: WORKER_URL (по умолчанию http://127.0.0.1:8787), PORT сайта
 // (8765 — этот Origin разрешён воркеру в «npm run worker:dev»),
-// VIEWPORTS (390x844,1440x900), CHROMIUM_PATH, SHOTS=1.
+// VIEWPORTS (390x844,1440x900), CHROMIUM_PATH, SHOTS=1, ONLY=<сценарий>
+// (чат | звонок | номер), DEBUG=1 — консоль страниц в вывод.
 import http from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -48,6 +50,10 @@ async function profile(browser, base, [w, h], label, errors) {
   });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`${label}: ${e.message}`));
+  if (process.env.DEBUG === '1') {
+    page.on('console', (m) => console.log(`  [${label}] ${m.type()}: ${m.text()}`));
+    page.on('response', (r) => r.status() >= 400 && console.log(`  [${label}] HTTP ${r.status()} ${r.request().method()} ${r.url()}`));
+  }
   await page.goto(base);
   await page.evaluate((u) => localStorage.setItem('zvWorkerUrl', u), WORKER);
   await page.reload();
@@ -143,12 +149,106 @@ async function callScenario(browser, base, vp, errors) {
   await A.waitForSelector('#callStats:not(.hidden)');
   await A.waitForTimeout(2200);
   await shot(A, 'call-stats', vp);
+  // v37: голос с RED, подсказка приёма от собеседника и строка «Режим видео»
+  const statsText = () => A.locator('#callStatsBody').innerText();
+  let st = await statsText();
+  assert.match(st, /Opus \+ RED/, 'RED не согласован:\n' + st);
+  assert.match(st, /Режим видео/, 'нет строки «Режим видео»:\n' + st);
+  assert.ok(await until(async () => /собеседнику ≤\d+p/.test(await statsText()), 8000), 'подсказка vcap не дошла:\n' + (await statsText()));
+  // Блокировка экрана у Бориса → Анна ставит своё видео на паузу, разблокировка — снова шлёт
+  await B.evaluate(() => document.querySelector('#cLock').click());
+  assert.ok(await until(async () => /собеседник свернул/.test(await statsText()), 9000), 'пауза видео не сработала:\n' + (await statsText()));
+  await B.evaluate(() => {
+    const b = document.querySelector('#btnUnlockCall');
+    b.click();
+    b.click();
+  });
+  assert.ok(await until(async () => /собеседнику ≤\d+p/.test(await statsText()), 9000), 'видео не вернулось после разблокировки');
   await A.keyboard.press('Escape');
   await A.click('#cHang');
   await A.waitForTimeout(1500);
   // журнал звонков и статистика на вкладке «Звонки»
   assert.ok(await until(() => A.locator('.call-li').count().then((n) => n >= 1), 8000), 'звонок не попал в журнал');
   await shot(A, 'calls-tab', vp);
+  await A.context().close();
+  await B.context().close();
+}
+
+// v38: личный номер → звонок с «обратным номером» → контакт из журнала →
+// «Сменить номер» (старая ссылка отвечает 404) → «Стереть всё».
+async function numberScenario(browser, base, vp, errors) {
+  const mkPersonal = async (p) => {
+    await p.click('[data-home-tab="personal"]');
+    await p.click('#btnCreatePersonal');
+    await p.waitForSelector('#personalMain:not(.hidden)');
+    assert.ok(await until(async () => /доступны/.test((await p.textContent('#personalStatus')) || ''), 15000), 'Inbox не подключился');
+    return p.inputValue('#personalLink');
+  };
+  const A = await profile(browser, base, vp, 'A', errors);
+  const linkA1 = await mkPersonal(A);
+  const B = await profile(browser, base, vp, 'B', errors);
+  await mkPersonal(B);
+  const ring = async (link) => {
+    await B.goto(link);
+    await B.waitForSelector('#prejoin:not(.hidden)');
+    await B.waitForSelector('#callOwnerBox:not(.hidden)');
+    await B.click('#btnCallOwner');
+  };
+  await ring(linkA1);
+  await A.waitForSelector('#incomingCall:not(.hidden)', { timeout: 15000 });
+  await shot(A, 'incoming', vp);
+  await A.click('#btnAccept');
+  const connected = await until(async () => (await isShown(A, '#quality')) && (await isShown(B, '#quality')), 40000);
+  assert.ok(connected, 'звонок по личной ссылке не соединился');
+  await A.waitForTimeout(2500);
+  const inCall = (p) => p.evaluate(() => !document.querySelector('#call').classList.contains('hidden'));
+  await B.click('#cHang');
+  await A.waitForTimeout(1500);
+  if (await inCall(A)) await A.click('#cHang');
+  await A.waitForTimeout(1000);
+  // журнал Анны: у входящего от Бориса есть «Перезвонить», номер — в контакты
+  await A.click('[data-home-tab="calls"]');
+  assert.ok(await until(() => A.locator('#callsList .call-back').count().then((n) => n >= 1), 8000), 'нет кнопки обратного звонка');
+  await A.locator('#callsList .call-li.has-menu').first().click();
+  await A.click('#contactActSave');
+  await A.fill('#contactAddName', 'Борис');
+  await A.click('#contactAddSave');
+  assert.ok(await until(async () => /Борис/.test((await A.textContent('#contactsList')) || ''), 5000), 'контакт не сохранился');
+  await shot(A, 'contacts', vp);
+  // «Сменить номер»: новая ссылка, старая отвечает «не обслуживается»
+  await A.click('[data-home-tab="personal"]');
+  await A.click('#btnChangeNumber');
+  await A.click('#dangerGo');
+  await A.click('#dangerGo');
+  assert.ok(await until(async () => /Готово/.test((await A.textContent('#dangerNote')) || ''), 20000), 'номер не сменился: ' + (await A.textContent('#dangerNote')));
+  const linkA2 = await A.inputValue('#personalLink');
+  assert.notEqual(linkA2, linkA1, 'ссылка не изменилась');
+  assert.ok(await until(async () => /доступны/.test((await A.textContent('#personalStatus')) || ''), 15000), 'новый Inbox не подключился');
+  if (await inCall(B)) await B.click('#cHang');
+  await ring(linkA1);
+  assert.ok(await until(async () => /не обслуживается/.test((await B.textContent('#toast')) || ''), 10000), 'старая ссылка всё ещё звонит');
+  await B.click('#btnBackHome').catch(() => {});
+  await ring(linkA2);
+  await A.waitForSelector('#incomingCall:not(.hidden)', { timeout: 15000 });
+  await A.click('#btnDecline');
+  await A.waitForTimeout(800);
+  // «Стереть всё»: после перезагрузки — ни номера, ни контактов
+  await A.click('[data-home-tab="personal"]');
+  await A.click('#btnWipeAll');
+  await A.click('#dangerGo');
+  await A.click('#dangerGo');
+  const wiped = await until(
+    () => A.evaluate(() => !!window.__zvAppBooted && localStorage.getItem('zvWorkerUrl') === null).catch(() => false),
+    20000
+  );
+  assert.ok(wiped, 'localStorage не очищен: ' + (await A.textContent('#dangerNote').catch(() => '')));
+  await A.evaluate((u) => localStorage.setItem('zvWorkerUrl', u), WORKER);
+  await A.reload();
+  await A.waitForFunction(() => window.__zvAppBooted);
+  await A.click('[data-home-tab="personal"]');
+  assert.ok(await isShown(A, '#personalNone'), 'личность не стёрта');
+  await A.click('[data-home-tab="calls"]');
+  assert.equal(await A.locator('#contactsList .contact-li').count(), 0, 'контакты не стёрты');
   await A.context().close();
   await B.context().close();
 }
@@ -168,7 +268,10 @@ const browser = await chromium.launch({
 });
 let failed = 0;
 for (const vp of VIEWPORTS) {
-  for (const [name, fn] of [['чат', chatScenario], ['звонок', callScenario]]) {
+  let list = [['чат', chatScenario], ['звонок', callScenario]];
+  if (vp === VIEWPORTS[0]) list.push(['номер', numberScenario]);
+  if (process.env.ONLY) list = list.filter(([n]) => n === process.env.ONLY);
+  for (const [name, fn] of list) {
     const errors = [];
     const t0 = Date.now();
     try {

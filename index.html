@@ -6,7 +6,7 @@
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#17212b">
+<meta name="theme-color" content="#121216">
 <meta name="description" content="ZVONochek — личный мессенджер для своих: зашифрованные чаты и звонки в браузере, без регистрации и номера телефона.">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -18,7 +18,8 @@
 <link rel="icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=36">
+<link rel="stylesheet" href="style.css?v=38">
+<script src="skin.js?v=38"></script>
 </head>
 <body>
 
@@ -32,6 +33,28 @@
       <stop offset="0" stop-color="#6cc3ff"/><stop offset=".55" stop-color="#3390ec"/><stop offset="1" stop-color="#2463c8"/>
     </linearGradient>
   </defs>
+  <defs>
+    <linearGradient id="zvGrad" x1="8" y1="0" x2="40" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff5257"/><stop offset=".5" stop-color="#e3262c"/><stop offset="1" stop-color="#9e1217"/>
+    </linearGradient>
+    <filter id="zvGrain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="1.15" numOctaves="2" seed="7" result="t"/>
+      <feColorMatrix in="t" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1.1 -0.42" result="m"/>
+      <feComposite in="m" in2="SourceGraphic" operator="in"/>
+    </filter>
+  </defs>
+  <symbol id="i-logo-zvon" viewBox="0 0 48 48">
+    <rect x="1" y="1" width="46" height="46" rx="13" fill="url(#zvGrad)"/>
+    <rect x="1" y="1" width="46" height="46" rx="13" fill="#000" filter="url(#zvGrain)" opacity=".4"/>
+    <g transform="rotate(-12 24 25)">
+      <path d="M24 10.2c-5.4 0-9.3 4.3-9.3 9.7v5.5l-3 4.5h24.6l-3-4.5v-5.5c0-5.4-3.9-9.7-9.3-9.7Z" fill="#fff"/>
+      <circle cx="24" cy="9.5" r="1.8" fill="#fff"/>
+      <circle cx="24" cy="33.2" r="2.9" fill="#fff"/>
+    </g>
+    <g fill="none" stroke="#fff" stroke-width="2.3" stroke-linecap="round">
+      <path d="M36.4 14.6a10.5 10.5 0 0 1 2.7 7.2"/><path d="M11.4 14.6a10.5 10.5 0 0 0-2.7 7.2"/>
+    </g>
+  </symbol>
   <symbol id="i-logo" viewBox="0 0 48 48">
     <rect x="1" y="1" width="46" height="46" rx="14" fill="url(#brandGrad)"/>
     <path d="M24 11c-5 0-8.8 3.9-8.8 8.8v5.4l-2.5 4.3h22.6l-2.5-4.3v-5.4c0-4.9-3.8-8.8-8.8-8.8Z" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
@@ -98,6 +121,7 @@
   <symbol id="i-chevron-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></symbol>
   <symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 3.5V8h4.5"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 20.5V16h-4.5"/></symbol>
   <symbol id="i-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.25 4.1 1 5.85L12 16.9l-5.25 2.75 1-5.85L3.5 9.7l5.9-.9z"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12.5A1.5 1.5 0 0 0 8.5 21h7a1.5 1.5 0 0 0 1.5-1.5L18 7"/><path d="M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7"/></symbol>
   <symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5h6l-1 5.5 3.5 3.5V15h-11v-2.5L10 9z"/><path d="M12 15v6"/></symbol>
@@ -109,10 +133,10 @@
     <aside class="side" aria-label="ZVONochek">
       <header class="appbar">
         <div class="brand">
-          <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use href="#i-logo"/></svg>
+          <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use class="logo-classic" href="#i-logo"/><use class="logo-zvon" href="#i-logo-zvon"/></svg>
           <div class="brand-text">
-            <b class="brand-name">ZVONochek</b>
-            <span class="brand-sub"><svg class="ic"><use href="#i-lock"/></svg> сквозное шифрование · <span data-ver>v36</span></span>
+            <b class="brand-name" aria-label="ZVONochek"><span class="bn-zvon">ZVON</span><span class="bn-ochek">ochek</span></b>
+            <span class="brand-sub"><svg class="ic"><use href="#i-lock"/></svg> сквозное шифрование · <span data-ver>v38</span></span>
           </div>
         </div>
         <div class="appbar-actions">
@@ -190,13 +214,36 @@
             <p class="hint">Аудио и видео 1:1 или группой до 6 человек. Ключ — только в ссылке после #, сервер его не видит.</p>
             <p id="homeMsg" class="note"></p>
           </div>
-          <div id="callsDash" class="calls-dash hidden" aria-label="Статистика звонков"></div>
+          <div id="pushHint" class="banner push-hint hidden">
+            <span class="banner-ic"><svg class="ic"><use href="#i-bell"/></svg></span>
+            <div class="banner-text">
+              <b>Звонки при закрытом приложении</b>
+              <span>Разрешите уведомления — иначе звонок дойдёт, только пока ZVONochek открыт</span>
+            </div>
+            <button id="btnPushHint" class="btn small primary"><span>Включить</span></button>
+          </div>
           <div id="missedBox" class="list-block hidden">
             <div class="list-title"><span>Пропущенные</span><button id="btnMissedClear" class="link-btn"><span>Очистить</span></button></div>
             <ul id="missedList" class="call-list"></ul>
           </div>
+          <div id="contactsBox" class="list-block">
+            <div class="list-title"><span>Контакты</span><button id="btnContactAdd" class="link-btn"><span>Добавить</span></button></div>
+            <div id="contactAddBox" class="card contact-add hidden">
+              <label class="sr-only" for="contactAddName">Имя контакта</label>
+              <input id="contactAddName" maxlength="40" autocomplete="off" placeholder="Имя (видно только вам)">
+              <label class="sr-only" for="contactAddLink">Личная ссылка контакта</label>
+              <input id="contactAddLink" autocomplete="off" spellcheck="false" placeholder="Его личная ссылка («Мой номер» → Копировать)">
+              <div class="btn-row">
+                <button id="contactAddSave" class="btn small primary"><span>Сохранить</span></button>
+                <button id="contactAddCancel" class="btn small ghost"><span>Отмена</span></button>
+              </div>
+              <p id="contactAddNote" class="note"></p>
+            </div>
+            <ul id="contactsList" class="call-list contacts-list"></ul>
+          </div>
+          <div id="callsDash" class="calls-dash hidden" aria-label="Статистика звонков"></div>
           <div id="callsBox" class="list-block">
-            <div class="list-title"><span>Недавние звонки</span></div>
+            <div class="list-title"><span>Недавние звонки</span><span class="list-sub">хранятся 30 дней</span></div>
             <ul id="callsList" class="call-list"></ul>
           </div>
         </div>
@@ -235,10 +282,12 @@
                 <button id="btnSharePersonal" class="btn small"><svg class="ic"><use href="#i-share"/></svg><span>Поделиться</span></button>
               </div>
               <p id="personalStatus" class="status-line">Подключаемся к серверу входящих…</p>
+              <label class="check"><input type="checkbox" id="shareBack"> Передавать мой номер тем, кому я звоню (чтобы мне могли перезвонить)</label>
             </div>
             <div class="list-card">
               <button id="btnEnablePush" class="list-item"><svg class="ic"><use href="#i-bell"/></svg><span>Push-уведомления о звонках</span></button>
               <button id="btnBackupToggle" class="list-item"><svg class="ic"><use href="#i-shield"/></svg><span>Резервная копия (17 слов)</span></button>
+              <button id="btnChangeNumber" class="list-item"><svg class="ic"><use href="#i-refresh"/></svg><span>Сменить номер (новая ссылка)</span></button>
             </div>
             <div id="backupBox" class="card hidden">
               <b class="card-title">Фраза восстановления</b>
@@ -260,13 +309,27 @@
             </div>
           </div>
 
+          <div class="list-card danger-zone">
+            <button id="btnWipeAll" class="list-item danger"><svg class="ic"><use href="#i-trash"/></svg><span>Стереть всё с этого устройства</span></button>
+          </div>
+          <div id="dangerBox" class="card danger-card hidden" role="alertdialog" aria-labelledby="dangerTitle">
+            <b id="dangerTitle" class="card-title"></b>
+            <p id="dangerText" class="hint"></p>
+            <label id="wipeBackupOpt" class="check danger-opt hidden"><input type="checkbox" id="wipeBackupToo"> Удалить и резервную копию на сервере (тогда фраза из 17 слов больше ничего не восстановит)</label>
+            <div class="btn-row">
+              <button id="dangerGo" class="btn small danger"><span>Да</span></button>
+              <button id="dangerCancel" class="btn small ghost"><span>Отмена</span></button>
+            </div>
+            <p id="dangerNote" class="note"></p>
+          </div>
+
           <div class="about">
             <div class="facts">
               <span><svg class="ic"><use href="#i-check"/></svg>Без регистрации</span>
               <span><svg class="ic"><use href="#i-lock"/></svg>E2EE</span>
               <span><svg class="ic"><use href="#i-wifi"/></svg>5 каналов связи</span>
             </div>
-            <p class="about-ver">ZVONochek <b data-ver>v36</b> · сборка <span data-build>dev</span></p>
+            <p class="about-ver">ZVONochek <b data-ver>v38</b> · сборка <span data-build>dev</span></p>
           </div>
         </div>
       </div>
@@ -280,7 +343,8 @@
 
     <main class="detail detail-welcome" aria-hidden="true">
       <div class="welcome">
-        <svg class="mark" viewBox="0 0 48 48"><use href="#i-logo"/></svg>
+        <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use class="logo-classic" href="#i-logo"/><use class="logo-zvon" href="#i-logo-zvon"/></svg>
+        <b class="welcome-word" aria-hidden="true"><span class="bn-zvon">ZVON</span><span class="bn-ochek">ochek</span></b>
         <b>Выберите чат или начните звонок</b>
         <span>Ключи шифрования живут только на ваших устройствах. Если основной сервер недоступен, сообщения и сигнал звонка идут через резервные каналы.</span>
       </div>
@@ -357,6 +421,7 @@
             <button id="chatTtlBtn" class="chat-menu-item"><svg class="ic"><use href="#i-clock"/></svg><span>Исчезающие сообщения</span></button>
             <button id="chatEpochBtn" class="chat-menu-item"><svg class="ic"><use href="#i-lock"/></svg><span>Сменить ключи (эпоха)</span></button>
             <button id="roomActKeep" class="chat-menu-item" aria-pressed="false"><svg class="ic"><use href="#i-star"/></svg><span>Сохранить от автоудаления</span></button>
+            <button id="roomActResync" class="chat-menu-item"><svg class="ic"><use href="#i-refresh"/></svg><span>Пересинхронизировать шифрование</span></button>
             <button id="roomActDeleteSelf" class="chat-menu-item danger"><svg class="ic"><use href="#i-trash"/></svg><span>Удалить чат у себя</span></button>
             <button id="roomActDeleteAll" class="chat-menu-item danger hidden"><svg class="ic"><use href="#i-trash"/></svg><span>Удалить для всех</span></button>
             <p id="roomMenuNote" class="note"></p>
@@ -430,9 +495,12 @@
           <div class="nick-card">
             <div class="nick-ic" aria-hidden="true">👋</div>
             <b>Как вас подписать?</b>
-            <p class="hint">Имя увидят только участники этой комнаты. Сервер его не знает.</p>
+            <p class="hint">Имя увидят только участники этой комнаты. Сервер его не знает. Можно оставить случайное анонимное имя — оно своё для каждого чата.</p>
             <label class="sr-only" for="chatNickInput">Ваше имя</label>
-            <input id="chatNickInput" maxlength="40" autocomplete="off" placeholder="Например, Алекс">
+            <span class="field-row nick-row">
+              <input id="chatNickInput" maxlength="40" autocomplete="off" placeholder="Например, Тихий Маяк">
+              <button type="button" id="chatNickDice" class="btn dice-btn" title="Другое случайное имя" aria-label="Другое случайное имя">🎲</button>
+            </span>
             <button id="chatNickSave" class="btn primary block"><span>Войти в чат</span></button>
           </div>
         </div>
@@ -506,13 +574,22 @@
   <button id="roomListDelAll" class="chat-menu-item danger"><svg class="ic"><use href="#i-trash"/></svg><span>Удалить для всех</span></button>
 </div>
 
+<!-- v38: меню контакта / записи журнала («Звонки») -->
+<div id="contactMenu" class="chat-msg-menu menu hidden" role="menu">
+  <button id="contactActCall" class="chat-menu-item"><svg class="ic"><use href="#i-phone"/></svg><span>Позвонить</span></button>
+  <button id="contactActSave" class="chat-menu-item"><svg class="ic"><use href="#i-star"/></svg><span>Сохранить в контакты</span></button>
+  <button id="contactActRename" class="chat-menu-item"><svg class="ic"><use href="#i-pencil"/></svg><span>Переименовать</span></button>
+  <button id="contactActCopy" class="chat-menu-item"><svg class="ic"><use href="#i-copy"/></svg><span>Скопировать ссылку</span></button>
+  <button id="contactActDel" class="chat-menu-item danger"><svg class="ic"><use href="#i-trash"/></svg><span>Удалить контакт</span></button>
+</div>
+
 <!-- ============ Лобби перед звонком ============ -->
 <section id="prejoin" class="screen prejoin-screen hidden">
   <div class="prejoin">
     <header class="side-header">
       <button id="btnBackHome" class="icon-btn" title="На главную" aria-label="На главную"><svg class="ic"><use href="#i-arrow-left"/></svg></button>
       <b>Звонок</b>
-      <span class="ver-tag" data-ver>v36</span>
+      <span class="ver-tag" data-ver>v38</span>
     </header>
 
     <div class="preview-col">
@@ -562,7 +639,10 @@
     <div class="side-card">
       <div class="side-body">
         <label class="field" for="name">Ваше имя в звонке
-          <input id="name" maxlength="40" placeholder="Например, Алекс" autocomplete="nickname">
+          <span class="field-row">
+            <input id="name" maxlength="40" placeholder="Например, Алекс" autocomplete="nickname">
+            <button type="button" id="nameDice" class="btn dice-btn" title="Случайное анонимное имя" aria-label="Случайное анонимное имя">🎲</button>
+          </span>
         </label>
 
         <div class="dev-grid">
@@ -623,7 +703,7 @@
           <button id="btnForceBridge" class="btn small" title="Передавать голос через сигнал, не дожидаясь WebRTC/TURN"><svg class="ic"><use href="#i-shield"/></svg><span>Мост без TURN</span></button>
           <button id="btnDiag" class="btn small ghost"><svg class="ic"><use href="#i-diag"/></svg><span>Диагностика</span></button>
         </div>
-        <div class="conn-ver">ZVONochek <span data-ver>v36</span></div>
+        <div class="conn-ver">ZVONochek <span data-ver>v38</span></div>
       </div>
     </div>
 
@@ -737,10 +817,23 @@
   </div>
 </div>
 
+<button id="callReturnBar" class="call-return-bar hidden" type="button"><svg class="ic"><use href="#i-phone"/></svg><span>Идёт звонок — вернуться</span><span id="callReturnTime" class="call-return-time"></span></button>
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
 <template id="tplSettings">
   <h3>Настройки</h3>
+
+  <div class="settings-sec">
+    <h4>Оформление</h4>
+    <div class="skin-row" role="radiogroup" aria-label="Оформление">
+      <label class="skin-opt"><input type="radio" name="sSkin" value="zvon"><span class="skin-swatch zvon"><i></i><i></i><i></i></span><span>ZVON</span></label>
+      <label class="skin-opt"><input type="radio" name="sSkin" value="classic"><span class="skin-swatch classic"><i></i><i></i><i></i></span><span>Классическое</span></label>
+    </div>
+    <p class="sec-hint">ZVON — новое фирменное оформление. «Классическое» возвращает прежний вид; переключается сразу, данные не затрагиваются.</p>
+    <div class="btn-row">
+      <button type="button" id="sTestRing" class="btn small"><svg class="ic"><use href="#i-bell"/></svg><span>Проверить рингтон</span></button>
+    </div>
+  </div>
 
   <div class="settings-sec">
     <h4>Устройства и громкость</h4>
@@ -756,15 +849,17 @@
     </label>
     <label class="field">Камера<select id="sCam"></select></label>
     <label class="field">Качество видео<select id="sVideoQ">
-      <option value="1080">1080p — стандарт</option>
+      <option value="auto">Авто — по устройству (рекомендуется)</option>
       <option value="1440">2K (1440p) — максимум</option>
+      <option value="1080">1080p — Full HD</option>
       <option value="720">720p — экономно</option>
+      <option value="480">480p — слабый телефон</option>
     </select></label>
     <div class="btn-row">
       <button type="button" id="sFlipCamBtn" class="btn small"><svg class="ic"><use href="#i-flip-cam"/></svg><span>Повернуть камеру</span></button>
     </div>
     <label class="check"><input type="checkbox" id="sEcoMode"> Эко-режим в звонке (против перегрева)</label>
-    <p class="sec-hint">Эко-режим ограничивает видео до 720p при 24 к/с и отключает тяжёлые эффекты. По умолчанию выключен: звонок стартует в 1080p, а при слабой сети качество снижается само.</p>
+    <p class="sec-hint">«Авто»: компьютер — 1080p @ 30, телефон — 720p @ 30, слабый телефон — 480p @ 24. Если процессор не успевает, телефон греется или заряд ниже 15%, видео облегчается само, а свернув звонок, вы просите собеседника не слать видео — оба телефона отдыхают. Эко-режим (вручную) — не выше 720p @ 24 и без тяжёлых эффектов.</p>
   </div>
 
   <div class="settings-sec">
@@ -813,11 +908,13 @@
     <h4>Маршрут и обход блокировок</h4>
     <label class="field">Режим соединения
       <select id="sNetMode">
-        <option value="auto">Авто — напрямую, при блокировке мост</option>
+        <option value="auto">Авто — напрямую → TURN → мост</option>
         <option value="bridge">Только мост через сигнал (без TURN/UDP)</option>
         <option value="relay">Скрыть мой IP — только через TURN</option>
       </select>
     </label>
+    <label class="check"><input type="checkbox" id="sRed"> Защита голоса от потерь (RED)</label>
+    <p class="sec-hint">Каждый голосовой пакет несёт копию предыдущего: при потерях в мобильной сети голос не «булькает». Цена — ещё ~30–40 Кбит/с. Применяется при следующем подключении.</p>
     <div id="sTransports" class="mono status-box"></div>
     <button id="sDiag" class="btn block"><svg class="ic"><use href="#i-diag"/></svg><span>Журнал диагностики</span></button>
   </div>
@@ -909,12 +1006,12 @@
 
 <noscript><p class="noscript">Для ZVONochek нужен JavaScript.</p></noscript>
 
-<script src="mqtt-lite.js?v=36"></script>
-<script src="vendor/qrcode.js?v=36"></script>
-<script src="zvdiag.js?v=36"></script>
-<script type="module" src="app.js?v=36"></script>
-<script type="module" src="group.js?v=36"></script>
-<script type="module" src="chat.js?v=36"></script>
-<script type="module" src="backup.js?v=36"></script>
+<script src="mqtt-lite.js?v=38"></script>
+<script src="vendor/qrcode.js?v=38"></script>
+<script src="zvdiag.js?v=38"></script>
+<script type="module" src="app.js?v=38"></script>
+<script type="module" src="group.js?v=38"></script>
+<script type="module" src="chat.js?v=38"></script>
+<script type="module" src="backup.js?v=38"></script>
 </body>
 </html>

@@ -21,7 +21,7 @@
 // воскрешает комнату, чей tombstone новее её записи в бэкапе; локальный
 // источник tombstones — тот же localStorage-ключ 'zvDeletedRooms',
 // который ведёт chat.js при удалении.
-import { CONFIG, getWorkerBase } from './config.js?v=36';
+import { CONFIG, getWorkerBase } from './config.js?v=38';
 import {
   b64u,
   newSecret,
@@ -34,9 +34,9 @@ import {
   sealBackup,
   openBackup,
   backupIdHash,
-} from './crypto.js?v=36';
-import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=36';
-import { isRoomTombstoned } from './chat-transport.js?v=36';
+} from './crypto.js?v=38';
+import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=38';
+import { isRoomTombstoned } from './chat-transport.js?v=38';
 import {
   getPersonal,
   ensurePersonal,
@@ -48,7 +48,7 @@ import {
   fpOfPubRaw,
   getRecoveryState,
   saveRecoveryState,
-} from './identity.js?v=36';
+} from './identity.js?v=38';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -156,6 +156,25 @@ async function refreshBackup() {
   await saveRecoveryState(state);
   renderBackupStatus().catch(() => {});
   return true;
+}
+
+// v38: удалить серверный бэкап («Сменить номер» / «Стереть всё»). Подпись
+// recovery-ключом, seed — из vault, поэтому вызывать ДО смены/стирания
+// личности. Без включённого бэкапа — ничего не делает.
+async function deleteServerBackup() {
+  const state = await getRecoveryState();
+  if (!state?.seedEnc) return { ok: true, had: false };
+  const seed = b64u.dec(await decryptWithVault(state.seedEnc));
+  const pair = await deriveRecoveryPair(seed);
+  const idHash = await backupIdHash(pair.pubRaw);
+  const ts = Date.now();
+  const sig = await signBackupBlob(pair, `zv-backup-delete-v1|${idHash}|${ts}`);
+  const res = await fetch(workerBase() + '/pair/backup', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ idHash, del: true, pub: pair.pubB64, ts, sig }),
+  });
+  return { ok: res.ok, had: true };
 }
 
 // ---------- UI: настройка бэкапа ----------
@@ -425,8 +444,24 @@ function initBackupUI() {
       refreshBackup().catch(() => {});
     }, 2000);
   });
+  // v38: сервер хранит бэкап 180 дней с последней заливки — освежаем раз
+  // в неделю при запуске (бэкап брошенной личности со временем исчезнет сам).
+  setTimeout(async () => {
+    try {
+      const st = await getRecoveryState();
+      if (st?.enabled && Date.now() - (st.updatedAt || 0) > 7 * 24 * 3600000) await refreshBackup();
+    } catch {}
+  }, 15000);
   // Для тестов и отладки.
   window.ZVBackup = { refreshBackup, restoreFromPhrase };
+  // v38: хуки для app.js («Сменить номер», «Стереть всё»).
+  window.__zvBackup = {
+    deleteServer: deleteServerBackup,
+    render: () => {
+      $('#backupPhraseBox')?.classList.add('hidden');
+      return renderBackupStatus();
+    },
+  };
 }
 
 if (document.readyState === 'loading') {

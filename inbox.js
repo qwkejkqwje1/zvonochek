@@ -2,7 +2,7 @@
 // слушатель входящих по WebSocket, ответы и пропущенные. Протокол и подписи —
 // см. worker/inbox.js. Ring идёт ТОЛЬКО через Worker (не через публичные
 // транспорты — иначе «кому звонят» узнали бы все наблюдатели сигналинга).
-import { signWithDevice } from './identity.js?v=36';
+import { signWithDevice } from './identity.js?v=38';
 
 const base = (workerUrl, topic) => `${workerUrl.replace(/\/$/, '')}/inbox/${topic}`;
 
@@ -40,6 +40,15 @@ export async function inboxRegister(workerUrl, topic, bundle, sub = null) {
     ts,
     sig,
   });
+}
+
+// v38: «Сменить номер» / «Стереть всё»: владелец отзывает свой Inbox —
+// сервер удаляет устройства, push-подписки, звонки и пропущенные; звонки
+// по старой ссылке дальше получают 404 «номер не обслуживается».
+export async function inboxRetire(workerUrl, topic, bundle) {
+  const ts = Date.now();
+  const sig = await signWithDevice(`retire|${topic}|${bundle.devicePub}|${ts}`);
+  return post(workerUrl, topic, '/retire', { devicePub: bundle.devicePub, ts, sig });
 }
 
 export async function inboxRing(workerUrl, topic, { ringId, fromFp, fromDevicePub, blob }) {
@@ -134,7 +143,9 @@ export class InboxListener {
     }
     this.ws = ws;
     ws.onopen = async () => {
-      this.backoff = 1000;
+      // v38: backoff сбрасывается по 'auth-ok' (старый сервер его не шлёт —
+      // тогда по успешному открытию, как раньше, но не после отказа в auth).
+      if (!this.authFails) this.backoff = 1000;
       try {
         const ts = Date.now();
         const sig = await signWithDevice(`listen|${this.topic}|${this.bundle.devicePub}|${ts}`);
@@ -157,6 +168,19 @@ export class InboxListener {
       }
       if (m.type === 'ring') this.onRing?.(m);
       else if (m.type === 'ring-state') this.onState?.(m);
+      // v38: сервер подтверждает/отклоняет auth (до v38 молчал). При отказе
+      // он закрывает сокет — переподключение повторит auth (обычно причина —
+      // auth раньше /register, и через секунду устройство уже известно).
+      else if (m.type === 'auth-ok') {
+        this.authFails = 0;
+        this.backoff = 1000;
+        this.onStatus?.('online');
+      } else if (m.type === 'auth-fail') {
+        // Не долбим сервер: 2, 4, 8 … до 60 с между попытками.
+        this.authFails = (this.authFails || 0) + 1;
+        this.backoff = Math.min(60000, 1000 * 2 ** this.authFails);
+        this.onStatus?.('offline');
+      }
     };
     ws.onclose = () => {
       clearInterval(this.pingTimer);
@@ -172,7 +196,7 @@ export class InboxListener {
   retry() {
     if (this.closed) return;
     const wait = this.backoff;
-    this.backoff = Math.min(30000, this.backoff * 2);
+    this.backoff = Math.min(this.authFails ? 60000 : 30000, this.backoff * 2);
     setTimeout(() => this.connect(), wait);
   }
   close() {

@@ -1,4 +1,4 @@
-// ZVONochek v36 — статистика звонка без DOM: разбор getStats(), оценка MOS,
+// ZVONochek v37 — статистика звонка без DOM: разбор getStats(), оценка MOS,
 // запись хода звонка и сводка журнала. Модуль чистый — тестируется в Node.
 
 /** Человеческие названия маршрутов медиа. */
@@ -67,6 +67,15 @@ export function readCounters(report, now = Date.now()) {
     videoIn: null,
     videoOut: null,
     limitation: '',
+    // v37: каким кодеком и чем (железо/программа) кодируется и декодируется видео
+    vcodecOut: null,
+    vcodecIn: null,
+  };
+  const vcodec = (s, impl, pe) => {
+    const codec = s.codecId ? byId.get(s.codecId) : null;
+    const name = codec?.mimeType ? codec.mimeType.split('/')[1] || codec.mimeType : '';
+    if (!name && !s[impl]) return null;
+    return { name: name.toUpperCase(), impl: s[impl] || '', hw: typeof s[pe] === 'boolean' ? s[pe] : null };
   };
   for (const s of byId.values()) {
     const kind = s.kind || s.mediaType;
@@ -81,11 +90,13 @@ export function readCounters(report, now = Date.now()) {
         if (codec?.mimeType) c.codec = codec.mimeType.split('/')[1] || codec.mimeType;
       } else if (kind === 'video' && s.frameWidth) {
         c.videoIn = { w: s.frameWidth, h: s.frameHeight || 0, fps: Math.round(s.framesPerSecond || 0) };
+        c.vcodecIn = vcodec(s, 'decoderImplementation', 'powerEfficientDecoder');
       }
     } else if (s.type === 'outbound-rtp') {
       c.bytesOut += s.bytesSent || 0;
       if (kind === 'video' && s.frameWidth) {
         c.videoOut = { w: s.frameWidth, h: s.frameHeight || 0, fps: Math.round(s.framesPerSecond || 0) };
+        c.vcodecOut = vcodec(s, 'encoderImplementation', 'powerEfficientEncoder');
         if (s.qualityLimitationReason && s.qualityLimitationReason !== 'none') c.limitation = s.qualityLimitationReason;
       }
     } else if (s.type === 'remote-inbound-rtp') {
@@ -163,6 +174,8 @@ export function deriveSample(cur, prev) {
     videoIn: cur.videoIn,
     videoOut: cur.videoOut,
     limitation: cur.limitation,
+    vcodecOut: cur.vcodecOut || null,
+    vcodecIn: cur.vcodecIn || null,
   };
   sample.mos = rtt == null ? null : mosOf(rtt, jitter ?? 0, sample.loss ?? 0);
   sample.level = levelOf(sample);

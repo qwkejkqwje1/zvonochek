@@ -35,8 +35,16 @@ const WORD_MAX_CLAIMS = 5;
 // не более 30 успешных выдач в час на один codeHash, дальше 429 до конца окна.
 const ALIAS_CLAIM_LIMIT = 30;
 const ALIAS_CLAIM_WINDOW_MS = 3_600_000;
+// v38: автоочистка бесплатного Worker. Алиас живёт 30 дней с последнего
+// использования (выдачи) или продления владельцем (клиент владельца продлевает
+// раз в неделю, пока открывает комнату; сама комната без активности тоже
+// стирается через 30 дней). Бэкап личности — 180 дней с последней заливки
+// (клиент перезаливает раз в неделю при запуске): бэкап брошенной личности
+// не копится вечно, а живой — не пропадает.
+const ALIAS_IDLE_MS = 30 * 24 * 3_600_000;
+const BACKUP_IDLE_MS = 180 * 24 * 3_600_000;
 
-import { b64u } from './push.js';
+import { b64u, generateVapidJwk } from './push.js';
 
 const te = new TextEncoder();
 const sha256hex = async (text) => {
@@ -99,13 +107,44 @@ export class Pairing {
     this.sql.exec(`INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)`, k, v);
   }
   dropPair() {
-    this.sql.exec(`DELETE FROM meta WHERE k NOT LIKE 'bk_%'`);
+    this.sql.exec(`DELETE FROM meta WHERE k NOT LIKE 'bk_%' AND k NOT LIKE 'vapid_%'`);
+  }
+  dropBackup() {
+    this.sql.exec(`DELETE FROM meta WHERE k LIKE 'bk_%'`);
   }
 
-  async ensureAlarm(exp) {
+  // v38: ближайший срок среди всего, что хранит этот DO (пара/встреча — exp,
+  // алиас — 30 дней простоя, бэкап — 180 дней без перезаливки).
+  deadlines() {
+    const out = [];
+    const mode = this.meta('mode');
+    if (mode === 'alias') {
+      const touched = Number(this.meta('alias_touched') || 0);
+      if (touched) out.push(touched + ALIAS_IDLE_MS);
+    } else if (this.meta('blob')) {
+      const exp = Number(this.meta('exp') || 0);
+      if (exp) out.push(exp);
+    }
+    if (this.meta('bk_blob')) {
+      const up = Number(this.meta('bk_updated') || 0);
+      if (up) out.push(up + BACKUP_IDLE_MS);
+    }
+    return out;
+  }
+
+  async scheduleNext() {
     try {
-      await this.state.storage.setAlarm(exp + 60_000);
+      const d = this.deadlines();
+      if (!d.length) {
+        await this.state.storage.deleteAlarm();
+        return;
+      }
+      await this.state.storage.setAlarm(Math.max(Date.now() + 1000, Math.min(...d) + 60_000));
     } catch {}
+  }
+
+  async ensureAlarm() {
+    await this.scheduleNext();
   }
 
   async fetch(req) {
@@ -120,6 +159,26 @@ export class Pairing {
       }
     }
     const now = Date.now();
+
+    // ---------- v38: служебный ключ VAPID (только изнутри Worker) ----------
+    // Снаружи сюда не попасть: worker.js не пробрасывает путь /pair/vapid-key,
+    // а адрес этого DO — служебное имя, а не хэш кода. Генерация — под
+    // blockConcurrencyWhile, чтобы два параллельных запроса не создали два
+    // разных ключа (подписки на «проигравший» ключ молча не доставлялись бы).
+    if (path === '/vapid-key' && req.method === 'POST' && req.headers.get('x-zv-internal') === 'vapid') {
+      let jwkText = this.meta('vapid_jwk');
+      if (!jwkText) {
+        await this.state.blockConcurrencyWhile(async () => {
+          jwkText = this.meta('vapid_jwk');
+          if (!jwkText) {
+            jwkText = JSON.stringify(await generateVapidJwk());
+            this.setMeta('vapid_jwk', jwkText);
+            this.setMeta('vapid_created', String(Date.now()));
+          }
+        });
+      }
+      return json({ ok: true, jwk: JSON.parse(jwkText) });
+    }
 
     // ---------- v27: серверный бэкап личности ----------
     // PUT /backup {idHash, pub, blob, sig, cert?} — создать/обновить.
@@ -150,7 +209,22 @@ export class Pairing {
       this.setMeta('bk_blob', blob);
       this.setMeta('bk_cert', cert ? JSON.stringify(cert) : '');
       this.setMeta('bk_updated', String(now));
-      return json({ ok: true, backup: true }, 200);
+      await this.scheduleNext();
+      return json({ ok: true, backup: true, keepDays: BACKUP_IDLE_MS / 86_400_000 }, 200);
+    }
+    // v38: POST /backup {idHash, del:true, pub, ts, sig} — удалить бэкап
+    // («Сменить номер» / «Стереть всё»). Подпись recovery-ключом над
+    // SHA-256('zv-backup-delete-v1|'+idHash+'|'+ts), ts — не старше 10 минут.
+    if (path === '/backup' && req.method === 'POST' && body.del === true) {
+      const { idHash, pub, ts, sig } = body;
+      if (typeof idHash !== 'string' || !/^[a-f0-9]{64}$/.test(idHash)) return json({ error: 'bad idHash' }, 400);
+      if (!Number.isFinite(ts) || Math.abs(now - ts) > 10 * 60_000) return json({ error: 'stale' }, 400);
+      if (this.meta('bk_id') !== idHash || this.meta('bk_pub') !== pub) return json({ ok: true, deleted: false });
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(`zv-backup-delete-v1|${idHash}|${ts}`)));
+      if (typeof sig !== 'string' || !(await verifySig(pub, sig, digest))) return json({ error: 'bad sig' }, 403);
+      this.dropBackup();
+      await this.scheduleNext();
+      return json({ ok: true, deleted: true });
     }
     // GET /backup?idHash= — отдать blob и публичный cert (если есть).
     if (path === '/backup' && req.method === 'GET') {
@@ -162,7 +236,9 @@ export class Pairing {
       try {
         cert = JSON.parse(this.meta('bk_cert') || 'null');
       } catch {}
-      return json({ ok: true, blob: this.meta('bk_blob'), cert });
+      if (!this.meta('bk_updated')) this.setMeta('bk_updated', String(now));
+      await this.scheduleNext();
+      return json({ ok: true, blob: this.meta('bk_blob'), cert, updated: Number(this.meta('bk_updated') || 0) });
     }
 
     // ---------- v26: создание постоянного алиаса ----------
@@ -172,6 +248,20 @@ export class Pairing {
       const { codeHash, blob, adminHash } = body;
       if (typeof codeHash !== 'string' || !/^[a-f0-9]{64}$/.test(codeHash)) {
         return json({ error: 'bad codeHash' }, 400);
+      }
+      // v38: продление алиаса владельцем {codeHash, renew:true, admin} —
+      // доступ, как у отзыва, по знанию admin (сервер сверяет его хэш).
+      if (body.renew === true) {
+        if (this.meta('mode') !== 'alias' || this.meta('code_hash') !== codeHash) {
+          return json({ error: 'not found' }, 404);
+        }
+        if (typeof body.admin !== 'string' || !body.admin) return json({ error: 'bad admin' }, 400);
+        if ((await sha256hex(body.admin)) !== this.meta('admin_hash')) {
+          return json({ error: 'forbidden' }, 403);
+        }
+        this.setMeta('alias_touched', String(now));
+        await this.scheduleNext();
+        return json({ ok: true, alias: true, renewed: true, keepDays: ALIAS_IDLE_MS / 86_400_000 });
       }
       if (typeof blob !== 'string' || !blob || blob.length > MAX_BLOB_CHARS) {
         return json({ error: 'bad blob' }, 400);
@@ -188,7 +278,9 @@ export class Pairing {
       this.setMeta('admin_hash', adminHash);
       this.setMeta('alias_claims', '0');
       this.setMeta('alias_window', String(now));
-      return json({ ok: true, alias: true }, 201);
+      this.setMeta('alias_touched', String(now));
+      await this.scheduleNext();
+      return json({ ok: true, alias: true, keepDays: ALIAS_IDLE_MS / 86_400_000 }, 201);
     }
 
     // ---------- v30: создание встречи по кодовому слову ----------
@@ -217,7 +309,7 @@ export class Pairing {
       this.setMeta('exp', String(expN));
       this.setMeta('claims', '0');
       this.setMeta('admin_hash', adminHash);
-      await this.ensureAlarm(expN);
+      await this.scheduleNext();
       return json({ ok: true, word: true, exp: expN }, 201);
     }
 
@@ -258,7 +350,7 @@ export class Pairing {
       this.setMeta('blob', blob);
       this.setMeta('exp', String(expN));
       this.setMeta('claims', '0');
-      await this.ensureAlarm(expN);
+      await this.scheduleNext();
       return json({ ok: true, exp: expN }, 201);
     }
 
@@ -281,6 +373,8 @@ export class Pairing {
         }
         this.setMeta('alias_claims', String(claims + 1));
         this.setMeta('alias_window', String(windowStart));
+        this.setMeta('alias_touched', String(now)); // v38: использование продлевает жизнь
+        await this.scheduleNext();
         return json({ ok: true, blob: this.meta('blob'), alias: true });
       }
       // v30: встреча по кодовому слову — одноразовая, TTL 24 часа.
@@ -331,17 +425,27 @@ export class Pairing {
   }
 
   async alarm() {
-    // Алиас бессрочный: alarm его не трогает (alarm ставится только парам).
-    if (this.meta('mode') === 'alias') {
-      try {
-        await this.state.storage.deleteAlarm();
-      } catch {}
-      return;
-    }
-    // TTL истёк — пара не должна жить дольше срока в любом случае.
-    this.dropPair();
+    // v38: одна точка очистки для всего содержимого DO. Пара приветствия и
+    // встреча по кодовому слову — по своему exp; алиас — после 30 дней без
+    // выдач и продлений; бэкап — после 180 дней без перезаливки. Ключ VAPID
+    // (служебный DO) не истекает.
+    const now = Date.now();
     try {
-      await this.state.storage.deleteAlarm();
+      const mode = this.meta('mode');
+      if (mode === 'alias') {
+        const touched = Number(this.meta('alias_touched') || 0);
+        if (!touched) this.setMeta('alias_touched', String(now)); // алиас до v38: отсчёт с сегодня
+        else if (now - touched >= ALIAS_IDLE_MS) this.dropPair();
+      } else if (this.meta('blob') || mode) {
+        const exp = Number(this.meta('exp') || 0);
+        if (!exp || exp <= now) this.dropPair();
+      }
+      if (this.meta('bk_blob')) {
+        const up = Number(this.meta('bk_updated') || 0);
+        if (!up) this.setMeta('bk_updated', String(now));
+        else if (now - up >= BACKUP_IDLE_MS) this.dropBackup();
+      }
     } catch {}
+    await this.scheduleNext();
   }
 }

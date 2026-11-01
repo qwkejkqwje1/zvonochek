@@ -1,8 +1,8 @@
-// ZVONochek v36 — отрисовка статистики: живая панель звонка, сводка и журнал
+// ZVONochek v38 — отрисовка статистики: живая панель звонка, сводка и журнал
 // на вкладке «Звонки». Данные готовит callstats.js; здесь только DOM.
 // Все строки пользователя попадают в DOM через textContent.
 
-import { ROUTE_LABELS, ROUTE_SHORT, mosLabel, sparkPath, fmtDur, fmtDurWords, fmtDurShort, fmtKbps, plural } from './callstats.js?v=36';
+import { ROUTE_LABELS, ROUTE_SHORT, mosLabel, sparkPath, fmtDur, fmtDurWords, fmtDurShort, fmtKbps, plural } from './callstats.js?v=38';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -46,6 +46,15 @@ function spark(values, opts = {}) {
 }
 
 const LIMITATION = { bandwidth: 'ширина канала', cpu: 'процессор', other: 'браузер' };
+// v37: «Red» в статистике — это Opus с копией предыдущего пакета (RFC 2198).
+export const audioCodecLabel = (c) =>
+  !c ? '' : /^red$/i.test(c) ? 'Opus + RED' : c.charAt(0).toUpperCase() + c.slice(1);
+/** «H264 · аппаратно» / «VP8 · программно» / «VP8». */
+export function videoCodecLabel(v) {
+  if (!v || !v.name) return '';
+  const how = v.hw === true ? 'аппаратно' : v.hw === false ? 'программно' : '';
+  return how ? `${v.name} · ${how}` : v.name;
+}
 const VIA = { worker: 'Worker', 'worker-http': 'HTTP', mqtt: 'MQTT', nostr: 'Nostr', ntfy: 'ntfy' };
 
 function tile(label, value, unit, values, opts) {
@@ -66,7 +75,7 @@ const show = (v, digits = 0) => (v == null ? '—' : digits ? v.toFixed(digits).
  * @param {{rec: import('./callstats.js').CallRecorder|null, sample: object|null,
  *          callSec: number, delivery?: {first: object}, bridgeMode?: string}} st
  */
-export function renderLiveStats(root, { rec, sample, callSec = 0, delivery = null, bridgeMode = '' }) {
+export function renderLiveStats(root, { rec, sample, callSec = 0, delivery = null, bridgeMode = '', media = '' }) {
   if (!root) return;
   const route = sample?.route || rec?.last?.route || null;
   const isBridge = route === 'bridge';
@@ -80,7 +89,7 @@ export function renderLiveStats(root, { rec, sample, callSec = 0, delivery = nul
     class: 'cs-ring-fg', cx: 22, cy: 22, r: 19,
     'stroke-dasharray': `${(frac * 119.4).toFixed(1)} 119.4`,
   }));
-  const routeLine = [sample?.proto, sample?.codec && sample.codec.charAt(0).toUpperCase() + sample.codec.slice(1)]
+  const routeLine = [sample?.proto, audioCodecLabel(sample?.codec)]
     .filter(Boolean)
     .join(' · ');
   const hero = h(
@@ -115,6 +124,9 @@ export function renderLiveStats(root, { rec, sample, callSec = 0, delivery = nul
   if (sum?.rtt != null) row('Средняя задержка', `${sum.rtt} мс (макс. ${sum.rttMax})`);
   if (sum?.loss != null) row('Средние потери', `${show(sum.loss, 1)} %`);
   if (sample?.limitation) row('Видео ограничивает', LIMITATION[sample.limitation] || sample.limitation);
+  if (!isBridge && videoCodecLabel(sample?.vcodecOut)) row('Кодек исходящего видео', videoCodecLabel(sample.vcodecOut));
+  if (!isBridge && videoCodecLabel(sample?.vcodecIn)) row('Кодек входящего видео', videoCodecLabel(sample.vcodecIn));
+  if (media) row('Режим видео', media);
   // Какой канал сигналинга доставлял сообщения первым (доля от всех).
   const first = Object.entries(delivery?.first || {}).filter(([, n]) => n > 0);
   const total = first.reduce((acc, [, n]) => acc + n, 0);
@@ -203,7 +215,7 @@ export function renderCallsDashboard(root, digest) {
 }
 
 /** Список последних звонков в стиле Telegram. */
-export function renderCallsList(ul, entries, { limit = 30, now = Date.now() } = {}) {
+export function renderCallsList(ul, entries, { limit = 30, now = Date.now(), onCall = null, onMenu = null, nameOf = null } = {}) {
   if (!ul) return;
   ul.replaceChildren();
   if (!entries.length) {
@@ -221,25 +233,84 @@ export function renderCallsList(ul, entries, { limit = 30, now = Date.now() } = 
     else parts.push(OUTCOME[v.outcome] || v.outcome || '');
     if (v.route) parts.push(ROUTE_SHORT[v.route] || v.route);
     const q = v.mos != null ? mosLabel(v.mos) : null;
-    const name = v.name || (v.dir === 'link' ? 'Звонок по ссылке' : 'Без имени');
+    // v38: имя из контактов (если номер сохранён) — приоритетнее имени из звонка.
+    const name = (nameOf && nameOf(v)) || v.name || (v.dir === 'link' ? 'Звонок по ссылке' : 'Без имени');
+    // v38: у записи с известным номером (fp) — кнопка обратного звонка.
+    const canCall = !!(v.fp && onCall);
+    const li = h(
+      'li.call-li',
+      { dataset: { kind }, tabindex: onMenu && v.fp ? '0' : null },
+      h('span.call-av', { text: (name[0] || '?').toUpperCase(), 'aria-hidden': 'true' }),
+      h(
+        'div.call-body',
+        null,
+        h('b.call-name', { text: name }),
+        h('span.call-meta', null, icon(v.dir === 'in' ? 'i-arrow-in' : 'i-arrow-out', 'ic call-dir'), parts.filter(Boolean).join(' · '))
+      ),
+      h(
+        'div.call-side',
+        null,
+        h('span.call-when', { text: whenText(v.ts, now) }),
+        q ? h('span.call-q', { dataset: { level: q.level }, title: `Качество ${q.text} (MOS ${v.mos})`, text: v.mos.toFixed(1).replace('.', ',') }) : null
+      ),
+      canCall ? h('button.icon-btn.call-back', { type: 'button', title: 'Перезвонить', 'aria-label': 'Перезвонить ' + name }, icon('i-phone')) : null
+    );
+    if (canCall) {
+      li.querySelector('.call-back').onclick = (e) => {
+        e.stopPropagation();
+        onCall(v);
+      };
+    }
+    if (onMenu && v.fp) {
+      li.classList.add('has-menu');
+      li.onclick = () => onMenu(v, li);
+      li.onkeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onMenu(v, li);
+        }
+      };
+    }
+    ul.append(li);
+  }
+}
+
+/** v38: адресная книга на вкладке «Звонки». Имена — только локальные. */
+export function renderContactsList(ul, contacts, { now = Date.now(), onCall = null, onMenu = null } = {}) {
+  if (!ul) return;
+  ul.replaceChildren();
+  if (!contacts.length) {
     ul.append(
       h(
-        'li.call-li',
-        { dataset: { kind } },
-        h('span.call-av', { text: (name[0] || '?').toUpperCase(), 'aria-hidden': 'true' }),
-        h(
-          'div.call-body',
-          null,
-          h('b.call-name', { text: name }),
-          h('span.call-meta', null, icon(v.dir === 'in' ? 'i-arrow-in' : 'i-arrow-out', 'ic call-dir'), parts.filter(Boolean).join(' · '))
-        ),
-        h(
-          'div.call-side',
-          null,
-          h('span.call-when', { text: whenText(v.ts, now) }),
-          q ? h('span.call-q', { dataset: { level: q.level }, title: `Качество ${q.text} (MOS ${v.mos})`, text: v.mos.toFixed(1).replace('.', ',') }) : null
-        )
+        'li.calls-empty.contacts-empty',
+        null,
+        h('b', { text: 'Контактов пока нет' }),
+        h('span', { text: 'Сохраните номер из «Недавних звонков» (нажмите на запись) или добавьте чужую личную ссылку.' })
       )
     );
+    return;
+  }
+  for (const c of contacts) {
+    const name = c.name || 'Без имени';
+    const meta = c.lastAt ? 'Последний звонок: ' + whenText(c.lastAt, now) : 'Номер ' + String(c.fp || '').slice(0, 4) + '…' + String(c.fp || '').slice(-4);
+    const li = h(
+      'li.call-li.contact-li',
+      { tabindex: '0', dataset: { kind: 'contact' } },
+      h('span.call-av', { text: (name[0] || '?').toUpperCase(), 'aria-hidden': 'true' }),
+      h('div.call-body', null, h('b.call-name', { text: name }), h('span.call-meta', { text: meta })),
+      h('button.icon-btn.call-back', { type: 'button', title: 'Позвонить', 'aria-label': 'Позвонить ' + name }, icon('i-phone'))
+    );
+    li.querySelector('.call-back').onclick = (e) => {
+      e.stopPropagation();
+      onCall?.(c);
+    };
+    li.onclick = () => onMenu?.(c, li);
+    li.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onMenu?.(c, li);
+      }
+    };
+    ul.append(li);
   }
 }

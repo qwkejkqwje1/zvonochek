@@ -95,7 +95,7 @@ test('уровень ECMAScript по файлам', async (t) => {
     return t.skip('acorn не установлен (npm install)');
   }
   const level = (f) =>
-    f === 'zvdiag.js' ? [5, 'script'] : ['mqtt-lite.js', 'vendor/qrcode.js'].includes(f) ? [2017, 'script'] : f === 'sw.js' ? [2020, 'script'] : [2020, 'module'];
+    f === 'zvdiag.js' ? [5, 'script'] : ['mqtt-lite.js', 'vendor/qrcode.js', 'skin.js'].includes(f) ? [2017, 'script'] : f === 'sw.js' ? [2020, 'script'] : [2020, 'module'];
   for (const f of clientJs) {
     const [ecmaVersion, sourceType] = level(f);
     assert.doesNotThrow(() => acorn.parse(read(f), { ecmaVersion, sourceType }), `${f}: выше ES${ecmaVersion}`);

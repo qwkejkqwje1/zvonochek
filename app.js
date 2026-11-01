@@ -1,13 +1,15 @@
-import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=36';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=36';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh } from './identity.js?v=36';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=36';
-import { kvPut, kvAll, kvDel } from './store.js?v=36';
-import { Signaling } from './signaling.js?v=36';
-import { ROUTE_SHORT, readCounters, deriveSample, bridgeSample, CallRecorder, journalDigest } from './callstats.js?v=36';
-import { renderLiveStats, renderCallsDashboard, renderCallsList } from './stats-ui.js?v=36';
+import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=38';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=38';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh, rotatePersonal, encryptWithVault, decryptWithVault } from './identity.js?v=38';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, inboxRetire, InboxListener } from './inbox.js?v=38';
+import { kvGet, kvPut, kvAll, kvDel, wipeDatabase } from './store.js?v=38';
+import { Signaling } from './signaling.js?v=38';
+import { ROUTE_SHORT, readCounters, deriveSample, bridgeSample, CallRecorder, journalDigest, plural } from './callstats.js?v=38';
+import { renderLiveStats, renderCallsDashboard, renderCallsList, renderContactsList } from './stats-ui.js?v=38';
+import { anonName, randomAnonName } from './anon-names.js?v=38';
+import { VQ_CHOICES, deviceClass, captureTier, tierConstraints, rxCap, parseCap, videoEncoding, QLEVELS, audioCodecOrder, videoCodecOrder, CLASS_TEXT, sdpFirstCodec } from './media-policy.js?v=38';
 
-export const APP_VERSION = 36;
+export const APP_VERSION = 38;
 export const APP_BUILD = '2026-11-01';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -22,7 +24,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=36').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=38').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -62,6 +64,13 @@ try {
     localStorage.zvInputMode = 'open';
     localStorage.zvSettingsV = '14';
   }
+  if (Number(localStorage.zvSettingsV || 0) < 37) {
+    // v37: «1080p — стандарт» больше не навязывается телефонам. Сохранённое
+    // «1080» (бывший дефолт) переводим в «Авто»: на компьютере это те же
+    // 1080p@30, на телефоне — 720p, на слабом — 480p. 2K/720 — ручной выбор, не трогаем.
+    if (localStorage.zvVQ === '1080') localStorage.zvVQ = 'auto';
+    localStorage.zvSettingsV = '37';
+  }
 } catch {}
 
 const S = {
@@ -91,8 +100,22 @@ const S = {
   facingMode: localStorage.zvFacing || 'user', // 'user' (фронтальная) | 'environment' (задняя)
   // Правка владельца (v34): Эко-режим — только ручная опция, по умолчанию ВЫКЛ на всех устройствах.
   ecoMode: localStorage.zvEco === '1',
-  // Ручной выбор потолка качества видео: '1080' — стандарт (старт звонка), '1440' — 2K, '720' — экономно.
-  vq: localStorage.zvVQ || '1080',
+  // Потолок качества видео: 'auto' (v37, по умолчанию) — по классу устройства
+  // и его нагрузке; ручной выбор — '1440' (2K), '1080', '720', '480'.
+  vq: VQ_CHOICES.includes(localStorage.zvVQ) ? localStorage.zvVQ : 'auto',
+  // v37: класс устройства и текущая нагрузка (см. media-policy.js).
+  devClass: deviceClass({
+    ua: navigator.userAgent || '',
+    mem: navigator.deviceMemory || 0,
+    cores: navigator.hardwareConcurrency || 0,
+    mobile: /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || ''),
+  }),
+  load: { cpu: 0, cpuHits: 0, cpuCalm: 0, cpuLock: false, cpuBackAt: 0, battLow: false, pressure: 0 },
+  capTier: null, // текущая ступень захвата камеры
+  peerCap: null, // подсказка собеседника: какое видео ему нужно {h, fps}
+  rxSent: '', // последняя отправленная собеседнику подсказка (JSON)
+  red: localStorage.zvRed !== '0', // v37: RED для голоса (защита от потерь), по умолчанию ВКЛ
+  hwPref: '', // 'h264', если аппаратный H.264 энергоэффективнее VP8 (телефоны)
   callLocked: false,
   callDimmed: false,
   lastUnlockTap: 0,
@@ -160,6 +183,7 @@ const S = {
   outCall: null, // активный исходящий ring
   linkFp: null, // &d= из открытой ссылки (личная ссылка владельца)
   autoJoinPending: false,
+  autoCallPending: false, // v38: звонок контакту — сразу «Позвонить владельцу» после лобби
   pushSub: null,
   groupHook: null, // сюда регистрируется group.js (mesh для 3+ участников)
   ctrl: null,
@@ -199,8 +223,33 @@ function show(id) {
   document.body.dataset.screen = id;
   if (id === 'home') {
     refreshPersonalUI().catch(() => {});
-    renderCalls();
+    renderCalls().catch(() => {});
   }
+  syncCallReturnBar();
+}
+// v38: плашка «Вернуться к звонку», пока звонок идёт, а на экране — чат
+// или главная (как в Telegram). Тап — обратно в звонок.
+function syncCallReturnBar() {
+  const bar = $('#callReturnBar');
+  if (!bar) return;
+  const on = !!S.joined && $('#call')?.classList.contains('hidden');
+  bar.classList.toggle('hidden', !on);
+  clearInterval(S.returnBarTimer);
+  if (!on) return;
+  const tick = () => {
+    const t = $('#callReturnTime');
+    if (!t) return;
+    const sec = Math.max(0, Math.floor((Date.now() - (S.callStart || S.joinedAt || Date.now())) / 1000));
+    t.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  };
+  tick();
+  S.returnBarTimer = setInterval(tick, 1000);
+}
+function returnToCall() {
+  if (!S.joined || !S.secret) return;
+  history.replaceState(null, '', location.pathname + '#k=' + S.secret);
+  $('#chatroom')?.classList.add('hidden');
+  show('call');
 }
 function syncChatOpen() {
   const call = $('#call');
@@ -282,15 +331,23 @@ function route() {
   // v21: ссылка приватного чата (#chat=<seed>) — обрабатывает chat.js,
   // звонковая маршрутизация ниже её не касается.
   if (params.get('chat')) {
-    S.secret = null;
+    // v38: во время звонка (переход в чат) секрет звонка не сбрасываем —
+    // звонок продолжается, вернуться — плашкой «Вернуться к звонку».
+    if (!S.joined) S.secret = null;
     show('home');
     window.ZVChat?.openFromHash?.();
     return;
   }
   const k = params.get('k');
   const d = params.get('d');
+  if (S.joined) {
+    if (k && k === S.secret) {
+      $('#chatroom')?.classList.add('hidden');
+      show('call');
+    }
+    return;
+  }
   S.linkFp = d && /^[a-f0-9]{32}$/.test(d) ? d : null;
-  if (S.joined) return;
   if (k && /^[A-Za-z0-9_-]{22,}$/.test(k)) {
     S.secret = k;
     preJoin();
@@ -698,22 +755,20 @@ const audioC = () => ({
   noiseSuppression: S.audio.noise,
   autoGainControl: S.audio.agc,
 });
-// v34: разрешение захвата + поддержка facingMode (фронт / тыл).
-// Стандарт старта (правка владельца) — 1080p @ 30 на всех устройствах; адаптивная
-// лестница adaptQuality при плохой сети сама шагнёт вниз (вплоть до 720p и ниже).
-// Потолок захвата задаётся ручным выбором качества (S.vq): '1080' стандарт,
-// '1440' — 2K (2560×1440), '720' — экономно. Эко-режим (только вручную) — 720p @ 24.
-const VQ_TIERS = {
-  '1440': { w: 2560, h: 1440 },
-  '1080': { w: 1920, h: 1080 },
-  '720': { w: 1280, h: 720 },
-};
+// v37: разрешение захвата — по классу устройства и его нагрузке (media-policy.js).
+// «Авто» (по умолчанию): компьютер 1080p@30 (стандарт владельца v34), телефон
+// 720p@30, слабый телефон 480p@24; ручной выбор в настройках — потолок.
+// Эко-режим (только вручную) — не выше 720p@24. Перегрузка процессора,
+// перегрев и низкий заряд снижают ступень сами (adaptLoad), сеть — adaptQuality.
+const loadOpts = () => ({
+  eco: !!S.ecoMode,
+  cpu: S.load.cpu,
+  battLow: S.load.battLow,
+  pressure: S.load.pressure,
+});
 const videoC = (forceFacing = false) => {
-  const eco = !!S.ecoMode;
-  const t = VQ_TIERS[S.vq] || VQ_TIERS['1080'];
-  const base = eco
-    ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 24 } }
-    : { width: { ideal: t.w }, height: { ideal: t.h }, frameRate: { ideal: 30, max: 30 } };
+  const t = (S.capTier = captureTier(S.vq, S.devClass, loadOpts()));
+  const base = tierConstraints(t);
   if (!forceFacing && S.dev.cam) {
     return { ...base, deviceId: { exact: S.dev.cam } };
   }
@@ -1122,7 +1177,10 @@ window.addEventListener('keyup', (e) => {
 // ---------- Экран подготовки (Лобби) ----------
 async function preJoin() {
   show('prejoin');
-  $('#name').value = localStorage.zvName || '';
+  // v38: звонок из чата — имя в звонке = ник этого чата (не сохраняется
+  // глобально: у разных чатов могут быть разные ники, анонимность).
+  $('#name').value = S.callNameOverride || localStorage.zvName || '';
+  $('#name').placeholder = S.callNameOverride || myAnon();
   $('#link').value = roomLink();
   $('#callOwnerBox')?.classList.toggle('hidden', !S.linkFp || (S.personal && S.secret === S.personal.secret));
   $('#qr').classList.add('hidden');
@@ -1138,8 +1196,22 @@ async function preJoin() {
   if (S.autoJoinPending) {
     S.autoJoinPending = false;
     join();
+  } else if (S.autoCallPending) {
+    // v38: «Позвонить» из контактов/журнала — сразу дозвон владельцу ссылки.
+    S.autoCallPending = false;
+    if (S.linkFp && !(S.personal && S.secret === S.personal.secret)) startOutgoingCall();
   }
 }
+$('#nameDice') &&
+  ($('#nameDice').onclick = () => {
+    const n = randomAnonName();
+    $('#name').value = n;
+    if (!S.callNameOverride) {
+      try {
+        localStorage.zvAnonName = n;
+      } catch {}
+    }
+  });
 $('#pMic').onclick = toggleMic;
 $('#pCam').onclick = toggleCam;
 $('#pFlipCam') && ($('#pFlipCam').onclick = flipCamera);
@@ -1182,20 +1254,30 @@ async function fetchJson(url, ms = 4000) {
 }
 const isTurn = (s) => [].concat(s?.urls || []).some((u) => /^turns?:/.test(u));
 
+// v38: статический TURN из config.js — КРАЙНЕЕ средство (решение владельца:
+// беречь бесплатные лимиты). Старт звонка — только STUN (direct); TURN
+// добавляется лестницей ensureTurnLoaded: direct не встал за 6 с, ICE failed,
+// смена сети без direct или ручной режим «только TURN». Пока прямой путь
+// работает, к TURN-серверам нет даже аллокаций.
+const staticTurn = () => (CONFIG.EXTRA_ICE_SERVERS || []).filter(isTurn);
+
 async function loadIce() {
-  // v14 — лестница маршрутов и экономия TURN:
-  // старт всегда только с бесплатным STUN (direct). TURN здесь НЕ запрашиваем.
   const servers = [{ urls: CONFIG.STUN }];
+  const st = staticTurn();
   S.stunOnlyIce = servers;
+  S.baseIce = servers;
   S.turnLoaded = false;
+  S.turnDyn = false;
   S.hasTurn = false;
-  S.turnInfo = 'TURN не запрашивался (экономия квоты)';
-  return servers;
+  S.turnInfo = st.length
+    ? `TURN в резерве: ${st.length} ${plural(st.length, 'сервер', 'сервера', 'серверов')} из config — включится, только если прямой путь не встанет`
+    : 'TURN не запрашивался (экономия квоты)';
+  return S.baseIce;
 }
 
-// Эфемерные TURN-серверы: только из собственного Worker (/turn) или из
-// динамического Metered API, если он настроен в config (CONFIG.METERED).
-// Статических логинов/паролей в клиенте нет: в v36 они убраны окончательно.
+// TURN по требованию: свой Worker (/turn, если в нём настроены секреты TURN),
+// динамический Metered API (CONFIG.METERED) и статический TURN из config.js.
+// Вызывается только из лестницы ensureTurnLoaded — не на старте звонка.
 async function fetchTurnServers() {
   const out = [];
   const info = [];
@@ -1227,15 +1309,11 @@ async function fetchTurnServers() {
     );
   }
   await Promise.all(jobs);
-  // Резерв для самостоятельных сборок: EXTRA_ICE_SERVERS из config.js.
-  // В v36 список пуст — креды TURN больше не лежат в публичном клиенте и
-  // выдаются Worker'ом из секретов (см. RELEASE.md). Даже если поле
-  // заполнено, серверы попадают сюда, а не в стартовый ICE: трафик через
-  // них идёт только при реальной необходимости (ленивая догрузка).
-  const stat = (CONFIG.EXTRA_ICE_SERVERS || []).filter(isTurn);
+  S.turnDyn = out.length > 0;
+  const stat = staticTurn();
   if (stat.length) {
     out.push(...stat);
-    info.push('Статический резерв из config: есть');
+    info.push('статический из config: есть');
   }
   S.turnInfo = info.join(', ') || 'источники TURN не настроены';
   return out;
@@ -1257,7 +1335,11 @@ async function ensureTurnLoaded(reason = '') {
     }
     S.turnLoaded = true;
     S.hasTurn = true;
-    S.ice = [...(S.stunOnlyIce || [{ urls: CONFIG.STUN }]), ...turn];
+    const next = [...(S.stunOnlyIce || [{ urls: CONFIG.STUN }]), ...turn];
+    // Тот же набор уже в ICE (повторная эскалация) — ICE не перезапускаем:
+    // это сбросило бы идущие проверки relay-пар.
+    if (JSON.stringify(next) === JSON.stringify(S.ice || [])) return true;
+    S.ice = next;
     if (S.pc) {
       try {
         S.pc.setConfiguration(pcConfig());
@@ -1275,7 +1357,9 @@ const pcConfig = () => ({
   iceServers: S.ice,
   iceTransportPolicy: S.audio.netMode === 'relay' && S.hasTurn ? 'relay' : 'all',
   bundlePolicy: 'max-bundle',
-  iceCandidatePoolSize: 4, // предсбор STUN-кандидатов для ускоренного рукопожатия без TURN
+  // Предсбор кандидатов до offer. С max-bundle нужен ровно один набор:
+  // после эскалации на TURN каждый лишний набор — лишние relay-аллокации.
+  iceCandidatePoolSize: 1,
 });
 
 // Ручная настройка Opus в SDP — ТОЛЬКО если пользователь сам включил её в
@@ -1300,7 +1384,8 @@ async function join() {
   stopMicTest();
   ensureAudioEngine();
   $('#btnJoin').disabled = true;
-  localStorage.zvName = $('#name').value.trim();
+  if (S.callNameOverride) S.callNameOverride = $('#name').value.trim() || S.callNameOverride;
+  else localStorage.zvName = $('#name').value.trim();
   try {
     [S.ice, S.room] = await Promise.all([loadIce(), deriveRoom(S.secret)]);
   } catch {
@@ -1348,12 +1433,16 @@ async function join() {
   progress(10, 'Подключение к каналам сигналинга…');
   S.sig.start();
   S.joinedAt = Date.now();
+  // v37: ступени нагрузки — заново на каждый звонок; заряд и перегрев — живые.
+  Object.assign(S.load, { cpu: 0, cpuHits: 0, cpuCalm: 0, cpuLock: false, cpuBackAt: 0, cpuToast: false });
+  watchDeviceLoad();
+  reapplyMediaLoad();
   // TURN-креды Worker живут 6 часов: в долгом звонке обновляем ICE-серверы
   // каждый час, иначе после истечения TTL первое же переподключение ICE
   // теряет relay-путь и звонок умирает «сам по себе».
   clearInterval(S.iceRefreshTimer);
   S.iceRefreshTimer = setInterval(async () => {
-    if (!S.joined || !S.turnLoaded || !S.hasTurn) return;
+    if (!S.joined || !S.turnLoaded || !S.turnDyn) return; // статическому TURN обновлять нечего
     const turn = await fetchTurnServers().catch(() => null);
     if (!turn || !turn.length || !S.joined) return;
     S.ice = [...(S.stunOnlyIce || [{ urls: CONFIG.STUN }]), ...turn];
@@ -1390,14 +1479,27 @@ function setupMediaSession() {
   } catch {}
 }
 
-const myName = () => localStorage.zvName || 'Гость';
+// v38: без введённого имени — постоянное анонимное «Тихий Маяк» (одно на
+// устройство; 🎲 в лобби — другое). Раньше — безликое «Гость».
+function myAnon() {
+  let n = '';
+  try {
+    n = localStorage.zvAnonName || '';
+    if (!n) localStorage.zvAnonName = n = randomAnonName();
+  } catch {
+    n = n || randomAnonName();
+  }
+  return n;
+}
+const myName = () => S.callNameOverride || localStorage.zvName || myAnon();
 const webCodecsBridgeSupported = () =>
   typeof AudioEncoder !== 'undefined' &&
   typeof AudioDecoder !== 'undefined' &&
   typeof MediaStreamTrackProcessor !== 'undefined';
 function hello() {
   // bc: умеем ли мы в мост 2.0 (WebCodecs) — собеседник выберет формат под нас
-  S.sig?.send({ type: 'hello', name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0 });
+  // vc: 'h264' — нам выгоден аппаратный H.264 (собеседник поставит его первым)
+  S.sig?.send({ type: 'hello', name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0, vc: S.hwPref || undefined });
 }
 
 // ---------- Аварийный Аудио-Мост через Сигналинг (работает вообще без TURN и без UDP!) ----------
@@ -1819,8 +1921,9 @@ async function onSignal(m) {
     case 'hi':
       if (!acceptPeer(m)) return;
       if (S.peer && typeof m.bc === 'number') S.peer.bridgeCodecs = !!m.bc;
+      if (S.peer) S.peer.vc = m.vc === 'h264' ? 'h264' : '';
       if (m.type === 'hello') {
-        S.sig?.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0 });
+        S.sig?.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0, vc: S.hwPref || undefined });
       }
       if ((m.ver || 0) !== APP_VERSION && !S.verWarned && (m.type === 'hello' || m.ver)) {
         S.verWarned = true;
@@ -1919,7 +2022,7 @@ function acceptPeer(m) {
 }
 
 function setPeer(m) {
-  S.peer = { id: m.from, inst: m.inst, name: m.name || 'Собеседник', seen: Date.now() };
+  S.peer = { id: m.from, inst: m.inst, name: m.name || 'Собеседник', seen: Date.now(), vc: m.vc === 'h264' ? 'h264' : '' };
   S.polite = selfId < m.from;
   S.peerDialect = 'plain';
   S.gen = 0;
@@ -1990,6 +2093,8 @@ function createPC() {
   S.qBad = 0;
   S.qGood = 0;
   S.qHinted = false;
+  S.peerCap = null; // собеседник пришлёт свою подсказку при открытии ctrl
+  S.rxSent = '';
   log(
     `Попытка WebRTC №${S.gen + 1}: STUN (${CONFIG.STUN.length}), TURN: ${
       S.hasTurn ? 'есть' : 'нет'
@@ -2001,8 +2106,10 @@ function createPC() {
   S.fileCh = pc.createDataChannel('file', { negotiated: true, id: 1 });
   S.fileCh.binaryType = 'arraybuffer';
   S.fileCh.bufferedAmountLowThreshold = 1 << 20;
-  S.ctrl.onopen = () =>
+  S.ctrl.onopen = () => {
     sendCtrl({ t: 'state', mic: S.micOn, cam: S.camOn || !!S.screenTrack, name: myName() });
+    sendRxCap(true);
+  };
   S.ctrl.onmessage = (e) => onCtrl(e.data);
   S.fileCh.onmessage = (e) => onFileData(e.data);
   S.fileCh.onclose = () => {
@@ -2043,6 +2150,7 @@ function createPC() {
     }
     try {
       S.makingOffer = true;
+      applyCodecPrefs(pc);
       const offer = await pc.createOffer();
       offer.sdp = tuneOpusSdp(offer.sdp);
       await pc.setLocalDescription(offer);
@@ -2196,6 +2304,7 @@ async function onDesc(desc, via) {
     log(`Получен ${desc.type === 'offer' ? 'запрос (offer)' : 'ответ (answer)'} через ${viaName(via)}`);
     for (const c of S.pendingCands.splice(0)) await pc.addIceCandidate(c).catch(() => {});
     if (desc.type === 'offer') {
+      applyCodecPrefs(pc);
       const answer = await pc.createAnswer();
       answer.sdp = tuneOpusSdp(answer.sdp);
       await pc.setLocalDescription(answer);
@@ -2203,6 +2312,7 @@ async function onDesc(desc, via) {
     } else {
       clearTimeout(S.resendTimer);
     }
+    if (pc.connectionState === 'connected') noteCodecs(pc); // пересогласование посреди звонка
     progress(68, 'Ключи согласованы, пробиваем маршрут…');
     progressDetail();
   } catch (e) {
@@ -2256,6 +2366,7 @@ function onPcState(pc) {
       saveStats();
     }
     showSafety();
+    noteCodecs(pc);
     startStats(true);
     applyQuality();
   } else if (s === 'disconnected') {
@@ -2286,16 +2397,18 @@ function restartIce() {
   armWatchdog(S.pc, S.polite ? 17000 : 11500);
 }
 // De-escalation при смене сети: новая сеть (Wi-Fi <-> LTE) может дать прямой
-// маршрут, поэтому сначала сбрасываем TURN и пробуем direct; TURN вернётся
-// лениво через 6 секунд, только если direct снова не встанет.
+// маршрут. v38: догруженный TURN (любой, в т. ч. статический) сбрасываем и
+// пробуем снова только direct; TURN вернётся лениво через 6 секунд, если
+// direct не встанет. Лимиты TURN тратятся только когда без него никак.
 function deescalateToDirect() {
   if (!S.pc) return;
-  if (S.turnLoaded && S.hasTurn) {
+  if (S.turnLoaded && S.audio.netMode !== 'relay') {
     S.turnLoaded = false;
-    S.hasTurn = false;
+    S.turnDyn = false;
     S.ice = S.stunOnlyIce || [{ urls: CONFIG.STUN }];
+    S.hasTurn = false;
     try { S.pc.setConfiguration(pcConfig()); } catch {}
-    log('Смена сети: сначала пробуем direct без TURN (экономия квоты)');
+    log('Смена сети: сначала снова пробуем напрямую, TURN — только если direct не встанет');
     clearTimeout(S.turnTimer);
     S.turnTimer = setTimeout(() => {
       if (S.joined && S.pc?.connectionState !== 'connected') {
@@ -2531,8 +2644,15 @@ function transportText() {
     `Канал 3 — Nostr-реле (порт 443): ${sg.nostrUp || 0}/${sg.nostrTotal || 0} на связи\n` +
     `Канал 4 — ntfy: ${sg.ntfyTotal ? (sg.ntfyUp ? 'на связи' : 'подключение…') : 'не настроен'}\n` +
     `TURN-ретранслятор: ${
-      S.hasTurn ? 'есть (эфемерный, из Worker)' : S.turnLoaded ? 'недоступен — работаем без него' : 'не запрашивался (ленивый режим)'
-    } (${S.turnInfo || '—'})\n` +
+      S.hasTurn
+        ? (S.turnDyn ? 'включён (Worker/Metered + config)' : 'включён (config) — прямой путь не встал') +
+          ` (${S.turnInfo || '—'})`
+        : S.turnLoaded
+          ? `недоступен — работаем без него (${S.turnInfo || '—'})`
+          : staticTurn().length
+            ? `в резерве (${staticTurn().length} ${plural(staticTurn().length, 'сервер', 'сервера', 'серверов')} из config) — только если прямой путь не встанет`
+            : 'не настроен — звонки через «жёсткий» NAT пойдут мостом'
+    }\n` +
     `Маршрут звонка: ${S.bridgeActive ? 'Зашифрованный Мост через Сигналинг (без TURN)' : S.method || '—'}\n` +
     `Мост: ${S.bridgeActive ? (S.bridgeMode === 'webcodecs' ? '2.0 WebCodecs Opus' : '1.0 MediaRecorder') : 'выключен'} · WebCodecs в этом браузере: ${webCodecsBridgeSupported() ? 'есть' : 'нет'}`
   );
@@ -2571,6 +2691,7 @@ async function statsTick() {
   }
   const smp = deriveSample(cur, S.prevCounters);
   S.prevCounters = cur;
+  if (S.audioRed && smp.codec) smp.codec = 'red'; // getStats показывает вложенный Opus
   const method = `${ROUTE_TEXT[smp.route]}, ${smp.proto}`;
   if (method !== S.method) {
     S.method = method;
@@ -2596,6 +2717,7 @@ async function statsTick() {
     }
   }
   adaptQuality(smp.videoOutLoss, smp.rtt ?? 0);
+  adaptLoad(smp);
   rec.push(smp);
   S.lastSample = smp;
   const q = $('#quality');
@@ -2620,7 +2742,19 @@ function renderStatsPanel() {
     callSec: S.callStart ? (Date.now() - S.callStart) / 1000 : 0,
     delivery: S.sig?.deliveryStats?.() || null,
     bridgeMode: S.bridgeActive ? S.bridgeMode : '',
+    media: mediaModeText(),
   });
+}
+
+// v37: строка «Режим видео» в панели качества — почему видео такое, какое есть.
+function mediaModeText() {
+  const t = S.capTier;
+  if (!t) return '';
+  const parts = [`${S.vq === 'auto' ? 'Авто' : 'Вручную'} · ${CLASS_TEXT[S.devClass] || ''}`];
+  if (localTrack('video') && !S.screenTrack) parts.push(`камера ${t.h}p @ ${t.fps}${t.why.length ? ' (' + t.why.join(', ') + ')' : ''}`);
+  if (S.peerCap) parts.push(S.peerCap.h === 0 ? 'собеседник свернул — видео ему на паузе' : `собеседнику ≤${S.peerCap.h}p`);
+  if (viewHidden()) parts.push('у вас экран скрыт — входящее видео на паузе');
+  return parts.join(' · ');
 }
 
 function toggleStatsPanel() {
@@ -2633,19 +2767,10 @@ function toggleStatsPanel() {
 $('#quality') && ($('#quality').onclick = toggleStatsPanel);
 $('#bridgeBadge') && ($('#bridgeBadge').onclick = toggleStatsPanel);
 
-const QLEVELS = [
-  { maxBitrate: 2500000, scale: 1, fps: 30 }, // Full HD по умолчанию
-  { maxBitrate: 1200000, scale: 1.5, fps: 30 },
-  { maxBitrate: 600000, scale: 2, fps: 24 },
-  { maxBitrate: 250000, scale: 3, fps: 15 },
-  { maxBitrate: 120000, scale: 4, fps: 10 },
-];
+// Сетевая лестница QLEVELS — в media-policy.js (по высоте кадра, а не по
+// множителю: одинаково работает для захвата 1080p, 720p и 480p).
 async function applyQuality() {
   if (!S.pc) return;
-  // v34: в Эко-режиме (только ручном) не поднимаемся выше уровня 1 лестницы;
-  // стандарт — уровень 0. Для захвата 2K верхний уровень шлём 5.5 Мбит/с (см. ниже).
-  const minIdx = S.ecoMode ? Math.max(1, S.qLevel || 0) : (S.qLevel || 0);
-  const L = QLEVELS[Math.min(QLEVELS.length - 1, minIdx)];
   const audioBps = (S.audio.bitrate || 48) * 1000;
   for (const snd of S.pc.getSenders()) {
     if (!snd.track) continue;
@@ -2658,10 +2783,19 @@ async function applyQuality() {
       if (S.audio.opusTune) p.encodings[0].maxBitrate = audioBps;
       else delete p.encodings[0].maxBitrate;
     } else {
-      // Правка владельца (v34): верхний уровень лестницы при захвате 2K — 5.5 Мбит/с, иначе — по лестнице (Full HD 2.5 Мбит/с).
-      p.encodings[0].maxBitrate = minIdx === 0 && S.vq === '1440' ? 5500000 : L.maxBitrate;
-      p.encodings[0].scaleResolutionDownBy = L.scale;
-      p.encodings[0].maxFramerate = L.fps;
+      // v37: min(сетевая ступень, подсказка собеседника, эко). Собеседник со
+      // скрытым экраном просит h=0 — выключаем кодер совсем (active=false):
+      // не тратим ни процессор, ни его батарею, ни трафик.
+      const st = snd.track.getSettings?.() || {};
+      const e = videoEncoding(S.qLevel || 0, { w: st.width, h: st.height }, S.peerCap, {
+        eco: !!S.ecoMode,
+        srcFps: st.frameRate || S.capTier?.fps || 30,
+      });
+      p.encodings[0].active = e.active;
+      p.encodings[0].maxBitrate = e.maxBitrate;
+      p.encodings[0].scaleResolutionDownBy = e.scaleResolutionDownBy;
+      p.encodings[0].maxFramerate = e.maxFramerate;
+      S.encInfo = e;
     }
     try {
       await snd.setParameters(p);
@@ -2696,6 +2830,174 @@ function adaptQuality(outLoss, rtt) {
     toast('Слабая сеть — выключите камеру для идеального звука', 6500);
   }
 }
+
+// v37: какие кодеки реально согласованы (по answer) — в журнал и панель.
+function noteCodecs(pc) {
+  const ans = [pc.currentLocalDescription, pc.currentRemoteDescription].find((d) => d?.type === 'answer');
+  if (!ans) return;
+  const a = sdpFirstCodec(ans.sdp, 'audio');
+  const v = sdpFirstCodec(ans.sdp, 'video');
+  S.audioRed = a === 'red';
+  const key = a + '/' + v;
+  if (key === S.codecsLogged) return;
+  S.codecsLogged = key;
+  log(`Кодеки: голос ${S.audioRed ? 'Opus + RED (защита от потерь)' : a || '—'}, видео ${v ? v.toUpperCase() : '—'}`);
+}
+
+// ---------- v37: нагрузка устройства → ступени видео (против нагрева) ----------
+// Chrome сообщает qualityLimitationReason='cpu', когда кодер не успевает.
+// 3 тика подряд (≈6 с) — снижаем захват камеры на ступень (до трёх);
+// 90 с спокойствия — возвращаем одну. Если после возврата перегрузка
+// вернулась в течение 2 минут — ступень фиксируется до конца звонка:
+// телефон уже прогрет, качели «вверх-вниз» только мешают смотреть.
+function adaptLoad(smp) {
+  const L = S.load;
+  if (!smp?.videoOut || S.screenTrack) {
+    L.cpuHits = 0;
+    return;
+  }
+  if (smp.limitation === 'cpu') {
+    L.cpuHits++;
+    L.cpuCalm = 0;
+  } else {
+    L.cpuHits = 0;
+    L.cpuCalm++;
+  }
+  if (L.cpuHits >= 3 && L.cpu < 3) {
+    L.cpuHits = 0;
+    if (L.cpuBackAt && Date.now() - L.cpuBackAt < 120000) L.cpuLock = true;
+    L.cpu++;
+    log(`Процессор не успевает кодировать видео — снижаем захват (ступень ${L.cpu})`);
+    if (!L.cpuToast) {
+      L.cpuToast = true;
+      toast('Устройство перегружено — видео облегчено, чтобы не грелось', 5000);
+    }
+    reapplyMediaLoad();
+  } else if (L.cpu > 0 && !L.cpuLock && L.cpuCalm >= 45) {
+    L.cpuCalm = 0;
+    L.cpu--;
+    L.cpuBackAt = Date.now();
+    log(`Нагрузка спала — возвращаем ступень видео (${L.cpu})`);
+    reapplyMediaLoad();
+  }
+}
+
+// Пересчитать ступень захвата и подсказку собеседнику после любой смены
+// нагрузки (ЦП, перегрев, заряд, эко, ручной выбор качества).
+async function reapplyMediaLoad() {
+  const prev = S.capTier;
+  const t = (S.capTier = captureTier(S.vq, S.devClass, loadOpts()));
+  const v = localTrack('video');
+  if (v && !S.screenTrack && (!prev || prev.id !== t.id || prev.fps !== t.fps)) {
+    try {
+      await v.applyConstraints(tierConstraints(t));
+      log(`Камера: ${t.h}p @ ${t.fps} к/с${t.why.length ? ' (' + t.why.join(', ') + ')' : ''}`);
+    } catch {}
+  }
+  sendRxCap();
+  applyQuality();
+}
+
+// Подсказка собеседнику, какое видео нам нужно (DataChannel 'ctrl', тип
+// 'vcap'). Старые клиенты её просто игнорируют. h=0 — экран скрыт или звонок
+// заблокирован: собеседник выключает кодер (обе стороны не греются).
+const viewHidden = () => document.visibilityState === 'hidden' || !!S.callLocked;
+const myRxCap = () => rxCap(S.devClass, { ...loadOpts(), hidden: viewHidden() });
+function sendRxCap(force = false) {
+  if (S.ctrl?.readyState !== 'open') return; // уйдёт при открытии канала
+  const c = myRxCap();
+  const j = JSON.stringify(c);
+  if (!force && j === S.rxSent) return;
+  S.rxSent = j;
+  sendCtrl({ t: 'vcap', ...c });
+}
+// Скрытие — с задержкой 1,5 с (быстрое переключение приложений не дёргает
+// кодер собеседника), возврат — сразу.
+function onViewChange() {
+  clearTimeout(S.viewTimer);
+  if (viewHidden()) S.viewTimer = setTimeout(() => sendRxCap(), 1500);
+  else sendRxCap();
+}
+
+// Заряд и Compute Pressure — только как сигналы «облегчить». Оба API
+// необязательны: где их нет (Safari, Firefox), работает только ЦП-адаптация.
+function watchDeviceLoad() {
+  if (S.loadWatch) return;
+  S.loadWatch = true;
+  navigator
+    .getBattery?.()
+    .then((b) => {
+      const upd = () => {
+        const low = !b.charging && b.level <= 0.15;
+        if (low === S.load.battLow) return;
+        S.load.battLow = low;
+        if (S.joined) {
+          log(low ? 'Заряд ниже 15% — облегчаем видео (режим «Авто»)' : 'Заряд в норме — видео без ограничения по батарее');
+          reapplyMediaLoad();
+        }
+      };
+      b.addEventListener?.('levelchange', upd);
+      b.addEventListener?.('chargingchange', upd);
+      upd();
+    })
+    .catch(() => {});
+  if (typeof PressureObserver === 'function') {
+    try {
+      const po = new PressureObserver((recs) => {
+        const st = recs[recs.length - 1]?.state;
+        const p = st === 'critical' ? 2 : st === 'serious' ? 1 : 0;
+        if (p === S.load.pressure) return;
+        S.load.pressure = p;
+        if (S.joined) {
+          log(`Нагрузка процессора (Compute Pressure): ${st}`);
+          reapplyMediaLoad();
+        }
+      });
+      po.observe('cpu', { sampleInterval: 4000 })?.catch?.(() => {});
+    } catch {}
+  }
+}
+
+// ---------- v37: порядок кодеков (RED для голоса, аппаратный H.264) ----------
+// Применяется перед каждым offer/answer. RED — защита голоса от потерь
+// (настройка «Защита голоса от потерь», по умолчанию ВКЛ). H.264 первым —
+// только если на телефоне он аппаратный, а VP8 нет (или так попросил
+// собеседник): обе стороны выбирают одинаково, и кодек сходится.
+function applyCodecPrefs(pc) {
+  if (typeof RTCRtpTransceiver === 'undefined' || !RTCRtpTransceiver.prototype.setCodecPreferences) return;
+  const wantH264 = S.hwPref === 'h264' || S.peer?.vc === 'h264';
+  for (const tr of pc.getTransceivers()) {
+    if (tr.stopped) continue;
+    const kind = tr.receiver?.track?.kind;
+    const caps = kind && RTCRtpReceiver.getCapabilities?.(kind)?.codecs;
+    if (!caps) continue;
+    const order = kind === 'audio' ? audioCodecOrder(caps, S.red) : videoCodecOrder(caps, wantH264);
+    try {
+      if (order) {
+        tr.setCodecPreferences(order);
+        tr._zvPref = true;
+      } else if (tr._zvPref) {
+        tr.setCodecPreferences([]); // вернуть порядок браузера
+        tr._zvPref = false;
+      }
+    } catch {}
+  }
+}
+
+// Аппаратный ли H.264/VP8 на этом телефоне (MediaCapabilities, тип webrtc).
+// Отключить: localStorage.zvHwPref = '0'.
+async function detectHwVideo() {
+  try {
+    if (localStorage.zvHwPref === '0' || !S.isMobile || !navigator.mediaCapabilities?.encodingInfo) return;
+    const q = (contentType) =>
+      navigator.mediaCapabilities
+        .encodingInfo({ type: 'webrtc', video: { contentType, width: 1280, height: 720, bitrate: 1500000, framerate: 30 } })
+        .catch(() => null);
+    const [vp8, h264] = await Promise.all([q('video/VP8'), q('video/H264')]);
+    if (h264?.supported && h264.powerEfficient && !(vp8?.supported && vp8.powerEfficient)) S.hwPref = 'h264';
+  } catch {}
+}
+detectHwVideo();
 
 async function showSafety() {
   const pc = S.pc;
@@ -2755,6 +3057,16 @@ function onCtrl(raw) {
     }
     updateRemoteView();
     updateStatus();
+  } else if (m.t === 'vcap') {
+    const c = parseCap(m);
+    if (!c) return;
+    const was = S.peerCap;
+    S.peerCap = c;
+    if (was && was.h === c.h && was.fps === c.fps) return;
+    if (c.h === 0) log('Собеседник свернул звонок — видео ему не шлём (экономия батареи)');
+    else if (was?.h === 0) log('Собеседник вернулся — видео снова идёт');
+    else log(`Собеседнику нужно видео до ${c.h}p @ ${c.fps} к/с`);
+    applyQuality();
   }
 }
 function hideChatEmpty() {
@@ -2945,6 +3257,7 @@ function setCallLock(locked) {
     ov.classList.toggle('oled-dim', S.callDimmed);
   }
   $('#call')?.classList.toggle('is-locked', S.callLocked);
+  onViewChange(); // v37: под блокировкой видео собеседника не видно — просим его не слать
   if (S.callLocked) {
     const peerName = S.peer?.name || 'Активный звонок';
     if ($('#callLockPeer')) $('#callLockPeer').textContent = `${peerName} · экран заблокирован`;
@@ -2999,13 +3312,7 @@ async function setEcoMode(on) {
   S.ecoMode = !!on;
   try { localStorage.zvEco = S.ecoMode ? '1' : '0'; } catch {}
   syncEcoUI();
-  const v = localTrack('video');
-  if (v && !S.screenTrack) {
-    try {
-      await v.applyConstraints(videoC());
-    } catch {}
-  }
-  applyQuality();
+  await reapplyMediaLoad();
   toast(S.ecoMode ? '❄️ Эко-режим включён: снижен нагрев и расход батареи' : 'Эко-режим выключен (максимальное качество)');
 }
 syncEcoUI();
@@ -3076,14 +3383,16 @@ async function openSettingsModal() {
     $('#sEcoMode', b).onchange = (e) => setEcoMode(e.target.checked);
   }
   if ($('#sVideoQ', b)) {
-    $('#sVideoQ', b).value = S.vq || '1080';
+    $('#sVideoQ', b).value = S.vq || 'auto';
     $('#sVideoQ', b).onchange = async (e) => {
-      S.vq = e.target.value;
+      S.vq = VQ_CHOICES.includes(e.target.value) ? e.target.value : 'auto';
       try { localStorage.zvVQ = S.vq; } catch {}
-      const v = localTrack('video');
-      if (v) { try { await v.applyConstraints(videoC()); } catch {} }
-      applyQuality();
-      toast('Качество видео: ' + (S.vq === '1440' ? '2K (1440p)' : S.vq === '720' ? '720p' : '1080p'));
+      await reapplyMediaLoad();
+      const t = captureTier(S.vq, S.devClass, loadOpts());
+      toast(
+        'Качество видео: ' +
+          (S.vq === 'auto' ? `авто (${CLASS_TEXT[S.devClass]}: ${t.h}p @ ${t.fps})` : S.vq === '1440' ? '2K (1440p)' : S.vq + 'p')
+      );
     };
   }
   $('#sSpk', b).onchange = (e) => {
@@ -3207,6 +3516,17 @@ async function openSettingsModal() {
     applyQuality();
   };
 
+  // v37: RED — защита голоса от потерь (порядок кодеков при следующем согласовании)
+  const sRed = $('#sRed', b);
+  if (sRed) {
+    sRed.checked = S.red;
+    sRed.onchange = () => {
+      S.red = sRed.checked;
+      try { localStorage.zvRed = S.red ? '1' : '0'; } catch {}
+      toast(S.red ? 'Защита голоса от потерь включится при следующем подключении' : 'RED выключен — при следующем подключении голос без копий');
+    };
+  }
+
   // Режим сети и обхода блокировок
   const sNetMode = $('#sNetMode', b);
   sNetMode.value = S.audio.netMode;
@@ -3218,7 +3538,7 @@ async function openSettingsModal() {
     } else if (S.audio.netMode === 'relay') {
       // «Только TURN» — единственный случай, когда TURN грузится немедленно.
       const ok = await ensureTurnLoaded('режим «только TURN» включён вручную');
-      if (!ok) toast('TURN недоступен: в Worker не настроены TURN-креды. Работаем через direct + мост');
+      if (!ok) toast('TURN недоступен: нет серверов в config.js и в Worker. Работаем через direct + мост');
       else if (S.pc) {
         try {
           S.pc.setConfiguration(pcConfig());
@@ -3236,6 +3556,29 @@ async function openSettingsModal() {
     }
   };
 
+  // v38: оформление (ZVON / классическое) и проверка рингтона.
+  const skinNow = window.__zvSkin?.get?.() || 'zvon';
+  b.querySelectorAll('input[name="sSkin"]').forEach((r) => {
+    r.checked = r.value === skinNow;
+    r.onchange = () => {
+      if (!r.checked) return;
+      window.__zvSkin?.set?.(r.value);
+      toast(r.value === 'classic' ? 'Классическое оформление включено' : 'Оформление ZVON включено');
+    };
+  });
+  const sTestRing = $('#sTestRing', b);
+  if (sTestRing) {
+    sTestRing.onclick = () => {
+      if (ringCtx) {
+        stopRingtone();
+        return;
+      }
+      startRingtone();
+      setTimeout(() => {
+        if (!S.incoming) stopRingtone();
+      }, 4000);
+    };
+  }
   // v28 (G): «Свой сервер» — адрес собственного Worker. Применяется всеми
   // модулями через getWorkerBase(): новые подключения сразу, слушатель
   // входящих перезапускается; идущий звонок сервер не меняет.
@@ -3310,6 +3653,13 @@ $('#unmuteHint').onclick = () => {
 $('#cHang').onclick = hangup;
 
 async function hangup() {
+  // v38: звонок из чата — по завершении назад в чат; чат узнаёт о выходе
+  // (leave/end группового звонка).
+  const endedSecret = S.secret;
+  const ret = S.returnTo && S.returnSecret === endedSecret ? S.returnTo : null;
+  S.returnTo = null;
+  S.returnSecret = null;
+  S.callNameOverride = null;
   try {
     S.sig?.send({ type: 'bye' });
     S.sig?.sendByeBeacon();
@@ -3345,6 +3695,10 @@ async function hangup() {
   show('home');
   $('#homeMsg').textContent = 'Звонок завершён';
   S.leaving = false;
+  try {
+    window.ZVChat?.onCallEnded?.(endedSecret);
+  } catch {}
+  if (ret) location.hash = ret.slice(1);
 }
 
 window.addEventListener('pagehide', () => {
@@ -3354,6 +3708,7 @@ window.addEventListener('pagehide', () => {
   }
 });
 document.addEventListener('visibilitychange', async () => {
+  if (S.joined) onViewChange();
   if (document.visibilityState === 'visible' && S.joined) {
     if (S.audioCtx && S.audioCtx.state !== 'running') recoverRemoteAudio('возврат на вкладку');
     try {
@@ -3367,38 +3722,93 @@ document.addEventListener('visibilitychange', async () => {
 // ---------- Коммуникатор v20: личная ссылка, дозвон с рингтоном, входящие ----------
 let ringCtx = null;
 let ringTimer = null;
+// v38: громкий рингтон. Раньше — два тихих синуса 440/480 Гц с усилением
+// 0.22: маленький динамик телефона почти не воспроизводит 440 Гц, звонок
+// пропускали. Теперь «звонок-трель» в полосе 1,4–2,1 кГц (там динамики
+// громче всего), богатый гармониками тембр, компрессор поднимает
+// воспринимаемую громкость без клиппинга; плюс вибрация в такт (Android).
+let ringVibTimer = null;
+let ringUnlock = null;
 function startRingtone() {
   stopRingtone();
+  const vib = () => {
+    try {
+      navigator.vibrate?.([900, 300, 900]);
+    } catch {}
+  };
+  vib();
+  ringVibTimer = setInterval(vib, 3600);
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return;
-    const ctx = (ringCtx = new Ctx());
-    const beep = (t0, f) => {
-      const o = ctx.createOscillator();
+    const ctx = (ringCtx = new Ctx({ latencyHint: 'interactive' }));
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -20;
+    comp.knee.value = 4;
+    comp.ratio.value = 10;
+    comp.attack.value = 0.002;
+    comp.release.value = 0.12;
+    const master = ctx.createGain();
+    master.gain.value = 1.0;
+    master.connect(comp).connect(ctx.destination);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 5200;
+    lp.connect(master);
+    // Одна «трель»: частота прыгает между двумя тонами 25 раз в секунду,
+    // как у механического звонка.
+    const burst = (t0, dur, f1, f2) => {
       const g = ctx.createGain();
-      o.type = 'sine';
-      o.frequency.value = f;
       g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(0.22, t0 + 0.03);
-      g.gain.setValueAtTime(0.22, t0 + 0.36);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.42);
-      o.connect(g).connect(ctx.destination);
-      o.start(t0);
-      o.stop(t0 + 0.45);
+      g.gain.exponentialRampToValueAtTime(0.9, t0 + 0.015);
+      g.gain.setValueAtTime(0.9, t0 + dur - 0.06);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      g.connect(lp);
+      const mk = (type, mul, level) => {
+        const o = ctx.createOscillator();
+        const og = ctx.createGain();
+        o.type = type;
+        og.gain.value = level;
+        for (let t = t0, i = 0; t < t0 + dur; t += 0.04, i++) {
+          o.frequency.setValueAtTime((i % 2 ? f2 : f1) * mul, t);
+        }
+        o.connect(og).connect(g);
+        o.start(t0);
+        o.stop(t0 + dur + 0.03);
+      };
+      mk('square', 1, 0.32);
+      mk('sine', 1, 0.6);
+      mk('triangle', 2, 0.25);
     };
     const cycle = () => {
-      if (!ringCtx) return;
+      if (!ringCtx || ringCtx !== ctx) return;
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
       const t = ctx.currentTime + 0.05;
-      beep(t, 440);
-      beep(t + 0.5, 480);
-      ringTimer = setTimeout(cycle, 2300);
+      burst(t, 0.9, 1400, 1760);
+      burst(t + 1.15, 0.9, 1400, 1760);
+      ringTimer = setTimeout(cycle, 3600);
     };
+    // Браузер мог создать контекст «приостановленным» (нет жеста на
+    // странице) — первый же тап/клавиша его разбудит.
+    ringUnlock = () => ctx.resume().catch(() => {});
+    document.addEventListener('pointerdown', ringUnlock, { once: true, capture: true });
+    document.addEventListener('keydown', ringUnlock, { once: true, capture: true });
     cycle();
   } catch {}
 }
 function stopRingtone() {
   clearTimeout(ringTimer);
   ringTimer = null;
+  clearInterval(ringVibTimer);
+  ringVibTimer = null;
+  try {
+    navigator.vibrate?.(0);
+  } catch {}
+  if (ringUnlock) {
+    document.removeEventListener('pointerdown', ringUnlock, { capture: true });
+    document.removeEventListener('keydown', ringUnlock, { capture: true });
+    ringUnlock = null;
+  }
   if (ringCtx) {
     ringCtx.close().catch(() => {});
     ringCtx = null;
@@ -3407,6 +3817,7 @@ function stopRingtone() {
 
 // ---------- Журнал звонков (v36: длительность, маршрут и качество) ----------
 const JOURNAL_MAX = 200;
+const JOURNAL_TTL_MS = 30 * 24 * 3600000;
 const newJournalKey = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 /** Пишет запись журнала и сразу возвращает её ключ (запись — в фоне). */
@@ -3431,7 +3842,8 @@ function finishCallRecord() {
   const sum = rec ? rec.summary() : { dur: Math.round((Date.now() - startedAt) / 1000), route: null };
   if (!sum.route && S.bridgeActive) sum.route = 'bridge';
   if (sum.dur < 2) return;
-  journalAdd(meta.dir || 'link', S.peer?.name || meta.name, 'completed', { ...sum, ts: startedAt }, meta.key);
+  journalAdd(meta.dir || 'link', S.peer?.name || meta.name, 'completed', { ...sum, ts: startedAt, ...(meta.fp ? { fp: meta.fp } : {}) }, meta.key);
+  if (meta.fp) touchPeer(meta.fp, S.peer?.name).catch(() => {});
 }
 
 async function renderCalls() {
@@ -3441,11 +3853,485 @@ async function renderCalls() {
   } catch (e) {
     console.warn('journal', e);
   }
-  for (const old of all.slice(JOURNAL_MAX)) kvDel('calls', old.key).catch(() => {});
-  const entries = all.slice(0, JOURNAL_MAX).map((x) => x.value);
-  renderCallsList($('#callsList'), entries);
+  // v38: журнал — не дольше 30 дней (и не больше JOURNAL_MAX записей).
+  const cutoff = Date.now() - JOURNAL_TTL_MS;
+  const keep = [];
+  for (const x of all) {
+    if (keep.length >= JOURNAL_MAX || !(x.value.ts > cutoff)) kvDel('calls', x.key).catch(() => {});
+    else keep.push(x);
+  }
+  const entries = keep.map((x) => x.value);
+  const book = await contactsLoad();
+  renderCallsList($('#callsList'), entries, {
+    onCall: (v) => callPeer(v.fp),
+    onMenu: (v, el) => openContactMenu(v.fp, el, v),
+    nameOf: (v) => (v.fp && book.items[v.fp]?.saved ? book.items[v.fp].name : null),
+  });
   renderCallsDashboard($('#callsDash'), journalDigest(entries));
+  renderContacts().catch(() => {});
 }
+
+// ---------- v38: адресная книга (контакты и «обратные номера») ----------
+// identity/contacts: {v:1, items:{[fp]: {fp, name, secretEnc, saved, addedAt, lastAt}}}.
+// fp — отпечаток личности собеседника (d=… его личной ссылки), secretEnc —
+// секрет его ссылки под vault-ключом устройства (как секреты комнат).
+// Номера из журнала, не сохранённые в контакты, забываются через 30 дней
+// после последнего звонка — вместе с самим журналом. Контакты не уходят ни
+// на сервер, ни в резервную копию: это только локальная записная книжка.
+const PEER_TTL_MS = 30 * 24 * 3600000;
+let contactsCache = null;
+const validFp = (fp) => typeof fp === 'string' && /^[a-f0-9]{32}$/.test(fp);
+const validSecret = (k) => typeof k === 'string' && /^[A-Za-z0-9_-]{22,}$/.test(k);
+const shareBackOn = () => {
+  try {
+    return localStorage.zvShareBack !== '0';
+  } catch {
+    return true;
+  }
+};
+/** «Обратный номер» из payload звонка: {k, d}, только если d = отпечаток звонящего. */
+function backOf(payload, fromFp) {
+  const b = payload && payload.back;
+  if (!b || !validSecret(b.k) || !validFp(b.d)) return null;
+  if (fromFp && b.d !== fromFp) return null;
+  if (S.personal && b.d === S.personal.fp) return null;
+  return { k: b.k, d: b.d };
+}
+async function contactsLoad() {
+  if (contactsCache) return contactsCache;
+  let rec = null;
+  try {
+    rec = await kvGet('identity', 'contacts');
+  } catch {}
+  contactsCache = rec && rec.items && typeof rec.items === 'object' ? rec : { v: 1, items: {} };
+  const now = Date.now();
+  let changed = false;
+  for (const [fp, c] of Object.entries(contactsCache.items)) {
+    if (!c || (!c.saved && now - (c.lastAt || c.addedAt || 0) > PEER_TTL_MS)) {
+      delete contactsCache.items[fp];
+      changed = true;
+    }
+  }
+  if (changed) await contactsSave();
+  return contactsCache;
+}
+async function contactsSave() {
+  if (!contactsCache) return;
+  try {
+    await kvPut('identity', 'contacts', contactsCache);
+  } catch (e) {
+    console.warn('contacts', e);
+  }
+}
+/** Запомнить номер собеседника (save — сразу в контакты, с именем). */
+async function rememberPeer({ secret, fp, name = '', save = false }) {
+  if (!validSecret(secret) || !validFp(fp)) return null;
+  if (S.personal && fp === S.personal.fp) return null;
+  const book = await contactsLoad();
+  const prev = book.items[fp];
+  const now = Date.now();
+  const nm = String(name || '').trim().slice(0, 40);
+  book.items[fp] = {
+    fp,
+    name: save && nm ? nm : prev?.saved ? prev.name : nm || prev?.name || '',
+    secretEnc: await encryptWithVault(secret),
+    saved: !!(prev?.saved || save),
+    addedAt: prev?.addedAt || now,
+    lastAt: now,
+  };
+  await contactsSave();
+  renderContacts().catch(() => {});
+  return book.items[fp];
+}
+async function touchPeer(fp, name) {
+  const book = await contactsLoad();
+  const c = book.items[fp];
+  if (!c) return;
+  c.lastAt = Date.now();
+  const nm = String(name || '').trim().slice(0, 40);
+  if (!c.saved && nm) c.name = nm;
+  await contactsSave();
+  renderContacts().catch(() => {});
+}
+async function peerName(fp) {
+  if (!validFp(fp)) return '';
+  const c = (await contactsLoad()).items[fp];
+  return c?.saved ? c.name : '';
+}
+async function peerSecret(fp) {
+  const c = (await contactsLoad()).items[fp];
+  if (!c?.secretEnc) return null;
+  try {
+    return await decryptWithVault(c.secretEnc);
+  } catch {
+    return null;
+  }
+}
+async function callPeer(fp) {
+  if (!validFp(fp)) return;
+  if (S.joined) return toast('Сначала завершите текущий звонок');
+  const secret = await peerSecret(fp);
+  if (!validSecret(secret)) return toast('Номер не найден — попросите ссылку заново');
+  hideContactMenu();
+  S.autoCallPending = true;
+  const hash = 'k=' + secret + '&d=' + fp;
+  if (location.hash.slice(1) === hash) route();
+  else location.hash = hash;
+}
+async function renderContacts() {
+  const ul = $('#contactsList');
+  if (!ul) return;
+  const book = await contactsLoad();
+  const list = Object.values(book.items)
+    .filter((c) => c.saved)
+    .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0) || String(a.name).localeCompare(String(b.name), 'ru'));
+  renderContactsList(ul, list, {
+    onCall: (c) => callPeer(c.fp),
+    onMenu: (c, el) => openContactMenu(c.fp, el, null),
+  });
+}
+
+// Меню контакта / записи журнала. Удаление — в два нажатия (как в чатах).
+let contactMenuFp = null;
+function hideContactMenu() {
+  $('#contactMenu')?.classList.add('hidden');
+  contactMenuFp = null;
+}
+async function openContactMenu(fp, anchor, entry) {
+  const menu = $('#contactMenu');
+  if (!menu || !validFp(fp)) return;
+  if (contactMenuFp === fp && !menu.classList.contains('hidden')) return hideContactMenu();
+  const c = (await contactsLoad()).items[fp];
+  if (!c) return toast('Номер этого звонка не сохранился (истёк срок или звонивший его не передал)');
+  contactMenuFp = fp;
+  const del = $('#contactActDel');
+  if (del) {
+    delete del.dataset.armed;
+    (del.querySelector('span') || del).textContent = c.saved ? 'Удалить контакт' : 'Забыть номер';
+  }
+  $('#contactActSave')?.classList.toggle('hidden', !!c.saved);
+  $('#contactActRename')?.classList.toggle('hidden', !c.saved);
+  menu.dataset.name = (entry && entry.name) || c.name || '';
+  menu.classList.remove('hidden');
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth || 220;
+  const mh = menu.offsetHeight || 200;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const top = r.bottom + mh + 8 > vh ? Math.max(8, r.top - mh - 4) : r.bottom + 4;
+  menu.style.top = top + 'px';
+  menu.style.left = Math.max(8, Math.min(vw - mw - 8, r.right - mw)) + 'px';
+}
+document.addEventListener(
+  'pointerdown',
+  (e) => {
+    const menu = $('#contactMenu');
+    if (!menu || menu.classList.contains('hidden')) return;
+    if (menu.contains(e.target) || e.target.closest?.('.call-li')) return;
+    hideContactMenu();
+  },
+  true
+);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') hideContactMenu();
+});
+
+// Редактор контакта: добавить по ссылке, сохранить номер из журнала, переименовать.
+let contactEditFp = null;
+function openContactEditor(fp = null, name = '') {
+  const box = $('#contactAddBox');
+  if (!box) return;
+  contactEditFp = fp;
+  box.classList.remove('hidden');
+  $('#contactAddLink')?.classList.toggle('hidden', !!fp);
+  const nm = $('#contactAddName');
+  if (nm) {
+    nm.value = name || '';
+    nm.focus();
+  }
+  if (!fp && $('#contactAddLink')) $('#contactAddLink').value = '';
+  const note = $('#contactAddNote');
+  if (note) note.textContent = '';
+}
+function closeContactEditor() {
+  $('#contactAddBox')?.classList.add('hidden');
+  contactEditFp = null;
+}
+$('#btnContactAdd') &&
+  ($('#btnContactAdd').onclick = () => {
+    if ($('#contactAddBox')?.classList.contains('hidden')) openContactEditor(null, '');
+    else closeContactEditor();
+  });
+$('#contactAddCancel') && ($('#contactAddCancel').onclick = closeContactEditor);
+$('#contactAddSave') &&
+  ($('#contactAddSave').onclick = async () => {
+    const note = $('#contactAddNote');
+    const say = (t) => {
+      if (note) note.textContent = t;
+    };
+    const name = ($('#contactAddName')?.value || '').trim().slice(0, 40);
+    if (!name) return say('Введите имя — его видите только вы.');
+    if (contactEditFp) {
+      const book = await contactsLoad();
+      const c = book.items[contactEditFp];
+      if (!c) return say('Номер не найден.');
+      c.name = name;
+      c.saved = true;
+      await contactsSave();
+      closeContactEditor();
+      renderCalls().catch(() => {});
+      return;
+    }
+    const raw = ($('#contactAddLink')?.value || '').trim();
+    const t = parseCallLink(raw);
+    if (!t || !t.fp) return say('Нужна личная ссылка целиком (с частью «&d=…»): её копируют во вкладке «Мой номер».');
+    if (S.personal && t.fp === S.personal.fp) return say('Это ваша собственная ссылка.');
+    await rememberPeer({ secret: t.secret, fp: t.fp, name, save: true });
+    closeContactEditor();
+    toast('Контакт сохранён');
+    renderCalls().catch(() => {});
+  });
+$('#contactActCall') &&
+  ($('#contactActCall').onclick = () => {
+    const fp = contactMenuFp;
+    hideContactMenu();
+    callPeer(fp);
+  });
+$('#contactActSave') &&
+  ($('#contactActSave').onclick = () => {
+    const fp = contactMenuFp;
+    const name = $('#contactMenu')?.dataset.name || '';
+    hideContactMenu();
+    openContactEditor(fp, name);
+  });
+$('#contactActRename') &&
+  ($('#contactActRename').onclick = async () => {
+    const fp = contactMenuFp;
+    hideContactMenu();
+    openContactEditor(fp, (await contactsLoad()).items[fp]?.name || '');
+  });
+$('#contactActCopy') &&
+  ($('#contactActCopy').onclick = async () => {
+    const fp = contactMenuFp;
+    hideContactMenu();
+    const secret = await peerSecret(fp);
+    if (!validSecret(secret)) return toast('Номер не найден');
+    const link = `${location.origin}${location.pathname}#k=${secret}&d=${fp}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      toast('Ссылка скопирована');
+    } catch {
+      toast('Не удалось скопировать');
+    }
+  });
+$('#contactActDel') &&
+  ($('#contactActDel').onclick = async () => {
+    const btn = $('#contactActDel');
+    if (!btn.dataset.armed) {
+      btn.dataset.armed = '1';
+      (btn.querySelector('span') || btn).textContent = 'Точно удалить?';
+      return;
+    }
+    const fp = contactMenuFp;
+    hideContactMenu();
+    const book = await contactsLoad();
+    delete book.items[fp];
+    await contactsSave();
+    renderCalls().catch(() => {});
+  });
+
+// ---------- v38: «Сменить номер» и «Стереть всё» ----------
+// Отзыв Inbox, который не удалось выполнить сразу (нет сети), повторяется
+// при следующих запусках: иначе по старой ссылке ещё приходили бы пуши.
+const RETIRE_KEY = 'zvRetirePending';
+function pendingRetire() {
+  try {
+    const v = JSON.parse(localStorage.getItem(RETIRE_KEY) || '[]');
+    return Array.isArray(v) ? v.filter((t) => typeof t === 'string' && /^[a-z0-9-]{16,80}$/.test(t)) : [];
+  } catch {
+    return [];
+  }
+}
+function setPendingRetire(list) {
+  try {
+    if (list.length) localStorage.setItem(RETIRE_KEY, JSON.stringify([...new Set(list)].slice(0, 8)));
+    else localStorage.removeItem(RETIRE_KEY);
+  } catch {}
+}
+async function retireTopics(topics, bundle) {
+  const left = [];
+  for (const t of topics) {
+    const r = await inboxRetire(getWorkerBase(), t, bundle).catch(() => null);
+    // 403: устройства там уже нет (стёрт ранее / не регистрировался) — готово.
+    if (!r || (r.status !== 200 && r.status !== 403)) left.push(t);
+  }
+  return left;
+}
+let retryingRetire = false;
+async function retryPendingRetire() {
+  const list = pendingRetire();
+  if (!list.length || retryingRetire || !S.personal || !getWorkerBase()) return;
+  retryingRetire = true;
+  try {
+    setPendingRetire(await retireTopics(list, S.personal));
+  } finally {
+    retryingRetire = false;
+  }
+}
+function stopInboxListeners() {
+  try {
+    S.inboxListener?.close?.();
+  } catch {}
+  try {
+    S.inboxDialListener?.close?.();
+  } catch {}
+  S.inboxListener = null;
+  S.inboxDialListener = null;
+  S.chatDialTopic = null;
+}
+
+async function changeNumber(say) {
+  const prev = S.personal || (await getPersonal());
+  if (!prev) throw new Error('номера ещё нет');
+  const oldTopics = [];
+  try {
+    oldTopics.push((await deriveRoom(prev.secret)).topic);
+  } catch {}
+  if (prev.masterPub) oldTopics.push(await chatDialTopic(prev.masterPub));
+  say('Удаляем старую резервную копию…');
+  let bk = null;
+  try {
+    bk = await window.__zvBackup?.deleteServer?.();
+  } catch {}
+  say('Создаём новый номер…');
+  stopInboxListeners();
+  const { next } = await rotatePersonal();
+  S.personal = next;
+  S.personalRoom = await deriveRoom(next.secret);
+  say('Отключаем старую ссылку на сервере…');
+  const left = await retireTopics(oldTopics, next);
+  setPendingRetire([...pendingRetire(), ...left]);
+  await refreshPersonalUI();
+  window.ZVChat?.identityChanged?.();
+  window.__zvBackup?.render?.()?.catch?.(() => {});
+  let msg = 'Готово: новый номер создан. Отправьте новую ссылку тем, кому доверяете.';
+  if (left.length) msg += ' Старая ссылка будет отключена на сервере, как только появится связь.';
+  if (bk?.had) msg += ' Резервную копию создайте заново — старая фраза больше не подходит.';
+  return msg;
+}
+
+async function wipeEverything(say, { backupToo = false } = {}) {
+  say('Стираем…');
+  if (S.joined) await Promise.resolve(hangup()).catch(() => {});
+  const tasks = [];
+  const p = S.personal || (await getPersonal().catch(() => null));
+  if (p && getWorkerBase()) {
+    tasks.push(
+      (async () => {
+        const topics = [];
+        try {
+          topics.push((await deriveRoom(p.secret)).topic);
+        } catch {}
+        if (p.masterPub) topics.push(await chatDialTopic(p.masterPub));
+        await retireTopics([...topics, ...pendingRetire()], p);
+      })().catch(() => {})
+    );
+  }
+  if (backupToo) tasks.push(Promise.resolve(window.__zvBackup?.deleteServer?.()).catch(() => {}));
+  await Promise.race([Promise.allSettled(tasks), new Promise((r) => setTimeout(r, 6000))]);
+  stopInboxListeners();
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration?.();
+    const sub = await reg?.pushManager?.getSubscription?.();
+    await sub?.unsubscribe?.();
+  } catch {}
+  await wipeDatabase();
+  try {
+    localStorage.clear();
+  } catch {}
+  try {
+    sessionStorage.clear();
+  } catch {}
+  try {
+    for (const k of await caches.keys()) await caches.delete(k);
+  } catch {}
+  try {
+    for (const r of (await navigator.serviceWorker?.getRegistrations?.()) || []) await r.unregister();
+  } catch {}
+  location.replace(location.pathname + '?wiped=1');
+}
+
+let dangerKind = null;
+function openDanger(kind) {
+  const box = $('#dangerBox');
+  if (!box) return;
+  dangerKind = kind;
+  const title = $('#dangerTitle');
+  const text = $('#dangerText');
+  const go = $('#dangerGo');
+  const note = $('#dangerNote');
+  if (note) note.textContent = '';
+  $('#wipeBackupOpt')?.classList.toggle('hidden', kind !== 'wipe');
+  const wbt = $('#wipeBackupToo');
+  if (wbt) wbt.checked = false;
+  if (kind === 'number') {
+    title.textContent = 'Сменить номер?';
+    text.textContent =
+      'Будет создана новая личная ссылка — новый крипто-номер. По старой ссылке до вас больше не дозвониться: сервер удалит её вместе с push-подписками и пропущенными. Новую ссылку отправьте заново тем, кому доверяете. Чаты, контакты и журнал останутся. Резервную копию (17 слов) нужно будет создать заново.';
+    (go.querySelector('span') || go).textContent = 'Сменить номер';
+  } else {
+    title.textContent = 'Стереть всё с этого устройства?';
+    text.textContent =
+      'Будут удалены личность и номер, все чаты и их ключи, контакты, журнал звонков, настройки, кэш приложения и push-подписка; сервер забудет ваш номер. Отменить нельзя. Если резервная копия включена и вы оставите её на сервере, личность и список чатов можно вернуть фразой из 17 слов.';
+    (go.querySelector('span') || go).textContent = 'Стереть всё';
+  }
+  delete go.dataset.armed;
+  go.disabled = false;
+  box.classList.remove('hidden');
+  box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+$('#btnChangeNumber') && ($('#btnChangeNumber').onclick = () => openDanger('number'));
+$('#btnWipeAll') && ($('#btnWipeAll').onclick = () => openDanger('wipe'));
+$('#dangerCancel') &&
+  ($('#dangerCancel').onclick = () => {
+    $('#dangerBox')?.classList.add('hidden');
+    dangerKind = null;
+  });
+$('#dangerGo') &&
+  ($('#dangerGo').onclick = async () => {
+    const go = $('#dangerGo');
+    const note = $('#dangerNote');
+    const say = (t) => {
+      if (note) note.textContent = t;
+    };
+    // Второе нажатие подтверждает: случайный тап ничего не сотрёт.
+    if (!go.dataset.armed) {
+      go.dataset.armed = '1';
+      (go.querySelector('span') || go).textContent = dangerKind === 'number' ? 'Точно сменить?' : 'Точно стереть?';
+      return;
+    }
+    go.disabled = true;
+    try {
+      if (dangerKind === 'number') {
+        const msg = await changeNumber(say);
+        say(msg);
+        toast('Номер сменён');
+        setTimeout(() => $('#dangerBox')?.classList.add('hidden'), 9000);
+      } else if (dangerKind === 'wipe') {
+        await wipeEverything(say, { backupToo: !!$('#wipeBackupToo')?.checked });
+      }
+    } catch (e) {
+      say('Не получилось: ' + (e?.message || e));
+      go.disabled = false;
+      delete go.dataset.armed;
+    }
+  });
+$('#shareBack') &&
+  ($('#shareBack').onchange = (e) => {
+    try {
+      localStorage.zvShareBack = e.target.checked ? '1' : '0';
+    } catch {}
+  });
 
 async function refreshPersonalUI() {
   if (!$('#personalBox')) return;
@@ -3469,6 +4355,10 @@ async function refreshPersonalUI() {
   startInboxListener();
   loadMissed().catch(() => {});
   updatePushUI();
+  ensurePushSub().catch(() => {});
+  const sb = $('#shareBack');
+  if (sb) sb.checked = shareBackOn();
+  retryPendingRetire().catch(() => {});
 }
 
 function inboxStateHandler(m) {
@@ -3488,7 +4378,7 @@ function startInboxListener() {
   if (S.inboxListener || !getWorkerBase() || !S.personal || !S.personalRoom) return;
   const p = S.personal;
   const topic = S.personalRoom.topic;
-  inboxRegister(getWorkerBase(), topic, p, S.pushSub).catch(() => {});
+  S.inboxRegP = inboxRegister(getWorkerBase(), topic, p, S.pushSub).catch(() => {});
   S.inboxListener = new InboxListener(getWorkerBase(), topic, p, {
     onRing: (m) => handleIncomingRing(m).catch(() => {}),
     onState: inboxStateHandler,
@@ -3502,7 +4392,12 @@ function startInboxListener() {
       }
     },
   });
-  S.inboxListener.connect();
+  // v38: слушатель — после регистрации устройства (auth до /register сервер
+  // отклоняет; раньше такой сокет молча оставался глухим до перезагрузки).
+  const listener = S.inboxListener;
+  Promise.resolve(S.inboxRegP).then(() => {
+    if (S.inboxListener === listener) listener.connect();
+  });
   // v28: второй, аддитивный слушатель дозвонa ИЗ ЧАТА. Его topic выводится
   // из публичного masterPub владельца (chatDialTopic ниже), поэтому личная
   // ссылка в чат не публикуется; payload запечатан ECDH-ключом пары
@@ -3512,12 +4407,17 @@ function startInboxListener() {
       .then((dialTopic) => {
         if (S.inboxDialListener) return;
         S.chatDialTopic = dialTopic;
-        inboxRegister(getWorkerBase(), dialTopic, p, null).catch(() => {});
-        S.inboxDialListener = new InboxListener(getWorkerBase(), dialTopic, p, {
+        // v38: с push-подпиской (раньше null — дозвон из чата в закрытую
+        // вкладку не доходил никогда).
+        const regP = inboxRegister(getWorkerBase(), dialTopic, p, S.pushSub).catch(() => {});
+        const dl = new InboxListener(getWorkerBase(), dialTopic, p, {
           onRing: (m) => handleChatDialRing(m).catch(() => {}),
           onState: inboxStateHandler,
         });
-        S.inboxDialListener.connect();
+        S.inboxDialListener = dl;
+        regP.then(() => {
+          if (S.inboxDialListener === dl) dl.connect();
+        });
       })
       .catch(() => {});
   }
@@ -3551,8 +4451,12 @@ async function handleChatDialRing({ ringId, blob, fromFp }) {
 
 function presentIncomingRing({ ringId, payload, fromFp, topic, viaChat }) {
   if (S.incoming || S.joined) return;
-  const name = payload?.name || 'Неизвестный';
-  S.incoming = { ringId, payload, fromFp, topic };
+  // v38: без имени — анонимное из отпечатка звонящего (стабильно для одного
+  // и того же человека, но ничего о нём не раскрывает).
+  const name = String(payload?.name || '').trim() || anonName(fromFp || ringId);
+  const back = backOf(payload, fromFp);
+  S.incoming = { ringId, payload, fromFp, topic, name, back };
+  if (back) rememberPeer({ secret: back.k, fp: back.d, name }).catch(() => {});
   $('#inName').textContent = name;
   $('#inMeta').textContent = viaChat
     ? `Входящий звонок из чата · отпечаток ${String(fromFp || '').slice(0, 8)}…`
@@ -3560,10 +4464,12 @@ function presentIncomingRing({ ringId, payload, fromFp, topic, viaChat }) {
   $('#inAvatar').textContent = (name.trim()[0] || '?').toUpperCase();
   $('#incomingCall')?.classList.remove('hidden');
   startRingtone();
-  try {
-    navigator.vibrate?.([250, 150, 250, 150, 250]);
-  } catch {}
   inboxAck(getWorkerBase(), topic, ringId, S.personal).catch(() => {});
+  // v38: нажали «Ответить» в уведомлении — принимаем без второго тапа.
+  if (S.pendingAccept && S.pendingAccept === ringId) {
+    S.pendingAccept = null;
+    setTimeout(() => $('#btnAccept')?.click(), 60);
+  }
 }
 
 function closeIncoming() {
@@ -3581,7 +4487,9 @@ $('#btnAccept') &&
       devicePub: S.personal.devicePub,
       sign: (t) => signWithDevice(t),
     }).catch(() => {});
-    S.callMeta = { dir: 'in', name: inc.payload?.name, key: journalAdd('in', inc.payload?.name, 'accepted') };
+    const inName = inc.name || inc.payload?.name;
+    const inFp = inc.back?.d || null;
+    S.callMeta = { dir: 'in', name: inName, fp: inFp, key: journalAdd('in', inName, 'accepted', inFp ? { fp: inFp } : null) };
     S.autoJoinPending = true;
     let target = `k=${S.personal.secret}&d=${S.personal.fp}`;
     // v28: дозвон из чата несёт в запечатанном payload секрет отдельной
@@ -3605,13 +4513,15 @@ $('#btnDecline') &&
       devicePub: S.personal.devicePub,
       sign: (t) => signWithDevice(t),
     }).catch(() => {});
-    journalAdd('in', inc.payload?.name, 'declined');
+    journalAdd('in', inc.name || inc.payload?.name, 'declined', inc.back?.d ? { fp: inc.back.d } : null);
   });
 
 $('#btnCreatePersonal') &&
   ($('#btnCreatePersonal').onclick = async () => {
     try {
-      await ensurePersonal(myName() || 'Владелец');
+      // v38: метка устройства уходит на сервер входящих открытым текстом —
+      // не отправляем туда имя пользователя.
+      await ensurePersonal('Владелец');
       toast('Личная ссылка создана — отправьте её тем, кто должен вам звонить');
       refreshPersonalUI().catch(() => {});
     } catch (e) {
@@ -3631,56 +4541,118 @@ $('#btnSharePersonal') &&
       .share({ title: 'ZVONochek', text: 'Моя личная ссылка для звонков:', url: personalLinkOf(S.personal) })
       .catch(() => {}));
 
+// ---------- v38: Web Push — автоподписка и регистрация везде ----------
+// Раньше подписка жила только до перезагрузки (S.pushSub не восстанавливался),
+// топик дозвона из чата регистрировался без подписки, а кнопка уведомлений
+// чата вообще не подписывалась на push. Теперь: если разрешение уже дано,
+// подписка сверяется/создаётся при каждом запуске и регистрируется в Inbox
+// (личная ссылка + дозвон из чата) и во всех чатах (событие zv-push-sub).
+const pushSupported = () =>
+  'PushManager' in window && 'serviceWorker' in navigator && 'Notification' in window;
+let pushEnsuring = null;
+async function ensurePushSub({ interactive = false } = {}) {
+  if (!pushSupported()) return null;
+  if (Notification.permission === 'denied') return null;
+  if (Notification.permission !== 'granted') {
+    if (!interactive) return null;
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') return null;
+  }
+  if (pushEnsuring) return pushEnsuring;
+  pushEnsuring = (async () => {
+    // VAPID-ключ — у того же Worker, который подписывает пуши: у «своего
+    // сервера» своя пара ключей; подписка на чужой ключ молча не доставлялась бы.
+    const key = (await fetchJson(getWorkerBase() + '/push-key').catch(() => null))?.public;
+    if (!key) return null;
+    const appKey = b64u.dec(key);
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    const subKey = sub?.options?.applicationServerKey;
+    if (sub && subKey && b64u.enc(new Uint8Array(subKey)) !== b64u.enc(appKey)) {
+      await sub.unsubscribe().catch(() => {});
+      sub = null;
+    }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appKey });
+    const j = sub.toJSON();
+    const next = { endpoint: j.endpoint, keys: j.keys };
+    let lastEp = '';
+    try {
+      lastEp = localStorage.getItem('zvPushEp') || '';
+    } catch {}
+    const changed = !S.pushSub || S.pushSub.endpoint !== next.endpoint || lastEp !== next.endpoint;
+    S.pushSub = next;
+    if (changed) {
+      try {
+        localStorage.setItem('zvPushEp', next.endpoint);
+      } catch {}
+      await registerPushEverywhere().catch(() => {});
+    }
+    updatePushUI();
+    return S.pushSub;
+  })();
+  try {
+    return await pushEnsuring;
+  } finally {
+    pushEnsuring = null;
+  }
+}
+async function registerPushEverywhere() {
+  if (!S.pushSub) return;
+  const base = getWorkerBase();
+  if (S.personal && S.personalRoom) {
+    await inboxRegister(base, S.personalRoom.topic, S.personal, S.pushSub).catch(() => {});
+    if (S.chatDialTopic) await inboxRegister(base, S.chatDialTopic, S.personal, S.pushSub).catch(() => {});
+  }
+  try {
+    window.dispatchEvent(new CustomEvent('zv-push-sub', { detail: S.pushSub }));
+  } catch {}
+}
+window.__zvPush = {
+  enable: () => ensurePushSub({ interactive: true }),
+  ensure: () => ensurePushSub(),
+  current: () => S.pushSub,
+  supported: pushSupported,
+};
+
 function updatePushUI() {
   const b = $('#btnEnablePush');
-  if (!b) return;
-  const label = b.querySelector('span') || b;
-  if (!('PushManager' in window)) {
-    b.disabled = true;
-    label.textContent = 'Push-уведомления не поддерживаются браузером';
-    return;
-  }
-  if (Notification.permission === 'denied') {
-    b.disabled = true;
-    label.textContent = 'Уведомления запрещены в браузере';
-    return;
-  }
-  if (S.pushSub) {
-    b.disabled = true;
-    label.textContent = 'Push-уведомления включены';
+  const hint = $('#pushHint');
+  const set = (text, disabled, showHint) => {
+    if (b) {
+      b.disabled = disabled;
+      (b.querySelector('span') || b).textContent = text;
+    }
+    hint?.classList.toggle('hidden', !showHint);
+  };
+  if (!pushSupported()) {
+    set('Push-уведомления не поддерживаются браузером', true, false);
+  } else if (Notification.permission === 'denied') {
+    set('Уведомления запрещены в настройках браузера', true, false);
+  } else if (S.pushSub) {
+    set('Push включён: звонки приходят и при закрытом приложении', true, false);
+  } else {
+    set('Включить звонки при закрытом приложении', false, true);
   }
 }
 $('#btnEnablePush') &&
   ($('#btnEnablePush').onclick = async () => {
     try {
-      const perm = await Notification.requestPermission();
-      if (perm !== 'granted') return toast('Разрешение на уведомления не дано');
-      // v36: VAPID-ключ — у того же Worker, который подписывает пуши: у
-      // «своего сервера» своя пара ключей, и подписка на чужой ключ молча
-      // не доставлялась бы.
-      const key = (await fetchJson(getWorkerBase() + '/push-key').catch(() => null))?.public;
-      if (!key) return toast('Сервер не поддерживает push. Пока приложение открыто, звонки приходят и так');
-      const appKey = b64u.dec(key);
-      const reg = await navigator.serviceWorker.ready;
-      let sub = await reg.pushManager.getSubscription();
-      const subKey = sub?.options?.applicationServerKey;
-      if (sub && subKey && b64u.enc(new Uint8Array(subKey)) !== b64u.enc(appKey)) {
-        await sub.unsubscribe().catch(() => {});
-        sub = null;
+      const sub = await ensurePushSub({ interactive: true });
+      if (!sub) {
+        if (pushSupported() && Notification.permission !== 'granted') return toast('Разрешение на уведомления не дано');
+        return toast('Сервер не поддерживает push (нужен Worker v38). Пока приложение открыто, звонки приходят и так');
       }
-      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appKey });
-      const j = sub.toJSON();
-      S.pushSub = { endpoint: j.endpoint, keys: j.keys };
-      await inboxRegister(getWorkerBase(), S.personalRoom.topic, S.personal, S.pushSub);
-      toast('Уведомления о звонках включены');
-      updatePushUI();
+      toast('Готово: звонки и сообщения будут приходить и при закрытом приложении');
     } catch (e) {
       toast('Не удалось включить уведомления: ' + e.message);
     }
   });
+$('#btnPushHint') && ($('#btnPushHint').onclick = () => $('#btnEnablePush')?.click());
 
 async function loadMissed() {
   if (!S.personal || !S.personalRoom) return;
+  // v38: сначала регистрация устройства (иначе первый запрос — 403).
+  await Promise.resolve(S.inboxRegP).catch(() => {});
   const r = await inboxMissed(getWorkerBase(), S.personalRoom.topic, S.personal).catch(() => null);
   const items = r?.data?.missed || [];
   S.missedIds = items.map((m) => m.ring_id);
@@ -3691,14 +4663,25 @@ async function loadMissed() {
   // v36: пропущенные рисуются тем же видом, что и журнал звонков.
   const entries = [];
   for (const m of items) {
-    let name = 'Неизвестный';
+    let name = anonName(m.from_fp || m.ring_id);
+    let fp = null;
     try {
       const pl = await openSealed(S.personalRoom.key, m.blob, S.personalRoom.topic);
-      if (pl?.name) name = pl.name;
+      if (pl?.name) name = String(pl.name).slice(0, 60);
+      const back = backOf(pl, m.from_fp);
+      if (back) {
+        fp = back.d;
+        await rememberPeer({ secret: back.k, fp, name }).catch(() => {});
+      }
     } catch {}
-    entries.push({ ts: m.ts, dir: 'in', name, outcome: 'missed' });
+    entries.push({ ts: m.ts, dir: 'in', name, outcome: 'missed', fp });
   }
-  renderCallsList(list, entries);
+  const book = await contactsLoad();
+  renderCallsList(list, entries, {
+    onCall: (v) => callPeer(v.fp),
+    onMenu: (v, el) => openContactMenu(v.fp, el, v),
+    nameOf: (v) => (v.fp && book.items[v.fp]?.saved ? book.items[v.fp].name : null),
+  });
 }
 $('#btnMissedClear') &&
   ($('#btnMissedClear').onclick = async () => {
@@ -3726,15 +4709,32 @@ async function startOutgoingCall() {
   }
   const ringId = crypto.randomUUID();
   const payload = { v: 1, ringId, fromFp, fromDevicePub, name: myName(), call: 'video', ts: Date.now() };
+  // v38: «обратный номер» — моя личная ссылка внутри запечатанного payload
+  // (её прочтут только устройства вызываемого), чтобы мне могли перезвонить
+  // из журнала. Отключается галочкой во вкладке «Мой номер».
+  if (S.personal && shareBackOn()) payload.back = { k: S.personal.secret, d: S.personal.fp };
   const blob = await seal(room.key, payload, room.topic);
   S.outCall = { ringId, topic: room.topic, signFn, fromDevicePub, poll: null };
-  S.callMeta = { dir: 'out', name: 'Владелец ссылки' };
+  const outFp = S.linkFp;
+  if (outFp) rememberPeer({ secret: S.secret, fp: outFp }).catch(() => {});
+  const outName = (await peerName(outFp)) || 'Владелец ссылки';
+  S.callMeta = { dir: 'out', name: outName, fp: outFp };
   $('#outgoingCall')?.classList.remove('hidden');
   const r = await inboxRing(getWorkerBase(), room.topic, { ringId, fromFp, fromDevicePub, blob }).catch(
     () => null
   );
   if (!r || (r.status !== 201 && r.status !== 200)) {
-    toast('Не удалось дозвониться: сервер входящих недоступен. Можно просто подождать в комнате');
+    // v38: понятные причины вместо общего «сервер недоступен».
+    toast(
+      r?.status === 404
+        ? 'Номер не обслуживается: владелец сменил номер или давно не заходил'
+        : r?.status === 403
+          ? 'Владелец ограничил звонки с этого номера'
+          : r?.status === 429
+            ? 'Слишком много звонков подряд — попробуйте позже'
+            : 'Не удалось дозвониться: сервер входящих недоступен. Можно просто подождать в комнате',
+      5000
+    );
     finishOutCall('failed', true);
     return;
   }
@@ -3753,11 +4753,11 @@ async function pollOutCall() {
     finishOutCall('accepted', true);
   } else if (st === 'declined') {
     toast('Владелец отклонил звонок');
-    journalAdd('out', 'Владелец ссылки', 'declined');
+    journalAdd('out', S.callMeta?.name || 'Владелец ссылки', 'declined', S.callMeta?.fp ? { fp: S.callMeta.fp } : null);
     finishOutCall('declined', true);
   } else if (st === 'expired') {
     toast('Владелец не ответил — звонок попадёт ему в пропущенные');
-    journalAdd('out', 'Владелец ссылки', 'missed');
+    journalAdd('out', S.callMeta?.name || 'Владелец ссылки', 'missed', S.callMeta?.fp ? { fp: S.callMeta.fp } : null);
     finishOutCall('expired', true);
   } else if (st === 'cancelled') {
     finishOutCall('cancelled', true);
@@ -3778,7 +4778,17 @@ $('#btnCallOwner') && ($('#btnCallOwner').onclick = startOutgoingCall);
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.type === 'incoming-ring-push') {
+      // v38: «Ответить» прямо в уведомлении — принять, как только ring
+      // будет показан (или сразу, если экран входящего уже открыт).
+      if (e.data.act === 'accept' && e.data.ringId) S.pendingAccept = e.data.ringId;
+      if (S.incoming && S.pendingAccept && S.pendingAccept === S.incoming.ringId) {
+        S.pendingAccept = null;
+        $('#btnAccept')?.click();
+        return;
+      }
       refreshPersonalUI().catch(() => {});
+    } else if (e.data?.type === 'open-calls') {
+      document.querySelector('[data-home-tab="calls"]')?.click();
     }
   });
 }
@@ -3787,7 +4797,7 @@ $('#btnCancelCall') &&
     const oc = S.outCall;
     if (!oc) return;
     await inboxCancel(getWorkerBase(), oc.topic, oc.ringId, oc.signFn, oc.fromDevicePub).catch(() => {});
-    journalAdd('out', 'Владелец ссылки', 'cancelled');
+    journalAdd('out', S.callMeta?.name || 'Владелец ссылки', 'cancelled', S.callMeta?.fp ? { fp: S.callMeta.fp } : null);
     finishOutCall('cancelled');
     hangup();
   });
@@ -3893,7 +4903,11 @@ async function ringPersonalFromChat(masterPub, link, opts = {}) {
       blob,
     }).catch(() => null);
     if (!r || (r.status !== 201 && r.status !== 200)) {
-      return { ok: false, status: r?.status || 0, error: 'сервер входящих недоступен' };
+      return {
+        ok: false,
+        status: r?.status || 0,
+        error: r?.status === 404 ? 'участник сменил номер или давно не заходил' : 'сервер входящих недоступен',
+      };
     }
     const rec = { topic: dialTopic, onState: opts.onState, done: false, poll: null };
     chatRings.set(ringId, rec);
@@ -3919,9 +4933,20 @@ async function ringPersonalFromChat(masterPub, link, opts = {}) {
     return { ok: false, status: 0, error: e?.message || String(e) };
   }
 }
-function openCallLinkFromChat(link) {
+// v38: opts {autoJoin, name, returnTo} — из чата сразу в разговор, с ником
+// чата и возвратом в чат после звонка.
+function openCallLinkFromChat(link, opts = {}) {
   const target = parseCallLink(link);
   if (!target) return false;
+  if (S.joined) {
+    if (S.secret === target.secret) returnToCall();
+    else toast('Сначала завершите текущий звонок');
+    return true;
+  }
+  S.autoJoinPending = !!opts.autoJoin;
+  S.callNameOverride = opts.name ? String(opts.name).trim().slice(0, 40) || null : null;
+  S.returnTo = typeof opts.returnTo === 'string' && /^#chat=/.test(opts.returnTo) ? opts.returnTo : null;
+  S.returnSecret = S.returnTo ? target.secret : null;
   const hash = 'k=' + target.secret + (target.fp ? '&d=' + target.fp : '');
   if (location.hash.slice(1) === hash) {
     route();
@@ -3933,7 +4958,9 @@ function openCallLinkFromChat(link) {
 window.__zvDial = {
   ringPersonal: ringPersonalFromChat,
   openCallLink: openCallLinkFromChat,
+  activeCallSecret: () => (S.joined ? S.secret : null),
 };
+$('#callReturnBar') && ($('#callReturnBar').onclick = returnToCall);
 
 // ---------- Групповой режим (group.js): публичный интерфейс ----------
 function attachGroupAudio(track) {
@@ -3972,6 +4999,31 @@ window.ZVGroupAPI = {
 // только здесь, в самом конце инициализации, после всех привязок обработчиков.
 window.__zvAppBooted = true;
 
+// v38: переходы из уведомлений (SW открывает окно с ?ring=…&act=accept или
+// ?tab=calls). Свои параметры убираем из адреса, чужие (?openchat — чат) оставляем.
+{
+  const sp = new URLSearchParams(location.search);
+  const ringQ = sp.get('ring');
+  if (ringQ && sp.get('act') === 'accept') S.pendingAccept = ringQ;
+  if (ringQ) setTimeout(() => refreshPersonalUI().catch(() => {}), 200);
+  if (sp.get('tab') === 'calls') setTimeout(() => document.querySelector('[data-home-tab="calls"]')?.click(), 300);
+  if (sp.has('wiped')) setTimeout(() => toast('Все данные ZVONochek на этом устройстве стёрты', 5000), 600);
+  if (sp.has('ring') || sp.has('act') || sp.has('tab') || sp.has('wiped')) {
+    sp.delete('ring');
+    sp.delete('act');
+    sp.delete('tab');
+    sp.delete('wiped');
+    const q = sp.toString();
+    try {
+      history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+    } catch {}
+  }
+}
+// v38: push-подписка проверяется при каждом запуске (если разрешение уже есть).
+setTimeout(() => {
+  updatePushUI();
+  ensurePushSub().catch(() => {});
+}, 2500);
 const action = new URLSearchParams(location.search).get('action');
 if (action === 'new' && !location.hash) {
   const k = newSecret();

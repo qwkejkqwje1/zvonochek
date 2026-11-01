@@ -6,7 +6,9 @@ const DB_VERSION = 2; // v21: добавлены сторы чата (rooms, mes
 const STORES = ['vault', 'identity', 'devices', 'calls', 'missed', 'rooms', 'messages'];
 
 let dbPromise = null;
+let wiping = false; // v38: «Стереть всё» — новых соединений больше не открываем
 export function idb() {
+  if (wiping) return Promise.reject(new Error('Данные стираются'));
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -139,3 +141,62 @@ export const kvAll = (store) =>
         req.onerror = () => reject(req.error);
       })
   );
+
+// v38: выборка по префиксу ключа (сообщения одной комнаты — ключи
+// `${roomId}:${hash}`) без полного прохода по всем комнатам: раньше каждое
+// открытие/рендер/дедуп читал ВСЕ сообщения ВСЕХ чатов.
+const prefixRange = (prefix) => IDBKeyRange.bound(prefix, prefix + '\uffff', false, false);
+export const kvPrefix = (store, prefix) =>
+  idb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const out = [];
+        const t = db.transaction(store, 'readonly');
+        const req = t.objectStore(store).openCursor(prefixRange(prefix));
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (cur) {
+            out.push({ key: cur.key, value: cur.value });
+            cur.continue();
+          } else resolve(out);
+        };
+        req.onerror = () => reject(req.error);
+      })
+  );
+export const kvDelPrefix = (store, prefix) => tx(store, 'readwrite', (s) => s.delete(prefixRange(prefix)));
+// v38: пакетное удаление по списку ключей одной транзакцией.
+export const kvDelMany = (store, keys) =>
+  tx(store, 'readwrite', (s) => {
+    for (const k of keys) s.delete(k);
+    return null;
+  });
+
+// v38: «Стереть всё с устройства»: закрыть своё соединение и удалить базу
+// целиком (ключи, личность, чаты, журнал). Другие вкладки получают
+// versionchange и отпускают базу сами (onversionchange выше); если какая-то
+// держит её — удаление завершится, как только она закроется.
+export async function wipeDatabase() {
+  try {
+    const db = await Promise.race([dbPromise || Promise.resolve(null), new Promise((r) => setTimeout(() => r(null), 3000))]);
+    db?.close?.();
+  } catch {}
+  wiping = true;
+  dbPromise = null;
+  return new Promise((resolve) => {
+    let done = false;
+    const fin = (ok) => {
+      if (done) return;
+      done = true;
+      resolve(ok);
+    };
+    try {
+      const req = indexedDB.deleteDatabase(DB_NAME);
+      req.onsuccess = () => fin(true);
+      req.onerror = () => fin(false);
+      req.onblocked = () => setTimeout(() => fin(false), 1500);
+    } catch {
+      fin(false);
+    }
+    setTimeout(() => fin(false), 6000);
+  });
+}

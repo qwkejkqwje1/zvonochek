@@ -3,9 +3,9 @@
 // IndexedDB) удостоверяет ключи устройств; секрет личной ссылки зашифрован
 // vault-ключом устройства. Личная ссылка: #k=<секрет>&d=<fp>, где fp — первые
 // 32 hex SHA-256 от X9.62-представления master-публичного ключа.
-import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=36';
-import { kvGet, kvPut } from './store.js?v=36';
-import { utils as secpUtils } from './vendor/secp256k1.js?v=36';
+import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=38';
+import { kvGet, kvPut, kvDel } from './store.js?v=38';
+import { utils as secpUtils } from './vendor/secp256k1.js?v=38';
 
 const te = new TextEncoder();
 let cached = null; // {secret, masterPub, masterPriv, fp, devicePub, devicePriv, cert, label}
@@ -115,6 +115,45 @@ export async function ensurePersonal(label = 'Владелец') {
     label: dev.label,
   };
   return cached;
+}
+
+// v38: «Сменить номер». Новая master-пара и новый секрет личной ссылки:
+// новые topic и отпечаток d=…, по содержимому новую ссылку со старой не
+// связать. Ключ устройства прежний (подписи и доверие в чатах не ломаются),
+// его сертификат перевыпускается новым master. Recovery-сертификат был
+// выдан старым master — состояние бэкапа сбрасывается (новая фраза).
+// Возвращает {prev, next}: prev — бандл до смены (для отзыва старого Inbox).
+export async function rotatePersonal() {
+  const prev = await getPersonal();
+  const vault = await getVaultKey();
+  const pair = await genP256KeyPair();
+  const masterPub = b64u.enc(await crypto.subtle.exportKey('raw', pair.publicKey));
+  const secret = newSecret();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, vault, te.encode(secret));
+  const secretEnc = b64u.enc(new Uint8Array([...iv, ...new Uint8Array(ct)]));
+  const dev = await kvGet('devices', 'self');
+  if (dev?.devicePub && dev?.devicePriv) {
+    const label = dev.label || dev.cert?.label || 'Владелец';
+    const exp = Date.now() + 10 * 365 * 24 * 3600000;
+    const cert = await signDeviceCert(pair.privateKey, dev.devicePub, label, exp);
+    const next = { ...dev, cert };
+    delete next.chain; // цепочка восстановления относилась к старому master
+    await kvPut('devices', 'self', next);
+  }
+  await kvPut('identity', 'personal', {
+    masterPub,
+    masterPriv: pair.privateKey,
+    secretEnc,
+    createdAt: Date.now(),
+    rotatedAt: Date.now(),
+  });
+  try {
+    await kvDel('identity', 'recovery');
+  } catch {}
+  cached = null;
+  const next = await ensurePersonal();
+  return { prev, next };
 }
 
 export async function getPersonal() {

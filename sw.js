@@ -1,34 +1,39 @@
-// ZVONochek Service Worker v36 — мгновенный старт, офлайн-оболочка и безопасные обновления
-const CACHE_NAME = 'zvonochek-v36';
+// ZVONochek Service Worker v38 — мгновенный старт, офлайн-оболочка и безопасные обновления
+const CACHE_NAME = 'zvonochek-v38';
 const CORE = [
   './',
   './index.html',
-  './style.css?v=36',
-  './app.js?v=36',
-  './group.js?v=36',
-  './store.js?v=36',
-  './identity.js?v=36',
-  './inbox.js?v=36',
-  './chat.js?v=36',
-  './chat-transport.js?v=36',
-  './backup.js?v=36',
-  './signaling.js?v=36',
-  './ntfy.js?v=36',
-  './crypto.js?v=36',
-  './config.js?v=36',
-  './zvdiag.js?v=36',
-  './callstats.js?v=36',
-  './stats-ui.js?v=36',
-  './coalesce.js?v=36',
-  './mqtt-lite.js?v=36',
+  './style.css?v=38',
+  './app.js?v=38',
+  './group.js?v=38',
+  './store.js?v=38',
+  './identity.js?v=38',
+  './inbox.js?v=38',
+  './chat.js?v=38',
+  './chat-transport.js?v=38',
+  './backup.js?v=38',
+  './signaling.js?v=38',
+  './ntfy.js?v=38',
+  './crypto.js?v=38',
+  './config.js?v=38',
+  './zvdiag.js?v=38',
+  './callstats.js?v=38',
+  './media-policy.js?v=38',
+  './stats-ui.js?v=38',
+  './coalesce.js?v=38',
+  './mqtt-lite.js?v=38',
+  './skin.js?v=38',
+  './anon-names.js?v=38',
   './icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
   './icons/apple-touch-icon.png',
+  './icons/icon-classic.svg',
+  './icons/badge-96.png',
   './manifest.webmanifest',
-  './vendor/qrcode.js?v=36',
-  './vendor/secp256k1.js?v=36',
+  './vendor/qrcode.js?v=38',
+  './vendor/secp256k1.js?v=38',
 ];
 
 self.addEventListener('install', (e) => {
@@ -97,7 +102,20 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
-// ---------- Web Push коммуникатора (payload — только {t, topic, ringId}) ----------
+// ---------- Web Push (payload — только {t, topic, ringId} / {t, room}) ----------
+// v38: звонок — громкое уведомление с вибрацией и кнопкой «Ответить», повторы
+// сервера (3/20/45 с) перевибрируют то же уведомление; отменённый/истёкший
+// звонок превращается в «Пропущенный»; приглашение в звонок из чата (call:1)
+// — отдельное уведомление «Звонок в чате».
+const RING_VIBRATE = [700, 300, 700, 300, 700, 300, 700, 300, 700];
+const ICON = './icons/icon-192.png';
+const BADGE = './icons/badge-96.png';
+
+async function windowsState() {
+  const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+  return { wins, visible: wins.some((w) => w.visibilityState === 'visible') };
+}
+
 self.addEventListener('push', (e) => {
   let d = {};
   try {
@@ -106,19 +124,21 @@ self.addEventListener('push', (e) => {
   if (d.t === 'ring') {
     e.waitUntil(
       (async () => {
-        const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-        const visible = wins.some((w) => w.visibilityState === 'visible');
+        const { wins, visible } = await windowsState();
         for (const w of wins) {
           w.postMessage({ type: 'incoming-ring-push', ringId: d.ringId, topic: d.topic });
         }
         if (!visible) {
-          await self.registration.showNotification('Входящий звонок ZVONochek', {
-            body: 'Кто-то звонит вам по личной ссылке',
-            tag: d.ringId,
-            icon: './icons/icon-192.png',
-            badge: './icons/icon-192.png',
+          await self.registration.showNotification('📞 Входящий звонок — ZVONochek', {
+            body: 'Нажмите, чтобы ответить',
+            tag: 'ring-' + d.ringId,
+            icon: ICON,
+            badge: BADGE,
             requireInteraction: true,
-            renotify: false,
+            renotify: true,
+            vibrate: RING_VIBRATE,
+            timestamp: Date.now(),
+            actions: [{ action: 'accept', title: 'Ответить' }],
             data: { ringId: d.ringId, topic: d.topic },
           });
         }
@@ -129,15 +149,29 @@ self.addEventListener('push', (e) => {
     // ни текста, ни никнейма — уведомление принципиально пустое по смыслу.
     e.waitUntil(
       (async () => {
-        const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-        const visible = wins.some((w) => w.visibilityState === 'visible');
-        for (const w of wins) w.postMessage({ type: 'chat-push', room: d.room });
-        if (!visible) {
+        const { wins, visible } = await windowsState();
+        for (const w of wins) w.postMessage({ type: 'chat-push', room: d.room, call: d.call ? 1 : 0 });
+        if (visible) return;
+        if (d.call) {
+          await self.registration.showNotification('📞 Звонок в чате — ZVONochek', {
+            body: 'Вас зовут в звонок. Нажмите, чтобы открыть чат и войти',
+            tag: 'chatcall-' + (d.room || ''),
+            icon: ICON,
+            badge: BADGE,
+            requireInteraction: true,
+            renotify: true,
+            vibrate: RING_VIBRATE,
+            timestamp: Date.now(),
+            data: { chat: d.room || '', call: 1 },
+          });
+        } else {
           await self.registration.showNotification('Новое сообщение — ZVONochek', {
             body: 'В приватном чате есть непрочитанное сообщение',
             tag: 'chat-' + (d.room || ''),
-            icon: './icons/icon-192.png',
-            badge: './icons/icon-192.png',
+            icon: ICON,
+            badge: BADGE,
+            vibrate: [120, 80, 120],
+            timestamp: Date.now(),
             data: { chat: d.room || '' },
           });
         }
@@ -145,38 +179,68 @@ self.addEventListener('push', (e) => {
     );
   } else if (d.t === 'ring-done') {
     e.waitUntil(
-      self.registration
-        .getNotifications({ tag: d.ringId })
-        .then((ns) => ns.forEach((n) => n.close()))
-        .catch(() => {})
+      (async () => {
+        const tags = ['ring-' + d.ringId, String(d.ringId || '')];
+        let had = false;
+        for (const tag of tags) {
+          const ns = await self.registration.getNotifications({ tag }).catch(() => []);
+          for (const n of ns) {
+            had = true;
+            n.close();
+          }
+        }
+        if (had && (d.state === 'expired' || d.state === 'cancelled')) {
+          await self.registration.showNotification('Пропущенный звонок — ZVONochek', {
+            body: 'Вам звонили по личной ссылке',
+            tag: 'missed-' + d.ringId,
+            icon: ICON,
+            badge: BADGE,
+            silent: true,
+            timestamp: Date.now(),
+            data: { missed: 1 },
+          });
+        }
+      })()
     );
   }
 });
 
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
-  const ringId = e.notification.data?.ringId || '';
-  // v28: уведомления о сообщениях чата (data.chatRoom) — фокус приложения;
-  // комнату по seed откроет сама страница из списка комнат (seed в
-  // уведомление не кладём: это носитель доступа к комнате).
-  const chatRoom = e.notification.data?.chatRoom || e.notification.data?.chat || '';
+  const data = e.notification.data || {};
+  const ringId = data.ringId || '';
+  const accept = e.action === 'accept' && !!ringId;
+  // v28: уведомления о сообщениях чата — фокус приложения; комнату по
+  // префиксу её id откроет сама страница из локального списка комнат (seed
+  // в уведомление не кладём: это носитель доступа к комнате).
+  const chatRoom = data.chatRoom || data.chat || '';
   e.waitUntil(
     (async () => {
       const wins = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+      const msg = chatRoom
+        ? { type: 'chat-notification', roomId: chatRoom, call: data.call ? 1 : 0 }
+        : ringId
+          ? { type: 'incoming-ring-push', ringId, act: accept ? 'accept' : '' }
+          : { type: 'open-calls' };
       for (const w of wins) {
-        await w.focus();
-        w.postMessage(
-          chatRoom ? { type: 'chat-notification', roomId: chatRoom } : { type: 'incoming-ring-push', ringId }
-        );
+        try {
+          await w.focus();
+        } catch {}
+        w.postMessage(msg);
         return;
       }
-      await clients.openWindow('./' + (ringId ? `?ring=${encodeURIComponent(ringId)}` : ''));
+      let url = './';
+      if (chatRoom) url += '?openchat=' + encodeURIComponent(chatRoom) + (data.call ? '&call=1' : '');
+      else if (ringId) url += '?ring=' + encodeURIComponent(ringId) + (accept ? '&act=accept' : '');
+      else if (data.missed) url += '?tab=calls';
+      await clients.openWindow(url);
     })()
   );
 });
 
 self.addEventListener('pushsubscriptionchange', (e) => {
-  // Страница при следующем старте сверит подписку и перерегистрируется в Inbox.
+  // Страница при следующем старте сверит подписку и перерегистрируется
+  // (v38: это делается при каждом запуске автоматически).
   e.waitUntil(
     caches.open('zvonochek-flags').then((c) => c.put('/push-resubscribe', new Response('1')))
   );

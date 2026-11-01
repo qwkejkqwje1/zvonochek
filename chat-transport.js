@@ -13,9 +13,9 @@
 // об уведомлениях, реестр увиденных устройств, менеджер каналов) покрыты
 // Node-тестами test-v28.mjs: chat.js при импорте трогает DOM и в тестах не
 // поднимается.
-import { b64u, sha256hex } from './crypto.js?v=36';
-import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=36';
-import { schnorr } from './vendor/secp256k1.js?v=36';
+import { b64u, sha256hex } from './crypto.js?v=38';
+import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=38';
+import { schnorr } from './vendor/secp256k1.js?v=38';
 
 const te = new TextEncoder();
 export const bytesToHex = (bytes) =>
@@ -259,7 +259,10 @@ export const RECEIPT_LABELS = {
 // Участник без heartbeat дольше GCALL_HB_TIMEOUT_MS считается вышедшим;
 // когда множество участников пустеет, звонок завершён (явным 'end' или
 // автоматически — end при этом дописывает любой клиент, заметивший пустоту).
-export const GCALL_HB_TIMEOUT_MS = 60000;
+// v38: heartbeat раз в 30 с, тишина 150 с = вышел (было 20/60 с: один
+// пропущенный пакет на мобильной сети, вкладка в фоне или сбитые часы
+// участника — и звонок «заканчивался» для всех, плашка входа исчезала).
+export const GCALL_HB_TIMEOUT_MS = 150000;
 
 // Извлечь события звонка из сохранённых записей ленты (entry.msg).
 export function gcallEventsFromEntries(items) {
@@ -278,7 +281,9 @@ export function gcallEventsFromEntries(items) {
       op: d.op,
       dev: m.devPub || '',
       nick: m.nick || '',
-      ts: m.ts || 0,
+      // v38: время по серверу в локальной шкале (lts), если известно, —
+      // прунинг не зависит от сбитых часов отправителя.
+      ts: Number.isFinite(it.lts) ? it.lts : m.ts || 0,
       hash: it.hash || '',
     });
   }

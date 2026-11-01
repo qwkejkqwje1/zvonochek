@@ -1073,8 +1073,139 @@ export async function backupIdHash(pubRaw) {
 // внутреннее. Состояния — чистые JSON-объекты, переходы — функции ниже;
 // chat.js только хранит состояние и делает ввод-вывод.
 // =======================================================================
-export const CHAIN_MAX_GAP = 1000; // потолок пропуска вперёд за один take
+// v38: потолок пропуска поднят с 1000 до 200 000. Раньше участник, у
+// которого в старом чате набралось >1000 сообщений (включая служебные
+// heartbeat группового звонка), становился НЕЧИТАЕМЫМ для новичка и для
+// вернувшегося после долгого офлайна: разрыв цепочки >1000 → 'gap' →
+// сообщение молча терялось. Проход теперь синхронный (sha256/HMAC на JS,
+// ~2–10 мкс на шаг) и уступает поток каждые 8192 шага.
+export const CHAIN_MAX_GAP = 200000; // потолок пропуска вперёд за один take
 export const CHAIN_SKIPPED_MAX = 256; // потолок сохранённых skipped-ключей на цепочку
+
+// ---------- v38: синхронные SHA-256 и HMAC-SHA256 (быстрый проход цепочек) ----------
+// Результат бит-в-бит совпадает с WebCrypto (проверено тестом); асинхронный
+// WebCrypto на каждый шаг цепочки стоил ~0.1–0.5 мс, что делало длинные
+// разрывы неподъёмными на слабых телефонах.
+const SHA_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+const SHA_IV = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+const shaW = new Int32Array(64);
+
+function shaCompress(H, buf, off) {
+  const W = shaW;
+  for (let i = 0; i < 16; i++) {
+    const j = off + i * 4;
+    W[i] = (buf[j] << 24) | (buf[j + 1] << 16) | (buf[j + 2] << 8) | buf[j + 3];
+  }
+  for (let i = 16; i < 64; i++) {
+    const a = W[i - 15];
+    const b = W[i - 2];
+    const s0 = ((a >>> 7) | (a << 25)) ^ ((a >>> 18) | (a << 14)) ^ (a >>> 3);
+    const s1 = ((b >>> 17) | (b << 15)) ^ ((b >>> 19) | (b << 13)) ^ (b >>> 10);
+    W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+  }
+  let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+  for (let i = 0; i < 64; i++) {
+    const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+    const t1 = (h + S1 + ((e & f) ^ (~e & g)) + SHA_K[i] + W[i]) | 0;
+    const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+    const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+    h = g;
+    g = f;
+    f = e;
+    e = (d + t1) | 0;
+    d = c;
+    c = b;
+    b = a;
+    a = (t1 + t2) | 0;
+  }
+  H[0] = (H[0] + a) | 0;
+  H[1] = (H[1] + b) | 0;
+  H[2] = (H[2] + c) | 0;
+  H[3] = (H[3] + d) | 0;
+  H[4] = (H[4] + e) | 0;
+  H[5] = (H[5] + f) | 0;
+  H[6] = (H[6] + g) | 0;
+  H[7] = (H[7] + h) | 0;
+}
+
+export function sha256Sync(msg) {
+  const data = msg instanceof Uint8Array ? msg : new Uint8Array(msg);
+  const len = data.length;
+  const total = (((len + 9 + 63) >> 6) << 6) >>> 0;
+  const buf = new Uint8Array(total);
+  buf.set(data);
+  buf[len] = 0x80;
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(total - 4, (len * 8) >>> 0, false);
+  dv.setUint32(total - 8, Math.floor(len / 0x20000000), false);
+  const H = new Int32Array(SHA_IV);
+  for (let off = 0; off < total; off += 64) shaCompress(H, buf, off);
+  const out = new Uint8Array(32);
+  const odv = new DataView(out.buffer);
+  for (let i = 0; i < 8; i++) odv.setUint32(i * 4, H[i] >>> 0, false);
+  return out;
+}
+
+export function hmacSha256Sync(keyBytes, data) {
+  let k = keyBytes instanceof Uint8Array ? keyBytes : new Uint8Array(keyBytes);
+  if (k.length > 64) k = sha256Sync(k);
+  const msg = typeof data === 'string' ? te.encode(data) : data;
+  const inner = new Uint8Array(64 + msg.length);
+  const outer = new Uint8Array(64 + 32);
+  for (let i = 0; i < 64; i++) {
+    const kb = i < k.length ? k[i] : 0;
+    inner[i] = kb ^ 0x36;
+    outer[i] = kb ^ 0x5c;
+  }
+  inner.set(msg, 64);
+  outer.set(sha256Sync(inner), 64);
+  return sha256Sync(outer);
+}
+
+const CHAIN_MK = te.encode('zv-mk');
+const CHAIN_CK = te.encode('zv-ck');
+const yieldNow = () => new Promise((r) => setTimeout(r, 0));
+
+// v38: ключ сообщения номер cn по ck на позиции startN (для повторного
+// вывода из корня цепочки, когда ключ уже израсходован/вытеснен: повтор
+// cn у отправителя, сообщение старой эпохи, опоздавшее сообщение вне окна
+// skipped). onCheckpoint(n, ckBytes) вызывается каждые 512 шагов — кэш в
+// памяти вызывающего. null — неверный номер или разрыв больше потолка.
+export async function chainKeyAt(startCkB64, startN, cn, onCheckpoint = null) {
+  if (!Number.isInteger(cn) || !Number.isInteger(startN) || cn < startN || cn - startN > CHAIN_MAX_GAP) {
+    return null;
+  }
+  let ck = b64u.dec(startCkB64);
+  for (let k = startN; k < cn; k++) {
+    ck = hmacSha256Sync(ck, CHAIN_CK);
+    if (onCheckpoint && ((k + 1) & 511) === 0) onCheckpoint(k + 1, ck);
+    if (((k - startN) & 8191) === 8191) await yieldNow();
+  }
+  return hmacSha256Sync(ck, CHAIN_MK);
+}
+
+// v38: продвинуть отправляющую цепочку до позиции toN (самолечение после
+// отката состояния: номера, уже ушедшие в сеть, повторно не выдаются).
+export async function chainAdvanceSend(state, toN) {
+  if (!state || !Number.isInteger(toN) || toN <= state.n || toN - state.n > CHAIN_MAX_GAP) return false;
+  let ck = b64u.dec(state.ck);
+  for (let k = state.n; k < toN; k++) {
+    ck = hmacSha256Sync(ck, CHAIN_CK);
+    if (((k - state.n) & 8191) === 8191) await yieldNow();
+  }
+  state.ck = b64u.enc(ck);
+  state.n = toN;
+  return true;
+}
 
 async function hmacSha256(keyBytes, data) {
   const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, [
@@ -1287,7 +1418,7 @@ function skippedSet(state, n, mkBytes) {
 //    прямое следствие forward secrecy).
 //  - state.pruned (ck стёрт сменой эпохи): работает только skipped-ветка.
 // Мутирует state только при status 'ok'. Возвращает {status, mk?}.
-export async function chainRecvTake(state, cn) {
+export async function chainRecvTake(state, cn, maxGap = CHAIN_MAX_GAP) {
   if (!Number.isInteger(cn) || cn < 0) return { status: 'unavailable' };
   if (cn < state.nextN) {
     const i = state.skipped.findIndex(([k]) => k === cn);
@@ -1298,14 +1429,19 @@ export async function chainRecvTake(state, cn) {
   }
   if (state.pruned || !state.ck) return { status: 'unavailable' };
   const gap = cn - state.nextN;
-  if (gap > CHAIN_MAX_GAP) return { status: 'gap' };
+  if (gap > Math.min(maxGap, CHAIN_MAX_GAP)) return { status: 'gap' };
+  // v38: синхронный проход; ключи skipped считаем только для последних
+  // CHAIN_SKIPPED_MAX позиций — более ранние всё равно были бы вытеснены
+  // (результат тот же, что у прежнего полного прохода с вытеснением).
   let ck = b64u.dec(state.ck);
+  const keepFrom = Math.max(state.nextN, cn - CHAIN_SKIPPED_MAX);
   for (let k = state.nextN; k < cn; k++) {
-    skippedSet(state, k, await hmacSha256(ck, 'zv-mk'));
-    ck = await hmacSha256(ck, 'zv-ck');
+    if (k >= keepFrom) skippedSet(state, k, hmacSha256Sync(ck, CHAIN_MK));
+    ck = hmacSha256Sync(ck, CHAIN_CK);
+    if (((k - state.nextN) & 8191) === 8191) await yieldNow();
   }
-  const mk = await hmacSha256(ck, 'zv-mk');
-  state.ck = b64u.enc(await hmacSha256(ck, 'zv-ck'));
+  const mk = hmacSha256Sync(ck, CHAIN_MK);
+  state.ck = b64u.enc(hmacSha256Sync(ck, CHAIN_CK));
   state.nextN = cn + 1;
   return { status: 'ok', mk };
 }

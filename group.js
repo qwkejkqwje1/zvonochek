@@ -105,10 +105,33 @@ if (API) {
     };
     pc.onconnectionstatechange = () => {
       API.log(`Группа: ${sess.name} — ${pc.connectionState}`);
+      clearTimeout(sess.discTimer);
+      if (pc.connectionState === 'connected') {
+        sess.fails = 0;
+        applyMeshCaps();
+      }
       if (pc.connectionState === 'failed') {
+        // v38: TURN — только теперь (крайнее средство) и ДЕЙСТВИТЕЛЬНО
+        // применяется к этому соединению: раньше restartIce шёл со старой
+        // конфигурацией без TURN и групповое соединение не поднималось.
+        sess.fails = (sess.fails || 0) + 1;
+        if (sess.fails > 3) {
+          API.log(`Группа: ${sess.name} — соединение не восстановилось, сессия закрыта`);
+          closeSession(sess);
+          return;
+        }
         API.ensureTurnLoaded('групповое соединение не встало').finally(() => {
+          try { pc.setConfiguration(API.pcConfig()); } catch {}
           try { pc.restartIce(); } catch {}
         });
+      }
+      if (pc.connectionState === 'disconnected') {
+        // Мобильная сеть «моргнула»: даём ICE 6 с восстановиться самому.
+        sess.discTimer = setTimeout(() => {
+          if (!sess.dead && pc.connectionState === 'disconnected') {
+            try { pc.restartIce(); } catch {}
+          }
+        }, 6000);
       }
       if (pc.connectionState === 'closed') closeSession(sess);
     };
@@ -148,14 +171,40 @@ if (API) {
     }
   }
 
+  // v38: в mesh каждый участник отправляет своё видео КАЖДОМУ — без
+  // потолков 3–4 человека с камерами забивали аплинк телефона, и
+  // разваливались все соединения сразу. Потолок битрейта/кадров/размера
+  // видео — по числу собеседников; звук не трогаем (Opus сам по себе лёгкий).
+  function applyMeshCaps() {
+    const peers = sessions.size + 1; // + основной собеседник
+    const maxBitrate = peers >= 4 ? 250000 : peers >= 3 ? 380000 : 650000;
+    const maxFramerate = peers >= 3 ? 20 : 24;
+    const scale = peers >= 4 ? 2 : peers >= 3 ? 1.5 : 1;
+    for (const sess of sessions.values()) {
+      for (const sender of sess.pc?.getSenders?.() || []) {
+        if (sender.track?.kind !== 'video') continue;
+        try {
+          const prm = sender.getParameters();
+          if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}];
+          prm.encodings[0].maxBitrate = maxBitrate;
+          prm.encodings[0].maxFramerate = maxFramerate;
+          prm.encodings[0].scaleResolutionDownBy = scale;
+          sender.setParameters(prm).catch(() => {});
+        } catch {}
+      }
+    }
+  }
+
   function closeSession(sess) {
     if (sess.dead) return;
     sess.dead = true;
+    clearTimeout(sess.discTimer);
     try { sess.audioSrc?.disconnect(); } catch {}
     try { sess.pc?.close(); } catch {}
     sessions.delete(sess.inst);
     dropTile(sess);
     API.log(`Группа: ${sess.name} отключился`);
+    applyMeshCaps();
   }
 
   function onSignal(m) {
@@ -206,6 +255,7 @@ if (API) {
         if (sender.track !== fresh) sender.replaceTrack(fresh).catch(() => {});
       }
     }
+    applyMeshCaps();
   }
 
   API.registerHook({

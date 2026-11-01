@@ -1,4 +1,4 @@
-// ZVONochek v36 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
+// ZVONochek v38 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
 export const CONFIG = {
   APP_NAME: 'ZVONochek',
 
@@ -62,15 +62,39 @@ export const CONFIG = {
   // TURN от Metered.ca (если используется динамический API-ключ на клиенте)
   METERED: { domain: '', apiKey: '' },
 
-  // v36: статических TURN-логинов в клиенте больше НЕТ.
-  // До v35 здесь лежали логин и пароль Metered/ExpressTURN — в открытом виде
-  // в публичном репозитории: любой мог выбрать бесплатную квоту, и TURN
-  // отказывал ровно тогда, когда без него звонок не соединяется. Теперь TURN
-  // выдаёт только свой Worker (/turn): короткоживущие ключи Cloudflare
-  // Realtime TURN (1000 ГБ/мес бесплатно) или ваш TURN из секретов Worker.
-  // Настройка — 2 минуты, см. RELEASE.md («TURN: перенос в Worker»).
-  // Массив оставлен для своих НЕсекретных ICE-серверов (например, STUN).
-  EXTRA_ICE_SERVERS: [],
+  // v37, решение владельца (бета, пользуется только владелец): статические
+  // TURN-логины снова лежат прямо в клиенте — без Worker и без банковской
+  // карты (Cloudflare Realtime TURN требует карту). Известный компромисс:
+  // логины видны в публичном репозитории, и чужие могут выбрать бесплатную
+  // квоту — тогда TURN откажет, и сработают остальные пути (Worker /turn,
+  // METERED-ключ, прямое соединение). Если квоту «съедят» — просто заменить
+  // логины здесь на новые (бесплатная регистрация на metered.ca / expressturn.com).
+  // v38: TURN — КРАЙНЕЕ средство (беречь бесплатные лимиты): звонок всегда
+  // стартует напрямую (STUN), а эти серверы подключаются, только если прямой
+  // путь не встал за 6 с, ICE упал или включён режим «только TURN».
+  // Порядок важен: 443/TLS и TCP — для сетей, где режут UDP.
+  EXTRA_ICE_SERVERS: [
+    { urls: 'stun:stun.relay.metered.ca:80' },
+    {
+      urls: [
+        'turns:global.relay.metered.ca:443?transport=tcp',
+        'turn:global.relay.metered.ca:443',
+        'turn:global.relay.metered.ca:80?transport=tcp',
+        'turn:global.relay.metered.ca:80',
+      ],
+      username: 'b0cc17f06cf20504ab5cd581',
+      credential: 'YSV26ACRA6JxZ8TQ',
+    },
+    // Запасной TURN: ExpressTURN
+    {
+      urls: [
+        'turn:free.expressturn.com:3478?transport=tcp',
+        'turn:free.expressturn.com:3478',
+      ],
+      username: '000000002107165853',
+      credential: '3T1HHXm3M1UWIyZ3pOzBv5EwRbI=',
+    },
+  ],
 };
 
 // ---------- v28: «Свой сервер» — единый резолвер адреса Worker ----------

@@ -5,14 +5,20 @@
 // хэш токена (meta.access_token_hash), сам токен выводится клиентом из
 // seed через HKDF и по сети ходит только в заголовках к своему Worker.
 //
-// Retention (выбор фазы 1, техплан §4): alarm раз в сутки удаляет сообщения,
-// у которых ack старше 7 дней, и любые старше 30 дней (жёсткий потолок).
+// Retention (v38): alarm раз в сутки удаляет сообщения, у которых ack старше
+// 7 дней И которые уже забрали ВСЕ активные устройства комнаты (seq не больше
+// минимального delivered_seq среди устройств, заходивших за 30 дней), и любые
+// старше 30 дней (жёсткий потолок). До v38 хватало ack ОДНОГО устройства —
+// участник, неделю не открывавший чат, терял сообщения навсегда.
 // Rate-limit: не более 60 сообщений в минуту на комнату.
 //
 // API (путь внутри DO — после /chat/<roomId>):
 //   POST /init  {sub?}            — установить хэш токена (идемпотентно), push-подписка
-//   POST /msg   {blob, dev, ttlSec?} — добавить сообщение → {seq} / {seq, dup:true}
-//                      (v27: ttlSec — исчезающее сообщение, сервер хранит expires_at)
+//   POST /msg   {blob, dev, ttlSec?, quiet?, push?} — добавить сообщение → {seq} / {seq, dup:true}
+//                      (v27: ttlSec — исчезающее сообщение, сервер хранит expires_at;
+//                       v38: quiet:true — служебное (реакция, пульс звонка) без пуша,
+//                       push:'call' — пуш «звонок в чате» с вибрацией)
+//   POST /unsub {endpoint}        — v38: снять push-подписку устройства (выход из чата)
 //   GET  /fetch?after=<seq>       — пропущенные сообщения по возрастанию seq
 //   POST /ack   {seqs:[…], dev?, read?} — подтвердить доставку/прочтение (v25)
 //   GET  /state                   — сводка v25: members_state + online (presence)
@@ -43,7 +49,16 @@ const BLOB_BYTES = 4124; // nonce(12) + plaintext(4096) + тег GCM(16)
 const RATE_PER_MIN = 60;
 const ACK_RETENTION_MS = 7 * 24 * 3600_000;
 const HARD_RETENTION_MS = 30 * 24 * 3600_000;
+// v38: устройство считается активным участником, если подтверждало доставку
+// за последние 30 дней — его недокачанные сообщения не удаляются по ack других.
+const MEMBER_ACTIVE_MS = 30 * 24 * 3600_000;
 const MAX_SUBS = 16;
+// v38: пуши о сообщениях одного отправителя не чаще раза в 4 секунды (очередь
+// сообщений подряд будит телефон один раз; закрытая вкладка всё равно
+// показывает одно уведомление на комнату). Звонок — без ограничения.
+const PUSH_GAP_MS = 4000;
+const MSG_PUSH_TTL_S = 6 * 3600; // пуш дождётся телефона, вышедшего в сеть позже
+const CALL_PUSH_TTL_S = 60;
 // v25: файлы чанками (клиент режет по 256 КиБ открытого текста; шифротекст
 // чанка ~256 КиБ + nonce/тег → base64 укладывается в лимит ниже).
 const FILE_MAX_BLOB_B64 = 512 * 1024;
@@ -96,6 +111,7 @@ export class ChatRoom {
       this.sql.exec(`ALTER TABLE messages ADD COLUMN expires_at INTEGER`);
     } catch {}
     this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+    this.lastPushBy = new Map(); // v38: dev отправителя -> ts последнего пуша
   }
 
   roomId(req) {
@@ -230,10 +246,19 @@ export class ChatRoom {
     }));
   }
 
-  async pushWake(exceptDevice = null) {
+  async pushWake(exceptDevice = null, { call = false } = {}) {
+    const now = Date.now();
+    if (!call) {
+      const key = exceptDevice || '-';
+      const last = this.lastPushBy.get(key) || 0;
+      if (now - last < PUSH_GAP_MS) return;
+      this.lastPushBy.set(key, now);
+      if (this.lastPushBy.size > 64) this.lastPushBy.clear();
+    }
     const subs = this.all(`SELECT * FROM subs`).filter((s) => s.device !== exceptDevice);
     if (!subs.length) return;
     const room = this.meta('room_id') || '';
+    const payload = call ? { t: 'chat', room: room.slice(0, 16), call: 1 } : { t: 'chat', room: room.slice(0, 16) };
     for (let i = 0; i < subs.length; i += 6) {
       await Promise.all(
         subs.slice(i, i + 6).map(async (s) => {
@@ -241,8 +266,10 @@ export class ChatRoom {
             const r = await sendPush(
               this.env,
               { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-              { t: 'chat', room: room.slice(0, 16) },
-              { ttl: 120, topic: ('chat' + room).slice(0, 32) }
+              payload,
+              call
+                ? { ttl: CALL_PUSH_TTL_S, topic: ('zc' + room).slice(0, 32) }
+                : { ttl: MSG_PUSH_TTL_S, topic: ('chat' + room).slice(0, 32) }
             );
             if (r.status === 404 || r.status === 410) {
               this.sql.exec(`DELETE FROM subs WHERE endpoint=?`, s.endpoint);
@@ -328,7 +355,7 @@ export class ChatRoom {
       if (sub?.endpoint && sub?.keys?.p256dh && sub?.keys?.auth) {
         this.sql.exec(
           `INSERT INTO subs (endpoint, device, p256dh, auth, created) VALUES (?,?,?,?,?)
-           ON CONFLICT(endpoint) DO UPDATE SET device=excluded.device, p256dh=excluded.p256dh, auth=excluded.auth`,
+           ON CONFLICT(endpoint) DO UPDATE SET device=excluded.device, p256dh=excluded.p256dh, auth=excluded.auth, created=excluded.created`,
           String(sub.endpoint),
           String(body.dev || ''),
           String(sub.keys.p256dh),
@@ -407,8 +434,41 @@ export class ChatRoom {
       }
       this.touchActivity(now);
       this.broadcast({ type: 'msg', seq: row.seq, blob, ts: now }, dev || null);
-      this.state.waitUntil(this.pushWake(dev || null));
+      // v38: у отправителя, у которого уже было всё до этого seq, «доставлено»
+      // сдвигается на его же сообщение — иначе в чате, где пишет в основном
+      // один, его сообщения держались бы до жёсткого потолка в 30 дней.
+      if (typeof dev === 'string' && dev) {
+        try {
+          const prev = this.one(`SELECT delivered_seq FROM members_state WHERE dev=?`, dev.slice(0, 128));
+          if (prev && (prev.delivered_seq || 0) >= row.seq - 1) {
+            this.sql.exec(
+              `UPDATE members_state SET delivered_seq=?, updated=? WHERE dev=?`,
+              row.seq,
+              now,
+              dev.slice(0, 128)
+            );
+          }
+        } catch {}
+      }
+      // v38: служебные сообщения (реакции, пульс группового звонка, квитанции)
+      // никого не будят; приглашение в звонок будит с вибрацией.
+      if (body.quiet !== true) {
+        this.state.waitUntil(this.pushWake(dev || null, { call: body.push === 'call' }));
+      }
       return json({ ok: true, seq: row.seq }, 201);
+    }
+
+    // ---------- v38: снять push-подписку (устройство вышло из чата) ----------
+    if (path === '/unsub' && req.method === 'POST') {
+      if (typeof body.endpoint === 'string' && body.endpoint) {
+        this.sql.exec(`DELETE FROM subs WHERE endpoint=?`, body.endpoint);
+      }
+      if (typeof body.dev === 'string' && body.dev) {
+        try {
+          this.sql.exec(`DELETE FROM members_state WHERE dev=?`, body.dev.slice(0, 128));
+        } catch {}
+      }
+      return json({ ok: true });
     }
 
     // ---------- Докачка пропущенных ----------
@@ -542,11 +602,23 @@ export class ChatRoom {
     try {
       this.sql.exec(`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at<=?`, now);
     } catch {}
-    this.sql.exec(
-      `DELETE FROM messages WHERE (acked_at IS NOT NULL AND acked_at<?) OR ts<?`,
-      now - ACK_RETENTION_MS,
-      now - HARD_RETENTION_MS
-    );
+    // v38: по ack — только то, что забрали все активные устройства.
+    try {
+      const act = this.one(
+        `SELECT MIN(delivered_seq) AS m, COUNT(*) AS c FROM members_state WHERE updated>?`,
+        now - MEMBER_ACTIVE_MS
+      );
+      if (act && act.c > 0 && act.m > 0) {
+        this.sql.exec(
+          `DELETE FROM messages WHERE acked_at IS NOT NULL AND acked_at<? AND seq<=?`,
+          now - ACK_RETENTION_MS,
+          act.m
+        );
+      }
+      // Устройства, не заходившие дольше жёсткого потолка, больше не держат историю.
+      this.sql.exec(`DELETE FROM members_state WHERE updated<?`, now - MEMBER_ACTIVE_MS);
+    } catch {}
+    this.sql.exec(`DELETE FROM messages WHERE ts<?`, now - HARD_RETENTION_MS);
     // v25: чанки файлов живут не дольше жёсткого потолка сообщений (30 дней)
     try {
       this.sql.exec(`DELETE FROM file_chunks WHERE ts<?`, now - HARD_RETENTION_MS);

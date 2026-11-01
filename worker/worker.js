@@ -1,10 +1,13 @@
-// ZVONochek Worker v21 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
+// ZVONochek Worker v38 — сигналинг (WebSocket + HTTP-поллинг + буфер рукопожатий) + выдача TURN/STUN.
+// v38: push без ручной настройки (ключ VAPID создаётся сам, см. push.js),
+// автоочистка (чаты/файлы — 30 дней, алиасы — 30 дней простоя, Inbox —
+// 30/90 дней простоя, бэкапы — 180 дней без обновления), повтор пуша звонка.
 // Коммуникатор: /inbox/:topic — Inbox Durable Object (worker/inbox.js): устройства,
 // ring-дозвон, пропущенные, Web Push (worker/push.js, RFC 8291/8292).
 import { Inbox } from './inbox.js';
 import { ChatRoom } from './chat-room.js';
 import { Pairing } from './pairing.js';
-import { getVapid } from './push.js';
+import { getVapid, vapidAvailable } from './push.js';
 export { Inbox, ChatRoom, Pairing };
 // Worker пересылает только зашифрованные сообщения (AES-256-GCM) и не знает ключей комнат.
 
@@ -94,7 +97,7 @@ export default {
         (env.METERED_DOMAIN && (env.METERED_API_KEY || env.METERED_API_TOKEN)) ||
         (env.TURN_URLS && env.TURN_USERNAME && env.TURN_CREDENTIAL)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 36, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 38, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: vapidAvailable(env), pushRepeat: true, retention: 'v38', ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {
@@ -119,7 +122,10 @@ export default {
     }
 
     // 0) Коммуникатор: Inbox личной комнаты (регистрация устройств, ring, listen-WS, пропущенные)
-    const inboxMatch = url.pathname.match(/^\/inbox\/([a-f0-9]{16,64})(\/.*)?$/);
+    // v38: адрес дозвона из чата — 'chatdial-' + 64 hex (app.js chatDialTopic).
+    // До v38 маршрут принимал только hex — дозвон участнику чата («его
+    // телефон зазвонит») всегда получал 404 и молча уходил в приглашение.
+    const inboxMatch = url.pathname.match(/^\/inbox\/((?:chatdial-)?[a-f0-9]{16,64})(\/.*)?$/);
     if (inboxMatch) {
       if (!env.INBOX) return json({ error: 'inbox not configured' }, 501, cors);
       const stub = env.INBOX.get(env.INBOX.idFromName(inboxMatch[1]));
@@ -175,7 +181,7 @@ export default {
     if (url.pathname === '/pair/backup') {
       if (!env.PAIRING) return json({ error: 'pairing not configured' }, 501, cors);
       let idHash = url.searchParams.get('idHash') || '';
-      if (req.method === 'PUT') {
+      if (req.method === 'PUT' || req.method === 'POST') {
         let bkBody = null;
         try {
           bkBody = await req.clone().json();

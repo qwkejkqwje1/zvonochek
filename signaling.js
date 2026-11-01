@@ -5,9 +5,9 @@
 //   4) Публичные Nostr-реле поверх WSS (порт 443, подписанные эфемерные события)
 //   5) Публичный ntfy.sh (POST + WebSocket; «слепой» pub/sub без регистрации)
 // Каждое сообщение сжимается и шифруется AES-256-GCM; дубли отсекаются по mid.
-import { seal, open } from './crypto.js?v=36';
-import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=36';
-import { schnorr, utils } from './vendor/secp256k1.js?v=36';
+import { seal, open } from './crypto.js?v=38';
+import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=38';
+import { schnorr, utils } from './vendor/secp256k1.js?v=38';
 
 const hexs = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 const NOSTR_KIND = 29333; // эфемерные события: реле их не хранят, только пересылают
@@ -102,9 +102,14 @@ export class Signaling {
     });
   }
 
-  // 1) MQTT поверх WSS
-  _mqtt(b) {
-    if (typeof mqtt === 'undefined') return;
+  // 1) MQTT поверх WSS.
+  // v37: та же защита от ТСПУ-«заморозки» соединения после ~16 КБ, что у
+  // Worker и Nostr. Брокер присылает нам и наши собственные публикации, так
+  // что счётчик растёт вдвое быстрее, чем кажется. После 9 КБ на сокете
+  // поднимаем новое соединение к тому же брокеру и подменяем старое только
+  // когда новое подписалось (make-before-break) — без «дыры» в сигнале.
+  _mqtt(b, replaces = null) {
+    if (typeof mqtt === 'undefined') return null;
     const url = typeof b === 'string' ? b : b.url;
     try {
       const c = mqtt.connect(url, {
@@ -116,16 +121,65 @@ export class Signaling {
         reconnectPeriod: 3500,
         protocolVersion: 4,
       });
+      c._spec = b;
+      c._bytes = 0;
       c.on('connect', () => {
-        if (this.closed) return;
+        if (this.closed) {
+          try { c.end(true); } catch {}
+          return;
+        }
+        c._bytes = 0; // счёт — на каждый новый сокет (в т.ч. после переподключения)
+        c._renewing = false;
         c.subscribe(this.mqttTopic, { qos: 0 });
+        const old = c._replaces;
+        if (old) {
+          c._replaces = null;
+          old._next = null;
+          clearTimeout(c._renewTimer);
+          const i = this.clients.indexOf(old);
+          if (i >= 0) this.clients[i] = c;
+          else this.clients.push(c);
+          setTimeout(() => {
+            try { old.end(true); } catch {}
+          }, 2000);
+          this._status();
+          return; // канал не пропадал — повторный hello не нужен
+        }
         this._status();
         this.onTransportUp();
       });
-      c.on('message', (_t, payload) => this._recv(payload.toString(), 'mqtt'));
+      c.on('message', (_t, payload) => {
+        c._bytes += payload?.length || 0;
+        this._recv(payload.toString(), 'mqtt');
+        this._mbudget(c);
+      });
       ['close', 'offline', 'error', 'reconnect'].forEach((e) => c.on(e, () => this._status()));
-      this.clients.push(c);
-    } catch {}
+      if (replaces) {
+        c._replaces = replaces;
+        replaces._next = c;
+        // Новый сокет не поднялся за 12 с — бросаем его, старый живёт дальше
+        // (следующая попытка — при следующем превышении бюджета).
+        c._renewTimer = setTimeout(() => {
+          if (!c._replaces) return;
+          c._replaces = null;
+          replaces._next = null;
+          replaces._renewing = false;
+          try { c.end(true); } catch {}
+        }, 12000);
+      } else {
+        this.clients.push(c);
+      }
+      return c;
+    } catch {
+      return null;
+    }
+  }
+
+  _mbudget(c) {
+    if (this.closed || c._renewing || c._replaces || !c.connected || c._bytes <= 9000) return;
+    if (!this.clients.includes(c)) return;
+    c._renewing = true;
+    if (!this._mqtt(c._spec, c)) c._renewing = false;
   }
 
   // 2) WebSocket к Cloudflare Worker с защитой от ТСПУ-зависания после ~16 КБ (ротация каждые 9 КБ)
@@ -434,6 +488,8 @@ export class Signaling {
       if (!c.connected) continue;
       try {
         c.publish(this.mqttTopic, data, { qos: 0 });
+        c._bytes = (c._bytes || 0) + data.length;
+        this._mbudget(c);
         sent = true;
       } catch {}
     }
@@ -476,11 +532,13 @@ export class Signaling {
       return;
     }
 
-    // А) MQTT-брокеры
-    for (const c of this.clients) {
+    // А) MQTT-брокеры (копия списка: _mbudget может подменить клиента)
+    for (const c of [...this.clients]) {
       if (c.connected) {
         try {
           c.publish(this.mqttTopic, data, { qos: 0 });
+          c._bytes = (c._bytes || 0) + data.length;
+          this._mbudget(c);
         } catch {}
       }
     }
@@ -578,6 +636,8 @@ export class Signaling {
       this.ntfyTimer = null;
     }
     this.clients.forEach((c) => {
+      if (c._next) clearTimeout(c._next._renewTimer);
+      try { c._next?.end(true); } catch {}
       try { c.end(true); } catch {}
     });
     try { this.ws?.close(); } catch {}

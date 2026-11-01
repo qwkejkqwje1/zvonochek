@@ -12,14 +12,25 @@
 //   cancel:  `cancel|<topic>|<ringId>|<ts>`          (ключ звонящего)
 //   listen:  `listen|<topic>|<devicePub>|<ts>`       (ключ устройства)
 //   missed:  `missed|<topic>|<ts>`                   (ключ устройства)
+//   retire:  `retire|<topic>|<devicePub>|<ts>`       (ключ устройства, v38)
 import { sendPush, b64u } from './push.js';
 
 const te = new TextEncoder();
 const RING_TTL_MS = 90_000;
 const PUSH_FALLBACK_MS = 3_000;
+// v38: повтор пуша звонка устройствам, не показавшим экран входящего
+// (телефон в глубоком сне, уведомление смахнули): через 3, 20 и 45 секунд.
+const PUSH_REPEAT_AT_MS = [3_000, 20_000, 45_000];
 const MISSED_TTL_MS = 24 * 3600_000;
 const MAX_SUBS = 8;
 const SIG_SKEW_MS = 5 * 60_000;
+// v38: автоочистка брошенных Inbox. Владелец «жив», пока его приложение
+// регистрируется/слушает входящие. Без push-подписок Inbox бесполезен уже
+// через 30 дней тишины; с подпиской — держим 90 дней (телефон с закрытым
+// приложением всё ещё может принять звонок). Список заблокированных хранится
+// отдельно и переживает очистку (это настройка, а не мусор).
+const IDLE_WIPE_MS = 30 * 24 * 3600_000;
+const IDLE_WIPE_PUSH_MS = 90 * 24 * 3600_000;
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), {
@@ -99,15 +110,43 @@ export class Inbox {
       `CREATE TABLE IF NOT EXISTS missed (ring_id TEXT PRIMARY KEY, blob TEXT, from_fp TEXT, ts INTEGER, outcome TEXT)`
     );
     this.sql.exec(`CREATE TABLE IF NOT EXISTS blocked (fp_hash TEXT PRIMARY KEY)`);
+    try {
+      this.sql.exec(`ALTER TABLE rings ADD COLUMN push_count INTEGER DEFAULT 0`);
+    } catch {}
     this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
   }
 
+  // v38: отметка «владелец жив» (регистрация, listen, пропущенные).
+  touchOwner() {
+    try {
+      this.sql.exec(`INSERT OR REPLACE INTO meta (k, v) VALUES ('last_seen', ?)`, String(Date.now()));
+    } catch {}
+  }
+  idleDeadline() {
+    const seen = Number(this.one(`SELECT v FROM meta WHERE k='last_seen'`)?.v || 0);
+    if (!seen) return null;
+    const hasSubs = (this.one(`SELECT COUNT(*) AS c FROM subs`)?.c || 0) > 0;
+    return seen + (hasSubs ? IDLE_WIPE_PUSH_MS : IDLE_WIPE_MS);
+  }
+  wipeIdle() {
+    for (const q of [`DELETE FROM subs`, `DELETE FROM devices`, `DELETE FROM rings`, `DELETE FROM missed`, `DELETE FROM meta`]) {
+      try {
+        this.sql.exec(q);
+      } catch {}
+    }
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.close(1000, 'idle');
+      } catch {}
+    }
+  }
+
   topic(req) {
-    const m = new URL(req.url).pathname.match(/^\/inbox\/([a-f0-9]{16,64})/);
+    const m = new URL(req.url).pathname.match(/^\/inbox\/((?:chatdial-)?[a-f0-9]{16,64})(?:\/|$)/);
     return m ? m[1] : '';
   }
   sub(req) {
-    const m = new URL(req.url).pathname.match(/^\/inbox\/[a-f0-9]{16,64}(\/.*)?$/);
+    const m = new URL(req.url).pathname.match(/^\/inbox\/(?:chatdial-)?[a-f0-9]{16,64}(\/.*)?$/);
     return m ? m[1] || '/' : '/';
   }
   one(q, ...p) {
@@ -137,11 +176,18 @@ export class Inbox {
     const now = Date.now();
     let next = null;
     for (const r of this.all(`SELECT exp, push_at, push_sent FROM rings WHERE state='ringing'`)) {
-      const t = !r.push_sent && r.push_at > now ? r.push_at : r.exp;
+      const t = !r.push_sent ? Math.min(r.push_at, r.exp) : r.exp;
+      next = next === null ? t : Math.min(next, t);
+    }
+    // v38: будильник автоочистки — на срок простоя (если владелец за это
+    // время зайдёт, alarm просто пересчитает срок и переставит себя).
+    const idle = this.idleDeadline();
+    if (idle !== null) {
+      const t = idle + 60_000;
       next = next === null ? t : Math.min(next, t);
     }
     if (next === null) await this.state.storage.deleteAlarm().catch(() => {});
-    else await this.state.storage.setAlarm(next);
+    else await this.state.storage.setAlarm(Math.max(next, now + 50));
   }
 
   myTopic() {
@@ -152,6 +198,8 @@ export class Inbox {
     const topic = this.topic(req);
     if (topic) {
       this.sql.exec(`INSERT OR IGNORE INTO meta (k, v) VALUES ('topic', ?)`, topic);
+      // v38: у Inbox до v38 отсчёт простоя начинается с первого обращения.
+      this.sql.exec(`INSERT OR IGNORE INTO meta (k, v) VALUES ('last_seen', ?)`, String(Date.now()));
     }
     const path = this.sub(req);
     if (!topic) return json({ error: 'bad topic' }, 400);
@@ -217,7 +265,7 @@ export class Inbox {
       if (sub?.endpoint && sub?.keys?.p256dh && sub?.keys?.auth) {
         this.sql.exec(
           `INSERT INTO subs (endpoint, device_pub, p256dh, auth, created) VALUES (?,?,?,?,?)
-           ON CONFLICT(endpoint) DO UPDATE SET device_pub=excluded.device_pub, p256dh=excluded.p256dh, auth=excluded.auth`,
+           ON CONFLICT(endpoint) DO UPDATE SET device_pub=excluded.device_pub, p256dh=excluded.p256dh, auth=excluded.auth, created=excluded.created`,
           String(sub.endpoint),
           devicePub,
           String(sub.keys.p256dh),
@@ -232,7 +280,34 @@ export class Inbox {
           );
         }
       }
-      return json({ ok: true });
+      // v38: подписку можно снять явно (устройство выключило уведомления).
+      if (body.unsub && typeof body.unsub === 'string') {
+        this.sql.exec(`DELETE FROM subs WHERE endpoint=? AND device_pub=?`, body.unsub, devicePub);
+      }
+      this.touchOwner();
+      await this.scheduleAlarm();
+      return json({ ok: true, push: !!sub?.endpoint });
+    }
+
+    // ---------- v38: владелец отзывает номер («Сменить номер» / «Стереть всё») ----------
+    // Подпись зарегистрированного устройства над retire|topic|devicePub|ts.
+    // Стирается всё: устройства, push-подписки, звонки, пропущенные,
+    // блок-лист и meta; WebSocket-слушатели закрываются. Дальше звонок по
+    // старой ссылке получает 404 «no owner» (см. /ring).
+    if (path === '/retire' && req.method === 'POST') {
+      const { devicePub, ts, sig } = body;
+      if (!devicePub || !freshTs(ts) || !(await this.isDevice(devicePub))) {
+        return json({ error: 'bad retire' }, 403);
+      }
+      if (!(await verifySig(devicePub, sig, `retire|${topic}|${devicePub}|${ts}`))) {
+        return json({ error: 'bad sig' }, 403);
+      }
+      this.wipeIdle();
+      try {
+        this.sql.exec(`DELETE FROM blocked`);
+      } catch {}
+      await this.state.storage.deleteAlarm().catch(() => {});
+      return json({ ok: true, retired: true });
     }
 
     // ---------- Публичный список устройств (для проверки подписи владельца) ----------
@@ -251,6 +326,13 @@ export class Inbox {
         return json({ error: 'bad ring' }, 400);
       }
       const now = Date.now();
+      // v38: у номера нет владельца (отозван «Сменить номер»/«Стереть всё»
+      // или стёрт автоочисткой после простоя) — звонить некому; не копим
+      // звонки и пропущенные в пустом Inbox.
+      if (!this.one(`SELECT device_pub FROM devices WHERE revoked=0 LIMIT 1`)) {
+        await this.scheduleAlarm();
+        return json({ error: 'no owner' }, 404);
+      }
       if (this.one(`SELECT fp_hash FROM blocked WHERE fp_hash=?`, await sha256hex(fromFp))) {
         return json({ error: 'blocked' }, 403);
       }
@@ -287,7 +369,12 @@ export class Inbox {
       return json({ state: 'ringing', exp, ringId }, 201);
     }
 
-    const ringMatch = path.match(/^\/ring\/([A-Za-z0-9-]{8,64})(\/(ack|answer))?$/);
+    // v38: группа со слэшем — незахватывающая, ringMatch[2] = 'ack'|'answer'.
+    // До v38 ringMatch[2] был '/ack' (со слэшем) и сравнение с 'ack' не
+    // срабатывало никогда — ack/answer/cancel ВСЕГДА получали 404:
+    // звонящий не узнавал, что звонок принят (через 90 с — «не ответил»),
+    // другие устройства владельца продолжали звонить, пуши повторялись.
+    const ringMatch = path.match(/^\/ring\/([A-Za-z0-9-]{8,64})(?:\/(ack|answer))?$/);
 
     // ---------- Статус звонка (поллинг вызывающего) ----------
     if (ringMatch && req.method === 'GET' && !ringMatch[2]) {
@@ -349,8 +436,10 @@ export class Inbox {
         return json({ state: after.state }, after.state === 'expired' ? 410 : 409);
       }
       this.broadcast({ type: 'ring-state', ringId, state: newState, answeredBy: devicePub || null });
-      if (newState === 'accepted' || newState === 'declined') {
-        this.state.waitUntil(this.pushRingDone(ringId, devicePub));
+      // v38: погасить уведомление о звонке на всех устройствах, куда ушёл пуш
+      // (раньше — только при ответе; при отмене звонящим оно висело).
+      if ((r.push_count || 0) > 0 || r.push_sent) {
+        this.state.waitUntil(this.pushRingDone(ringId, devicePub || null, newState));
       }
       await this.scheduleAlarm();
       return json({ state: newState });
@@ -368,6 +457,7 @@ export class Inbox {
         return json({ error: 'bad sig' }, 403);
       }
       const missed = this.all(`SELECT ring_id, blob, from_fp, ts, outcome FROM missed ORDER BY ts DESC LIMIT 50`);
+      this.touchOwner();
       return json({ missed });
     }
     if (path === '/missed/ack' && req.method === 'POST') {
@@ -389,7 +479,7 @@ export class Inbox {
     return json({ error: 'not found' }, 404);
   }
 
-  async pushRingDone(ringId, answeredByDevice) {
+  async pushRingDone(ringId, answeredByDevice, state = 'done') {
     const subs = this.all(`SELECT * FROM subs WHERE device_pub != ?`, answeredByDevice || '');
     for (let i = 0; i < subs.length; i += 6) {
       await Promise.all(
@@ -398,8 +488,8 @@ export class Inbox {
             const r = await sendPush(
               this.env,
               { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-              { t: 'ring-done', topic: this.myTopic(), ringId },
-              { ttl: 60, topic: ringId }
+              { t: 'ring-done', topic: this.myTopic(), ringId, state },
+              { ttl: 600, topic: String(ringId).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) }
             );
             if (r.status === 404 || r.status === 410) {
               this.sql.exec(`DELETE FROM subs WHERE endpoint=?`, s.endpoint);
@@ -412,6 +502,13 @@ export class Inbox {
 
   async alarm() {
     const now = Date.now();
+    // v38: брошенный Inbox (владелец давно не заходил) — очистка.
+    const idle = this.idleDeadline();
+    if (idle !== null && now >= idle) {
+      this.wipeIdle();
+      await this.state.storage.deleteAlarm().catch(() => {});
+      return;
+    }
     // Истёкшие звонки → в пропущенные
     for (const r of this.all(`SELECT * FROM rings WHERE state='ringing' AND exp<=?`, now)) {
       this.sql.exec(`UPDATE rings SET state='expired' WHERE ring_id=? AND state='ringing'`, r.ring_id);
@@ -423,8 +520,13 @@ export class Inbox {
         r.created
       );
       this.broadcast({ type: 'ring-state', ringId: r.ring_id, state: 'expired' });
+      // v38: уведомление «входящий» превращается в «пропущенный».
+      if ((r.push_count || 0) > 0 || r.push_sent) {
+        await this.pushRingDone(r.ring_id, null, 'expired');
+      }
     }
-    // Push тем, кто не подтвердил показ экрана входящего за PUSH_FALLBACK_MS
+    // Push тем, кто не подтвердил показ экрана входящего; v38 — с повтором
+    // (PUSH_REPEAT_AT_MS), каждый следующий пуш заменяет предыдущий (Topic).
     for (const r of this.all(
       `SELECT * FROM rings WHERE state='ringing' AND push_sent=0 AND push_at<=?`,
       now
@@ -432,6 +534,7 @@ export class Inbox {
       const acked = JSON.parse(r.acked_by || '[]');
       const subs = this.all(`SELECT * FROM subs`).filter((s) => !acked.includes(s.device_pub));
       const ttl = Math.max(10, Math.floor((r.exp - now) / 1000));
+      const n = (r.push_count || 0) + 1;
       for (let i = 0; i < subs.length; i += 6) {
         await Promise.all(
           subs.slice(i, i + 6).map(async (s) => {
@@ -439,8 +542,8 @@ export class Inbox {
               const res = await sendPush(
                 this.env,
                 { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-                { t: 'ring', topic: this.myTopic(), ringId: r.ring_id },
-                { ttl, topic: r.ring_id }
+                { t: 'ring', topic: this.myTopic(), ringId: r.ring_id, n },
+                { ttl, topic: String(r.ring_id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) }
               );
               if (res.status === 404 || res.status === 410) {
                 this.sql.exec(`DELETE FROM subs WHERE endpoint=?`, s.endpoint);
@@ -449,7 +552,17 @@ export class Inbox {
           })
         );
       }
-      this.sql.exec(`UPDATE rings SET push_sent=1 WHERE ring_id=?`, r.ring_id);
+      const nextAt = PUSH_REPEAT_AT_MS[n];
+      if (subs.length && nextAt && r.created + nextAt < r.exp) {
+        this.sql.exec(
+          `UPDATE rings SET push_count=?, push_at=? WHERE ring_id=?`,
+          n,
+          r.created + nextAt,
+          r.ring_id
+        );
+      } else {
+        this.sql.exec(`UPDATE rings SET push_sent=1, push_count=? WHERE ring_id=?`, n, r.ring_id);
+      }
     }
     // Чистка старых терминальных записей
     this.sql.exec(`DELETE FROM rings WHERE state!='ringing' AND created<?`, now - MISSED_TTL_MS);
@@ -466,11 +579,30 @@ export class Inbox {
     }
     const att = ws.deserializeAttachment() || {};
     if (att.devicePub) return; // после аутентификации клиент ничего не шлёт
-    if (m?.type !== 'auth' || !m.devicePub || !freshTs(m.ts)) return;
-    if (!(await this.isDevice(m.devicePub))) return;
+    if (m?.type !== 'auth') return;
     const topic = att.topic || '';
-    if (!(await verifySig(m.devicePub, m.sig, `listen|${topic}|${m.devicePub}|${m.ts}`))) return;
+    // v38: неудачная аутентификация больше не молчит. Раньше сокет, чей auth
+    // пришёл раньше /register (новый номер, «Сменить номер»), навсегда
+    // оставался неаутентифицированным: клиент считал себя «на связи», а
+    // звонки ему не рассылались до перезагрузки страницы. Теперь — отказ и
+    // закрытие: клиент переподключится и повторит auth уже после регистрации.
+    const ok =
+      !!m.devicePub &&
+      freshTs(m.ts) &&
+      (await this.isDevice(m.devicePub)) &&
+      (await verifySig(m.devicePub, m.sig, `listen|${topic}|${m.devicePub}|${m.ts}`));
+    if (!ok) {
+      try {
+        ws.send(JSON.stringify({ type: 'auth-fail' }));
+        ws.close(4001, 'auth');
+      } catch {}
+      return;
+    }
     ws.serializeAttachment({ ...att, devicePub: m.devicePub });
+    this.touchOwner();
+    try {
+      ws.send(JSON.stringify({ type: 'auth-ok' }));
+    } catch {}
     // Сразу отдаём активные звонки — вдруг приложение открылось позже ring
     for (const r of this.all(`SELECT ring_id, blob, from_fp FROM rings WHERE state='ringing'`)) {
       try {
