@@ -13,8 +13,9 @@
 // об уведомлениях, реестр увиденных устройств, менеджер каналов) покрыты
 // Node-тестами test-v28.mjs: chat.js при импорте трогает DOM и в тестах не
 // поднимается.
-import { b64u, sha256hex } from './crypto.js?v=35';
-import { schnorr } from './vendor/secp256k1.js?v=35';
+import { b64u, sha256hex } from './crypto.js?v=36';
+import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=36';
+import { schnorr } from './vendor/secp256k1.js?v=36';
 
 const te = new TextEncoder();
 export const bytesToHex = (bytes) =>
@@ -38,36 +39,12 @@ export async function mqttTopicForRoom(roomId) {
   return 'zvchat1/' + (await chatRoomHash(roomId));
 }
 
-// ---------- v35: ntfy (третий канал fallback) ----------
+// ---------- ntfy (третий канал fallback) ----------
 // Отдельный префикс 'zvchat1n-', чтобы топики чата в ntfy не пересекались
 // ни с MQTT ('zvchat1/'), ни с сигналингом звонков ('zv1-'). Хэш — тот же
-// SHA-256(roomId), что и у остальных резервных каналов.
+// SHA-256(roomId), что у остальных резервных каналов (усечение — в ntfy.js).
 export const NTFY_CHAT_TOPIC_PREFIX = 'zvchat1n-';
-
-export async function ntfyTopicForRoom(roomId) {
-  return NTFY_CHAT_TOPIC_PREFIX + (await chatRoomHash(roomId));
-}
-
-// URL подписки ntfy: WebSocket + since (unix-время, окно 30 с) — публичный
-// сервер кэширует сообщения 12 часов, и без since каждое переподключение
-// получало бы весь кэш. Значение пересчитывается на каждое подключение.
-export function ntfySubscribeUrl(base, topic, nowSec = Math.floor(Date.now() / 1000)) {
-  const b = String(base || '').replace(/\/$/, '').replace(/^http/, 'ws');
-  return b + '/' + topic + '/ws?since=' + Math.max(0, Math.floor(nowSec) - 30);
-}
-
-// Кадр ntfy по WebSocket — JSON {id, time, event, topic, message}. Нужны
-// только кадры event === 'message' со строкой message (наш blob);
-// служебные open/keepalive — null.
-export function parseNtfyFrame(data) {
-  try {
-    const j = typeof data === 'string' ? JSON.parse(data) : data;
-    if (!j || typeof j !== 'object' || j.event !== 'message' || typeof j.message !== 'string') return null;
-    return { id: j.id || '', time: j.time || 0, message: j.message };
-  } catch {
-    return null;
-  }
-}
+export const ntfyTopicForRoom = (roomId) => ntfyTopic(NTFY_CHAT_TOPIC_PREFIX, roomId);
 
 export const NOSTR_CHAT_KIND = 1;
 export const NOSTR_CHAT_TAG = 'zvchat1';
@@ -743,7 +720,7 @@ export class FallbackTransport {
       }
     }
     let ntfySent = 0;
-    if (this.ntfyBase && this.ntfyTopic) {
+    if (this.ntfyBase && this.ntfyTopic && fitsNtfy(payload)) {
       try {
         // Публикация — POST, тело = тот же blob байт-в-байт, что в MQTT.
         // Троттлинг публичного ntfy (429 по IP) просто обнуляет ntfySent:

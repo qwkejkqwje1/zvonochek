@@ -1,4 +1,4 @@
-// ZVONochek v21 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
+// ZVONochek v36 — настройки мульти-транспорта, STUN/TURN и обхода блокировок.
 export const CONFIG = {
   APP_NAME: 'ZVONochek',
 
@@ -7,9 +7,8 @@ export const CONFIG = {
   // Worker в настройках (localStorage zvWorkerUrl, см. getWorkerBase ниже).
   WORKER_URL: 'https://zvonochek.zerewgwe.workers.dev',
 
-  // Web Push (коммуникатор): публичный VAPID-ключ. Приватная часть — только
-  // секрет Worker VAPID_PRIVATE_JWK, в репозитории её нет и быть не должно.
-  VAPID_PUBLIC_KEY: 'BLVkM9lHGnDUlJ7P1CFZTRxaiiiD4QKqPLPnqAyWhnnTpZ-W0KuNT2LWFAxQD23idzUTdglnQEBJXajmS_JL_js',
+  // Web Push: публичный VAPID-ключ клиент берёт у самого Worker (/push-key),
+  // приватная часть — только секрет Worker VAPID_PRIVATE_JWK (см. RELEASE.md).
 
   // Способ №1: публичные MQTT-брокеры (WSS). Подключаемся ко всем параллельно —
   // побеждает самый быстрый канал, дубли автоматически отбрасываются.
@@ -63,34 +62,15 @@ export const CONFIG = {
   // TURN от Metered.ca (если используется динамический API-ключ на клиенте)
   METERED: { domain: '', apiKey: '' },
 
-  // v14, решение владельца от 27.10.2026: статические креды ВРЕМЕННО возвращены
-  // как резервный источник TURN — чтобы при необходимости звонки могли ходить
-  // через них, пока в Worker не настроены эфемерные креды. Используются только
-  // ЛЕНИВО (ensureTurnLoaded), на старте звонка трафик через них не идёт.
-  // Известный компромисс: креды видны в исходниках публичного репозитория.
-  // Запасные ICE/TURN-серверы (с приоритетом порта 443 и TCP/TLS для обхода DPI)
-  EXTRA_ICE_SERVERS: [
-    { urls: 'stun:stun.relay.metered.ca:80' },
-    {
-      urls: [
-        'turns:global.relay.metered.ca:443?transport=tcp',
-        'turn:global.relay.metered.ca:443',
-        'turn:global.relay.metered.ca:80?transport=tcp',
-        'turn:global.relay.metered.ca:80',
-      ],
-      username: 'b0cc17f06cf20504ab5cd581',
-      credential: 'YSV26ACRA6JxZ8TQ',
-    },
-    // Запасной TURN: ExpressTURN
-    {
-      urls: [
-        'turn:free.expressturn.com:3478?transport=tcp',
-        'turn:free.expressturn.com:3478',
-      ],
-      username: '000000002107165853',
-      credential: '3T1HHXm3M1UWIyZ3pOzBv5EwRbI=',
-    },
-  ],
+  // v36: статических TURN-логинов в клиенте больше НЕТ.
+  // До v35 здесь лежали логин и пароль Metered/ExpressTURN — в открытом виде
+  // в публичном репозитории: любой мог выбрать бесплатную квоту, и TURN
+  // отказывал ровно тогда, когда без него звонок не соединяется. Теперь TURN
+  // выдаёт только свой Worker (/turn): короткоживущие ключи Cloudflare
+  // Realtime TURN (1000 ГБ/мес бесплатно) или ваш TURN из секретов Worker.
+  // Настройка — 2 минуты, см. RELEASE.md («TURN: перенос в Worker»).
+  // Массив оставлен для своих НЕсекретных ICE-серверов (например, STUN).
+  EXTRA_ICE_SERVERS: [],
 };
 
 // ---------- v28: «Свой сервер» — единый резолвер адреса Worker ----------
@@ -110,7 +90,10 @@ export function normalizeWorkerUrl(value) {
   } catch {
     return null;
   }
-  if (u.protocol !== 'https:' || !u.hostname) return null;
+  // http допустим только для локального Worker разработчика (wrangler dev):
+  // loopback-адрес не уходит в сеть, а в проде воркер всегда https.
+  const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname);
+  if (!(u.protocol === 'https:' || (u.protocol === 'http:' && loopback)) || !u.hostname) return null;
   if (u.username || u.password || u.search || u.hash) return null;
   const segments = u.pathname.split('/').filter(Boolean);
   // Базовый путь допустим (например, прокси-подпуть), но адрес конкретного

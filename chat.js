@@ -61,7 +61,7 @@
 //     цепочки — транзитом через 'drx'); при живой DR-сессии контент не
 //     в режиме d1 от собеседника не принимается (анти-downgrade);
 //   · сообщения ≤v30 расшифровываются статичными ключами, как раньше.
-import { CONFIG, getWorkerBase } from './config.js?v=35';
+import { CONFIG, getWorkerBase } from './config.js?v=36';
 import {
   b64u,
   newSecret,
@@ -81,17 +81,12 @@ import {
   encryptFileChunk,
   decryptFileChunk,
   newGreetCode,
-  greetCodeHash,
-  sealGreetPayload,
-  openGreetPayload,
   newJoinCode,
-  aliasCodeHash,
-  sealAliasPayload,
-  openAliasPayload,
   normalizeWordPhrase,
-  wordCodeHash,
-  sealWordPayload,
-  openWordPayload,
+  codeAccess,
+  sealCodeBlob,
+  openCodeBlob,
+  codeAddrForScheme,
   REACT_EMOJIS,
   nextReactionOp,
   applyReactionState,
@@ -123,8 +118,10 @@ import {
   DR_CONTENT_TYPES,
   drDowngradeBlocked,
   genP256KeyPair,
-} from './crypto.js?v=35';
-import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=35';
+} from './crypto.js?v=36';
+import { kvGet, kvPut, kvDel, kvAll, normalizeRoomRecord } from './store.js?v=36';
+import { coalesced } from './coalesce.js?v=36';
+import { plural } from './callstats.js?v=36';
 import {
   getChatDevice,
   getChatDeviceEcdh,
@@ -133,7 +130,7 @@ import {
   verifyChatSig,
   encryptWithVault,
   decryptWithVault,
-} from './identity.js?v=35';
+} from './identity.js?v=36';
 import {
   ChatTransportManager,
   FallbackTransport,
@@ -147,7 +144,7 @@ import {
   aggregateGcallState,
   gcallEventsFromEntries,
   shouldSweepRoom,
-} from './chat-transport.js?v=35';
+} from './chat-transport.js?v=36';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -166,6 +163,11 @@ let opening = false;
 let pendingPinSeed = null; // seed, ожидающий ввода PIN (экран запроса PIN)
 const fileState = new Map(); // fileId -> {progress, url, name, error, busy}
 const voiceAudio = new Map(); // fileId -> HTMLAudioElement (сессионный кэш плеера)
+
+// v36: перерисовки ленты и списка схлопываются (см. coalesce.js) — пачка
+// досинхронизации больше не вызывает сотню полных перерисовок подряд.
+const renderMessages = coalesced(() => renderMessagesNow());
+const renderRoomList = coalesced(() => renderRoomListNow(), 60);
 
 // ---------- Сервер ----------
 const chatBase = (roomId) => `${getWorkerBase().replace(/\/$/, '')}/chat/${roomId}`;
@@ -235,11 +237,28 @@ function note(text) {
   const h = $('#chatHomeNote');
   if (h && $('#chatroom')?.classList.contains('hidden')) h.textContent = text || '';
 }
+// Статус соединения в шапке комнаты. Норма («На связи») места не занимает —
+// атрибут data-ok скрывает её стилем; видны только «Подключение…»,
+// «Офлайн…» и «Резервный канал», и строка состава комнаты не обрезается.
+const ONLINE = 'На связи';
+// Короткое подтверждение действия — общий #toast приложения.
+let flashTimer = 0;
+function flash(text) {
+  const t = $('#toast');
+  if (!t) return note(text);
+  t.textContent = text;
+  t.classList.remove('hidden');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => t.classList.add('hidden'), 2200);
+}
 function status(text) {
   const s = $('#chatStatus');
-  if (s) s.textContent = text;
+  if (!s) return;
+  s.textContent = text;
+  s.toggleAttribute('data-ok', text === ONLINE);
 }
 function showChatScreen() {
+  document.body.dataset.screen = 'chatroom';
   $('#home')?.classList.add('hidden');
   $('#prejoin')?.classList.add('hidden');
   $('#chatroom')?.classList.remove('hidden');
@@ -248,6 +267,7 @@ function showChatScreen() {
   if (h) h.textContent = ''; // v22: комната открыта — домашний дубль подсказок больше не нужен
 }
 function hideChatScreen() {
+  document.body.dataset.screen = 'home';
   $('#chatroom')?.classList.add('hidden');
   $('#home')?.classList.remove('hidden');
 }
@@ -256,15 +276,24 @@ function hideChatScreen() {
 // Серверный push с закрытым приложением сознательно не трогаем (VAPID
 // отложен владельцем). Здесь: внутриприложенческий тост, системное
 // уведомление через SW при скрытой вкладке и опциональный звук.
+// Своё устройство (запоминается при открытии комнаты): собственный intro,
+// пришедший с историей, не должен превращать личный чат в «Анна, Борис».
+let selfDev = '';
+const peersOf = (rec) =>
+  Object.entries(rec?.members || {}).filter(([d, m]) => m && !m.left && m.nick && d !== selfDev);
+// Аватар личного чата — аватар собеседника (как в Telegram): тот же цвет
+// в списке, шапке и составе комнаты. У групп — цвет комнаты.
+const roomAvatarBg = (rec) => {
+  const peers = peersOf(rec);
+  return avatarBg(peers.length === 1 ? peers[0][0] : rec.roomId);
+};
 const roomTitleOf = (roomId, rec = null) => {
   if (rec && rec.members && typeof rec.members === 'object') {
-    const names = Object.values(rec.members)
-      .filter((m) => m && !m.left && m.nick)
-      .map((m) => m.nick);
+    const names = peersOf(rec).map(([, m]) => m.nick);
     if (names.length === 1) return names[0];
     if (names.length > 1) return names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2}` : '');
   }
-  return `Чат ${String(roomId || '').slice(0, 8)}…`;
+  return 'Новый чат';
 };
 const notifyTextOn = () => {
   try {
@@ -318,15 +347,19 @@ function showChatToast({ title, body, roomId }) {
     setTimeout(() => el.remove(), 6000);
   } catch {}
 }
-async function maybeNotifyMessage({ roomId, nick, preview, mine, roomActive }) {
+// rec — запись комнаты (для заголовка); system — служебное уведомление,
+// его текст не секретен и показывается даже при скрытых превью.
+async function maybeNotifyMessage({ roomId, rec = null, nick, preview, mine, roomActive, system = false }) {
   const d = toastGate.check(roomId, {
     mine,
     roomActive,
     documentHidden: typeof document !== 'undefined' && document.hidden,
   });
   if (!d.show) return d;
-  const title = nick ? `${nick} · ${roomTitleOf(roomId)}` : roomTitleOf(roomId);
-  let body = notifyTextOn() ? String(preview || 'Новое сообщение') : 'Новое сообщение';
+  const roomTitle = roomTitleOf(roomId, rec);
+  // Личный чат — только имя автора (как в Telegram), группа — «автор · чат».
+  const title = !nick ? roomTitle : rec && peersOf(rec).length <= 1 ? nick : `${nick} · ${roomTitle}`;
+  let body = system || notifyTextOn() ? String(preview || 'Новое сообщение') : 'Новое сообщение';
   if (d.count > 1) body += ` (+${d.count - 1})`;
   showChatToast({ title, body, roomId });
   notifyBeep();
@@ -358,6 +391,10 @@ async function noteRoomDevice(dev, { hasIntro = false } = {}) {
   if (!res.shouldAlert || !cur || cur.rec.roomId !== roomId) return;
   const entry = {
     hash: 'local-newdev-' + dev.slice(-16),
+    // Локальная строка встаёт в ленту сразу за последним известным
+    // сообщением (дробный seq), а не «прилипает» к концу ленты навсегда.
+    seq: (cur.rec.lastSeq || 0) + 0.5,
+    local: true,
     msg: {
       v: 1,
       id: 'local-newdev-' + dev,
@@ -375,24 +412,45 @@ async function noteRoomDevice(dev, { hasIntro = false } = {}) {
   if (cur && cur.rec.roomId === roomId) renderMessages().catch(() => {});
   maybeNotifyMessage({
     roomId,
-    nick: '⚠ Новое устройство',
-    preview: 'К комнате подключилось новое устройство',
+    rec: cur?.rec,
+    nick: null,
+    preview: '⚠ К чату подключилось новое устройство',
     mine: false,
     roomActive: chatVisible(),
+    system: true,
   }).catch(() => {});
 }
 
-const fmtTime = (ts) =>
-  new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// Интерфейс только русский — локаль фиксирована, чтобы 24-часовое время
+// и названия месяцев не зависели от языка браузера.
+const RU = 'ru-RU';
+const HM = { hour: '2-digit', minute: '2-digit' };
+const sameDay = (a, b) => a.toDateString() === b.toDateString();
+const fmtTime = (ts) => new Date(ts).toLocaleTimeString(RU, HM);
 const fmtDayTime = (ts) => {
   const d = new Date(ts);
-  const today = new Date();
-  const sameDay = d.toDateString() === today.toDateString();
-  return sameDay
-    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : d.toLocaleDateString([], { day: '2-digit', month: '2-digit' }) +
-        ' ' +
-        d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return sameDay(d, new Date())
+    ? fmtTime(ts)
+    : d.toLocaleDateString(RU, { day: '2-digit', month: '2-digit' }) + ' ' + fmtTime(ts);
+};
+// Время в списке комнат — как в Telegram: сегодня — часы, на этой неделе —
+// день недели, в этом году — число и месяц, иначе — полная дата.
+const fmtListTime = (ts) => {
+  const d = new Date(ts);
+  const now = new Date();
+  if (sameDay(d, now)) return fmtTime(ts);
+  if (now - d < 6 * 864e5) return d.toLocaleDateString(RU, { weekday: 'short' });
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString(RU, { day: 'numeric', month: 'short' }).replace('.', '');
+  }
+  return d.toLocaleDateString(RU, { day: '2-digit', month: '2-digit', year: '2-digit' });
+};
+// «был(а) в 14:05» / «был(а) вчера в 14:05» / «был(а) 28.10».
+const fmtSeen = (ts) => {
+  const d = new Date(ts);
+  if (sameDay(d, new Date())) return 'в ' + fmtTime(ts);
+  if (sameDay(d, new Date(Date.now() - 864e5))) return 'вчера в ' + fmtTime(ts);
+  return d.toLocaleDateString(RU, { day: '2-digit', month: '2-digit' });
 };
 const fmtSize = (b) =>
   b > 1024 * 1024 ? (b / (1024 * 1024)).toFixed(1) + ' МБ' : Math.max(1, Math.ceil(b / 1024)) + ' КБ';
@@ -400,15 +458,33 @@ const fmtSize = (b) =>
 const dayLabel = (ts) => {
   const d = new Date(ts);
   const today = new Date();
-  const yesterday = new Date(Date.now() - 24 * 3600000);
-  if (d.toDateString() === today.toDateString()) return 'Сегодня';
-  if (d.toDateString() === yesterday.toDateString()) return 'Вчера';
-  return d.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
+  if (sameDay(d, today)) return 'Сегодня';
+  if (sameDay(d, new Date(Date.now() - 864e5))) return 'Вчера';
+  return d.toLocaleDateString(RU, {
+    day: 'numeric',
+    month: 'long',
+    ...(d.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
+  });
 };
 function hueOf(str) {
   let h = 0;
   for (let i = 0; i < String(str).length; i++) h = (h * 31 + String(str).charCodeAt(i)) % 360;
   return h;
+}
+// v36: палитра аватаров в духе Telegram — 7 мягких градиентов вместо
+// случайного оттенка (тот давал грязно-зелёные и кислотные круги).
+const AVATAR_GRADIENTS = [
+  ['#ff885e', '#ff516a'], // красный
+  ['#ffcd6a', '#ffa85c'], // оранжевый
+  ['#82b1ff', '#665fff'], // фиолетовый
+  ['#a0de7e', '#54cb68'], // зелёный
+  ['#53edd6', '#28c9b7'], // бирюзовый
+  ['#72d5fd', '#2a9ef1'], // голубой
+  ['#e0a2f3', '#d669ed'], // розовый
+];
+function avatarBg(str) {
+  const [a, b] = AVATAR_GRADIENTS[hueOf(str) % AVATAR_GRADIENTS.length];
+  return `linear-gradient(180deg, ${a}, ${b})`;
 }
 function nickOf(devPub) {
   if (!cur) return 'Участник';
@@ -421,7 +497,7 @@ function nickOf(devPub) {
 function previewOf(m) {
   if (!m) return '';
   if (m.deleted) return 'Сообщение удалено';
-  if (m.type === 'intro') return `${m.nick || 'Участник'} присоединился`;
+  if (m.type === 'intro') return `${m.nick || 'Участник'} теперь в чате`;
   if (m.type === 'voice') return 'Голосовое сообщение';
   if (m.type === 'epoch') return 'Сменена эпоха комнаты';
   if (m.type === 'file') {
@@ -439,15 +515,15 @@ function previewOf(m) {
     return 'Групповой звонок';
   }
   if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('newdev:')) {
-    return '⚠ Новое устройство в комнате';
+    return '⚠ Новое устройство в чате';
   }
-  if (m.type === 'leave') return `${m.nick || 'Участник'} вышел из чата`;
+  if (m.type === 'leave') return `${m.nick || 'Участник'} больше не в чате`;
   if (m.type === 'room-meta') return 'Чат создан';
   return String(m.text || '');
 }
 function unreadOf(rec, msgs) {
   const readSeq = rec.lastReadSeq || 0;
-  return msgs.filter((it) => !it.mine && (it.seq || 0) > readSeq).length;
+  return msgs.filter((it) => !it.mine && !it.local && (it.seq || 0) > readSeq).length;
 }
 
 // v30: один построитель пункта списка комнат — используется и главным
@@ -464,7 +540,7 @@ function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
   const displayTitle = roomTitleOf(r.roomId, r);
   const av = document.createElement('span');
   av.className = 'chat-avatar tg-item-avatar';
-  av.style.background = `linear-gradient(135deg, hsl(${hueOf(r.roomId)} 70% 52%), hsl(${(hueOf(r.roomId) + 38) % 360} 68% 40%))`;
+  av.style.background = roomAvatarBg(r);
   const firstChar = displayTitle.replace(/^Чат\s+/i, '').trim()[0] || '💬';
   av.textContent = firstChar.toUpperCase();
   if (r.pinProtected) {
@@ -485,7 +561,7 @@ function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
   title.textContent = (r.keepForever ? '★ ' : '') + displayTitle;
   const when = document.createElement('span');
   when.className = 'chat-room-when';
-  when.textContent = last ? fmtDayTime(last.msg.ts) : '';
+  when.textContent = last ? fmtListTime(last.msg.ts) : '';
   top.append(title, when);
 
   const bottom = document.createElement('span');
@@ -498,7 +574,10 @@ function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
     draftSpan.textContent = 'Черновик: ';
     pv.append(draftSpan, document.createTextNode(r.draft));
   } else {
-    const senderPrefix = last && last.mine ? 'Вы: ' : (last && last.msg?.nick && last.msg.type === 'text' ? `${last.msg.nick}: ` : '');
+    // Префикс автора — только в группах (в личном чате он очевиден).
+    const group = peersOf(r).length > 1;
+    const senderPrefix =
+      !last || !group || last.msg.type !== 'text' ? '' : last.mine ? 'Вы: ' : last.msg.nick ? `${last.msg.nick}: ` : '';
     pv.textContent = last ? senderPrefix + previewOf(last.msg) : 'Нет сообщений · нажмите, чтобы открыть';
   }
   bottom.append(pv);
@@ -525,6 +604,11 @@ function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
     e.stopPropagation();
     openRoomListMenu(r, menuBtn).catch(() => {});
   };
+  // v36: правый клик / долгое нажатие по чату — то же меню, как в Telegram.
+  btn.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    openRoomListMenu(r, menuBtn).catch(() => {});
+  });
   li.append(btn, menuBtn);
   // v30: текст для фильтра поиска по сайдбару и главной (название + ID + превью).
   li.dataset.search = (title.textContent + ' ' + r.roomId.slice(0, 8) + ' ' + pv.textContent).toLowerCase();
@@ -552,7 +636,7 @@ function applySidebarFilter() {
   }
 }
 
-async function renderRoomList() {
+async function renderRoomListNow() {
   const list = $('#chatRoomsList');
   const side = $('#chatRoomsSidebar');
   if (!list && !side) return;
@@ -583,7 +667,7 @@ async function renderRoomList() {
     if (!enriched.length) {
       const emptyLi = document.createElement('li');
       emptyLi.className = 'tg-empty-rooms';
-      emptyLi.innerHTML = '<div class="tg-empty-rooms-box"><span class="tg-empty-rooms-ic">💬</span><b>Пока нет активных чатов</b><span>Создайте новый приватный чат или войдите по ссылке, коду или кодовой фразе выше.</span></div>';
+      emptyLi.innerHTML = '<div class="tg-empty-rooms-box"><span class="tg-empty-rooms-ic">💬</span><b>Здесь будут ваши чаты</b><span>Кнопка ✏️ внизу создаёт зашифрованный чат, 🔗 вверху — вход по ссылке, коду или кодовой фразе.</span></div>';
       list.append(emptyLi);
     } else {
       for (const e of enriched) list.append(buildRoomListItem(e));
@@ -596,7 +680,7 @@ async function renderRoomList() {
     if (!enriched.length) {
       const emptyLi = document.createElement('li');
       emptyLi.className = 'tg-empty-rooms';
-      emptyLi.innerHTML = '<div class="tg-empty-rooms-box"><span class="tg-empty-rooms-ic">💬</span><b>Список чатов пуст</b><span>Нажмите «+ Новый чат» выше</span></div>';
+      emptyLi.innerHTML = '<div class="tg-empty-rooms-box"><span class="tg-empty-rooms-ic">💬</span><b>Список чатов пуст</b><span>Кнопка ✏️ вверху создаёт новый чат</span></div>';
       side.append(emptyLi);
     } else {
       for (const e of enriched) side.append(buildRoomListItem(e, { sidebar: true }));
@@ -613,6 +697,23 @@ function syncChatEmpty() {
 }
 
 // ---------- v29: меню комнаты в списке и внутри комнаты ----------
+// v36: меню ставится по реальному размеру: под якорем, у нижнего края
+// экрана — над ним, и никогда не вылезает за края окна.
+function placeMenu(menu, anchor) {
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const below = r.bottom + 4;
+  const top = below + mh <= vh - 8 ? below : Math.max(8, r.top - 4 - mh);
+  menu.style.top = top + 'px';
+  menu.style.left = Math.max(8, Math.min(vw - mw - 8, r.left)) + 'px';
+}
+// На сенсорных экранах касание пузыря открывает меню сообщения (как в
+// Telegram): iOS не присылает contextmenu на долгое нажатие.
+const TOUCH_UI = typeof matchMedia === 'function' && matchMedia('(hover: none)').matches;
+
 let listMenuRec = null;
 function hideRoomListMenu() {
   $('#chatListMenu')?.classList.add('hidden');
@@ -630,38 +731,43 @@ async function openRoomListMenu(rec, anchor) {
   const isCreator =
     !!device &&
     (rec.creatorPub === device.devicePub || (!rec.creatorPub && rec.createdByMe));
-  const keep = $('#roomListKeep');
-  if (keep) keep.textContent = rec.keepForever ? '✓ Сохранено от автоудаления' : '★ Сохранить от автоудаления';
+  setKeepLabel($('#roomListKeep'), rec.keepForever);
   const delAll = $('#roomListDelAll');
   if (delAll) delAll.classList.toggle('hidden', !isCreator);
   for (const id of ['#roomListDelSelf', '#roomListDelAll']) {
     const b = $(id);
     if (b) {
       delete b.dataset.armed;
-      b.dataset.label = b.textContent;
+      b.dataset.label = labelOf(b).textContent;
     }
   }
   menu.classList.remove('hidden');
-  const r = anchor.getBoundingClientRect();
-  menu.style.top = Math.min(window.innerHeight - 240, r.bottom + 4) + 'px';
-  menu.style.left = Math.max(8, Math.min(window.innerWidth - 220, r.left)) + 'px';
+  placeMenu(menu, anchor);
 }
 // Двухшаговое подтверждение для разрушительных пунктов меню: первый клик
 // «взводит» кнопку (подпись меняется на «Точно …?»), второй — выполняет.
+// Подпись пункта меню живёт в его <span> — иконку рядом не трогаем.
+const labelOf = (btn) => btn.querySelector('span') || btn;
+function setKeepLabel(btn, on) {
+  if (!btn) return;
+  labelOf(btn).textContent = on ? 'Сохранён от автоудаления' : 'Сохранить от автоудаления';
+  btn.setAttribute('aria-pressed', String(!!on));
+}
 function armButton(btn, armedText) {
   if (!btn) return false;
+  const label = labelOf(btn);
   if (btn.dataset.armed) {
     delete btn.dataset.armed;
-    if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    if (btn.dataset.label) label.textContent = btn.dataset.label;
     return true;
   }
   btn.dataset.armed = '1';
-  if (!btn.dataset.label) btn.dataset.label = btn.textContent;
-  btn.textContent = armedText;
+  if (!btn.dataset.label) btn.dataset.label = label.textContent;
+  label.textContent = armedText;
   setTimeout(() => {
     if (btn.dataset.armed) {
       delete btn.dataset.armed;
-      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+      if (btn.dataset.label) label.textContent = btn.dataset.label;
     }
   }, 5000);
   return false;
@@ -669,23 +775,20 @@ function armButton(btn, armedText) {
 // Состояние пунктов меню открытой комнаты (создатель/keepForever).
 function renderRoomMenuState() {
   if (!cur) return;
-  const keep = $('#roomActKeep');
-  if (keep) {
-    keep.textContent = cur.rec.keepForever
-      ? '✓ Сохранено от автоудаления'
-      : '★ Сохранить от автоудаления';
-  }
+  setKeepLabel($('#roomActKeep'), cur.rec.keepForever);
   const isCreator =
     cur.rec.creatorPub === cur.device.devicePub ||
     (!cur.rec.creatorPub && cur.rec.createdByMe);
   $('#roomActDeleteAll')?.classList.toggle('hidden', !isCreator);
   const noteEl = $('#roomMenuNote');
   if (noteEl) {
-    noteEl.textContent = cur.rec.creatorPub
-      ? 'Создатель чата известен — доступно удаление для всех с серверным wipe.'
-      : cur.rec.createdByMe
-        ? 'Вы создали этот чат до регистрации создателя на сервере: удаление для всех сработает сообщением участникам, серверный wipe может быть недоступен.'
-        : 'Создатель этого чата не определён (чат создан до v29): «Удалить для всех» недоступно.';
+    noteEl.textContent = isCreator
+      ? cur.rec.creatorPub
+        ? '«Удалить для всех» сотрёт чат у участников и на сервере.'
+        : 'Чат создан в старой версии: «Удалить для всех» сотрёт его у участников, а серверная копия исчезнет по сроку.'
+      : cur.rec.creatorPub
+        ? 'Удалить чат для всех может только его создатель.'
+        : 'Создатель чата неизвестен (чат из версии до v29) — удалить его для всех нельзя.';
   }
 }
 
@@ -1259,6 +1362,7 @@ async function openRoomBySeed(seedStr, opts = {}) {
     }
     await saveRoom(rec);
     closeCurrent(false);
+    selfDev = device.devicePub;
     // Ключ текущей эпохи: эпоха 0 — базовый; выше — из секрета эпохи, если
     // он у нас есть. Нет секрета (нас не оставили при ротации) — остаёмся на
     // базовом ключе: старая история читается, новые сообщения не расшифруются.
@@ -1316,7 +1420,7 @@ async function openRoomBySeed(seedStr, opts = {}) {
     const keys = cur.keys;
     showChatScreen();
     // v27: черновик этой комнаты — недописанный текст не теряется.
-    const draftInput = $('#chatroom #chatInput');
+    const draftInput = $('#chatInput');
     if (draftInput && rec.draft) {
       draftInput.value = rec.draft;
       // input-событие обновит видимость кнопок mic/send; typing не уйдёт —
@@ -1327,7 +1431,7 @@ async function openRoomBySeed(seedStr, opts = {}) {
     $('#chatRoomTitle').textContent = dispTitle;
     const roomAv = $('#chatRoomAvatar');
     if (roomAv) {
-      roomAv.style.background = `linear-gradient(135deg, hsl(${hueOf(keys.roomId)} 70% 52%), hsl(${(hueOf(keys.roomId) + 38) % 360} 68% 40%))`;
+      roomAv.style.background = roomAvatarBg(rec);
       roomAv.textContent = (dispTitle.replace(/^Чат\s+/i, '').trim()[0] || '💬').toUpperCase();
     }
     history.replaceState(
@@ -1388,7 +1492,7 @@ async function openRoomBySeed(seedStr, opts = {}) {
       updateGcallBanner().catch(() => {});
       renderRoomMenuState();
     }
-    status(cur && cur.transportMode === 'fallback' ? 'Резервный канал' : 'На связи');
+    status(cur && cur.transportMode === 'fallback' ? 'Резервный канал' : ONLINE);
     // v27: локальная чистка истёкших исчезающих сообщений.
     if (cur) {
       cur.expireTimer = setInterval(() => pruneExpired().catch(() => {}), 30000);
@@ -1578,7 +1682,8 @@ async function deleteRoomForAll(rec) {
   if (rec.alias?.code) {
     try {
       const admin = await decryptWithVault(rec.alias.adminEnc);
-      await pairApi('/pair/revoke', { codeHash: await aliasCodeHash(rec.alias.code), admin });
+      const codeHash = await codeAddrForScheme('alias', rec.alias.code, rec.alias.scheme);
+      await pairApi('/pair/revoke', { codeHash, admin });
     } catch {}
   }
   // 1b) v30: встреча по кодовому слову тоже гасится — чат удаляется для всех.
@@ -2264,6 +2369,7 @@ async function ingest(item) {
       if (!mine && !CONTROL_TYPES.has(msg.type) && msg.type !== 'ecdh') {
         maybeNotifyMessage({
           roomId: cur.rec.roomId,
+          rec: cur.rec,
           nick: msg.nick || 'Участник',
           preview: previewOf(msg),
           mine: false,
@@ -2371,7 +2477,7 @@ function applyTransportMode(mode) {
       })
       .catch(() => {});
   } else {
-    status('На связи');
+    status(ONLINE);
     if (!cur.ws || cur.ws.readyState > 1) connectWs();
     fetchMissed().catch(() => {});
   }
@@ -2805,13 +2911,26 @@ async function pairApi(path, body) {
   return { status: res.status, data };
 }
 
+// v36: claim по адресу схемы 2 (адрес из медленного KDF, см. codeAccess в
+// crypto.js); при 404 — по адресу ≤ v35, чтобы коды и короткие ссылки,
+// выданные старыми клиентами, продолжали работать до своего срока.
+async function claimCode(acc) {
+  const r = await pairApi('/pair/claim', { codeHash: acc.addr });
+  if (r.status === 404) {
+    const legacy = await pairApi('/pair/claim', { codeHash: acc.legacy.addr });
+    if (legacy.status !== 404) return { r: legacy, key: acc.legacy.key };
+  }
+  return { r, key: acc.key };
+}
+
 async function createInvite() {
   if (!cur) return;
   try {
     const seed = await decryptWithVault(cur.rec.seedEnc);
     const code = newGreetCode();
-    const blob = await sealGreetPayload(code, { seed, roomId: cur.rec.roomId });
-    const codeHash = await greetCodeHash(code);
+    const acc = await codeAccess('greet', code);
+    const blob = await sealCodeBlob(acc.key, { seed, roomId: cur.rec.roomId });
+    const codeHash = acc.addr;
     const r = await pairApi('/pair/create', {
       codeHash,
       blob,
@@ -2853,8 +2972,7 @@ async function redeemGreet(codeRaw, opts = {}) {
   }
   try {
     note('Проверяю код подключения…');
-    const codeHash = await greetCodeHash(code);
-    const r = await pairApi('/pair/claim', { codeHash });
+    const { r, key } = await claimCode(await codeAccess('greet', code));
     if (r.status === 404) {
       if (!opts.quiet) note('Код не найден или уже использован.');
       return false;
@@ -2867,7 +2985,7 @@ async function redeemGreet(codeRaw, opts = {}) {
       note('Сервер пар отклонил запрос: ' + r.status);
       return false;
     }
-    const payload = await openGreetPayload(code, r.data.blob);
+    const payload = await openCodeBlob(key, r.data.blob);
     if (!payload?.seed) {
       note('Не удалось расшифровать приглашение этим кодом.');
       return false;
@@ -2888,8 +3006,9 @@ async function aliasCreate() {
     const seed = await decryptWithVault(cur.rec.seedEnc);
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = newJoinCode();
-      const codeHash = await aliasCodeHash(code);
-      const blob = await sealAliasPayload(code, { seed, roomId: cur.rec.roomId });
+      const acc = await codeAccess('alias', code);
+      const codeHash = acc.addr;
+      const blob = await sealCodeBlob(acc.key, { seed, roomId: cur.rec.roomId });
       const admin = b64u.enc(crypto.getRandomValues(new Uint8Array(16))); // 128 бит
       const adminHash = await sha256hex(admin);
       const r = await pairApi('/pair/alias', { codeHash, blob, adminHash });
@@ -2897,7 +3016,7 @@ async function aliasCreate() {
       if (r.status !== 200 && r.status !== 201) {
         throw new Error('сервер пар недоступен (' + r.status + ') — воркер v26 задеплоен?');
       }
-      cur.rec.alias = { code, adminEnc: await encryptWithVault(admin) };
+      cur.rec.alias = { code, adminEnc: await encryptWithVault(admin), scheme: 2 };
       await saveRoom(cur.rec);
       return true;
     }
@@ -2912,7 +3031,7 @@ async function aliasRevokeCurrent() {
   if (!cur?.rec.alias) return true;
   try {
     const admin = await decryptWithVault(cur.rec.alias.adminEnc);
-    const codeHash = await aliasCodeHash(cur.rec.alias.code);
+    const codeHash = await codeAddrForScheme('alias', cur.rec.alias.code, cur.rec.alias.scheme);
     const r = await pairApi('/pair/revoke', { codeHash, admin });
     if (r.status !== 200 && r.status !== 404) {
       throw new Error('сервер пар отклонил отзыв (' + r.status + ')');
@@ -2938,7 +3057,10 @@ async function renderAliasBox() {
     if (input) input.value = joinLinkOf(cur.rec.alias.code);
     if (state) {
       state.textContent =
-        'Постоянная короткая ссылка этой комнаты. Работает, пока вы её не отзовёте; длинная ссылка при этом остаётся главным ключом.';
+        'Постоянная короткая ссылка этой комнаты. Работает, пока вы её не отзовёте; длинная ссылка при этом остаётся главным ключом.' +
+        (cur.rec.alias.scheme === 2
+          ? ''
+          : ' Ссылка выпущена старой версией (адрес на сервере без медленного KDF) — нажмите «Перевыпустить», чтобы перейти на усиленную схему.');
     }
   } else if (state) {
     state.textContent = 'Короткая ссылка не создана.';
@@ -2954,8 +3076,7 @@ async function redeemJoin(codeRaw) {
   }
   try {
     note('Проверяю короткую ссылку…');
-    const codeHash = await aliasCodeHash(code);
-    const r = await pairApi('/pair/claim', { codeHash });
+    const { r, key } = await claimCode(await codeAccess('alias', code));
     if (r.status === 404) return false;
     if (r.status === 429) {
       note('Слишком много подключений по этому коду за час — подождите или попросите длинную ссылку.');
@@ -2965,7 +3086,7 @@ async function redeemJoin(codeRaw) {
       note('Сервер пар отклонил запрос: ' + r.status);
       return false;
     }
-    const payload = await openAliasPayload(code, r.data.blob);
+    const payload = await openCodeBlob(key, r.data.blob);
     if (!payload?.seed) {
       note('Не удалось расшифровать приглашение этим кодом.');
       return false;
@@ -3006,7 +3127,7 @@ async function wordRevokeCurrent(rec) {
   if (!rec?.word) return true;
   const admin = await decryptWithVault(rec.word.adminEnc);
   const phrase = await decryptWithVault(rec.word.phraseEnc);
-  const codeHash = await wordCodeHash(phrase);
+  const codeHash = await codeAddrForScheme('word', phrase, rec.word.scheme);
   const r = await pairApi('/pair/revoke', { codeHash, admin });
   if (r.status !== 200 && r.status !== 404) {
     throw new Error('сервер пар отклонил отзыв (' + r.status + ')');
@@ -3028,8 +3149,9 @@ async function wordEnable() {
     // Прежняя встреча гасится, чтобы живых фраз у комнаты было не две.
     if (cur.rec.word) await wordRevokeCurrent(cur.rec).catch(() => {});
     const seed = await decryptWithVault(cur.rec.seedEnc);
-    const blob = await sealWordPayload(norm, { seed, roomId: cur.rec.roomId });
-    const codeHash = await wordCodeHash(norm);
+    const acc = await codeAccess('word', norm);
+    const blob = await sealCodeBlob(acc.key, { seed, roomId: cur.rec.roomId });
+    const codeHash = acc.addr;
     const admin = b64u.enc(crypto.getRandomValues(new Uint8Array(16))); // 128 бит
     const adminHash = await sha256hex(admin);
     const exp = Date.now() + WORD_TTL_MS_CLIENT;
@@ -3045,6 +3167,7 @@ async function wordEnable() {
       phraseEnc: await encryptWithVault(norm),
       adminEnc: await encryptWithVault(admin),
       exp,
+      scheme: 2,
     };
     await saveRoom(cur.rec);
     await renderWordBox();
@@ -3119,13 +3242,12 @@ async function redeemWord(phraseRaw) {
   }
   try {
     note('Ищу чат по кодовой фразе…');
-    const codeHash = await wordCodeHash(norm);
-    const r = await pairApi('/pair/claim', { codeHash });
+    const { r, key } = await claimCode(await codeAccess('word', norm));
     if (r.status !== 200 || !r.data.blob) {
       fail();
       return false;
     }
-    const payload = await openWordPayload(norm, r.data.blob);
+    const payload = await openCodeBlob(key, r.data.blob);
     if (!payload?.seed) {
       fail();
       return false;
@@ -3157,6 +3279,19 @@ function knownMembers() {
   );
 }
 
+// Как в Telegram: в личном чате — «в сети» / «был(а) в 14:05»,
+// в группе — «3 участника · 2 в сети».
+function presenceText(total, others, onlineCount) {
+  if (others.length === 1) {
+    const [dev] = others;
+    if (cur.online.has(dev)) return 'в сети';
+    const ls = cur.rec.members?.[dev]?.lastSeen;
+    return ls ? 'был(а) ' + fmtSeen(ls) : 'не в сети';
+  }
+  const count = `${total} ${plural(total, 'участник', 'участника', 'участников')}`;
+  return onlineCount ? `${count} · ${onlineCount} в сети` : count;
+}
+
 function renderPresence() {
   const line = $('#chatPresence');
   if (!line || !cur) return;
@@ -3166,20 +3301,18 @@ function renderPresence() {
     titleEl.textContent = dt;
     const roomAv = $('#chatRoomAvatar');
     if (roomAv) {
+      roomAv.style.background = roomAvatarBg(cur.rec);
       roomAv.textContent = (dt.replace(/^Чат\s+/i, '').trim()[0] || '💬').toUpperCase();
     }
   }
   const members = knownMembers();
   const others = members.filter((d) => d !== cur.device.devicePub);
   const onlineCount = others.filter((d) => cur.online.has(d)).length;
-  if (cur.typing && cur.typing.until > Date.now() && cur.typing.dev !== cur.device.devicePub) {
-    line.textContent = `${nickOf(cur.typing.dev)} печатает…`;
-    return;
-  }
-  line.textContent =
-    `${members.length} участника · ${onlineCount} онлайн` +
-    (cur.online.size ? '' : ' · собеседники не в сети') +
-    (cur.transportMode === 'fallback' ? ' · резервный канал' : '');
+  const typing = cur.typing && cur.typing.until > Date.now() && cur.typing.dev !== cur.device.devicePub;
+  if (typing) line.textContent = others.length === 1 ? 'печатает…' : `${nickOf(cur.typing.dev)} печатает…`;
+  else line.textContent = presenceText(members.length, others, onlineCount);
+  // Акцентный цвет — как у Telegram для «в сети» и «печатает…».
+  line.toggleAttribute('data-live', typing || (others.length === 1 && onlineCount === 1));
   // v28 (A): групповой звонок имеет смысл при двух и более собеседниках.
   $('#chatGroupCallBtn')?.classList.toggle('hidden', others.length < 2);
 }
@@ -3203,7 +3336,7 @@ function renderMembersList() {
     row.className = 'chat-member-row';
     const av = document.createElement('span');
     av.className = 'chat-avatar';
-    av.style.background = `hsl(${hueOf(dev)} 65% 42%)`;
+    av.style.background = avatarBg(dev);
     av.textContent = (nickOf(dev)[0] || '?').toUpperCase();
     const dot = document.createElement('span');
     const isMe = dev === cur.device.devicePub;
@@ -3215,17 +3348,17 @@ function renderMembersList() {
     // v28 (E): устройство без intro видно честной строкой, а не «Участник».
     const hasIntro = !!cur.rec.members?.[dev]?.nick;
     name.textContent = isMe
-      ? nickOf(dev) + ' (вы)'
+      ? nickOf(dev)
       : hasIntro
         ? nickOf(dev)
         : `Без ника · устройство …${dev.slice(-6)}`;
     const seen = document.createElement('span');
     seen.className = 'chat-member-seen';
     if (isMe) seen.textContent = 'это вы';
-    else if (cur.online.has(dev)) seen.textContent = 'онлайн';
+    else if (cur.online.has(dev)) seen.textContent = 'в сети';
     else {
       const ls = cur.rec.members?.[dev]?.lastSeen;
-      seen.textContent = ls ? 'был(а) в ' + fmtTime(ls) : 'не в сети';
+      seen.textContent = ls ? 'был(а) ' + fmtSeen(ls) : 'не в сети';
     }
     row.append(av, name, seen);
     // v28 (A): кнопка дозвона участнику с личной идентичностью.
@@ -3384,10 +3517,9 @@ function openMsgMenu(it, anchor) {
   const delBtn = $('#msgActDel');
   if (editBtn) editBtn.classList.toggle('hidden', !(it.mine && it.msg.type === 'text'));
   if (delBtn) delBtn.classList.toggle('hidden', !it.mine);
+  $('#msgActCopy')?.classList.toggle('hidden', it.msg.type !== 'text' || !!it.msg.deleted);
   menu.classList.remove('hidden');
-  const r = anchor.getBoundingClientRect();
-  menu.style.top = Math.min(window.innerHeight - 240, r.bottom + 4) + 'px';
-  menu.style.left = Math.max(8, Math.min(window.innerWidth - 200, r.left)) + 'px';
+  placeMenu(menu, anchor);
 }
 
 function renderReplyBar() {
@@ -3398,7 +3530,13 @@ function renderReplyBar() {
     return;
   }
   const t = $('#chatReplyText');
-  if (t) t.textContent = `${cur.replyTo.name}: ${cur.replyTo.excerpt}`;
+  if (t) {
+    const who = document.createElement('b');
+    who.textContent = cur.replyTo.name;
+    const what = document.createElement('span');
+    what.textContent = cur.replyTo.excerpt;
+    t.replaceChildren(who, what);
+  }
   bar.classList.remove('hidden');
 }
 
@@ -3421,7 +3559,45 @@ function renderTtlState() {
 }
 
 // ---------- Рендер ----------
-async function renderMessages() {
+// Карточка пустой ленты (по центру свободного места, как в Telegram).
+// Пока собеседника нет — с кнопками приглашения из меню комнаты.
+function welcomeCard(alone) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tg-chat-welcome';
+  const card = document.createElement('div');
+  card.className = 'tg-chat-welcome-card';
+  const icon = document.createElement('div');
+  icon.className = 'tg-chat-welcome-icon';
+  icon.textContent = '🔒';
+  const head = document.createElement('b');
+  head.textContent = 'Сквозное шифрование';
+  const text = document.createElement('p');
+  text.textContent =
+    'Ключи есть только у участников: сервер и брокеры видят лишь шифротекст. ' +
+    (alone
+      ? 'Пригласите собеседника ссылкой, кодом или QR.'
+      : 'Напишите первое сообщение или запишите голосовое.');
+  card.append(icon, head, text);
+  if (alone) {
+    const acts = document.createElement('div');
+    acts.className = 'tg-chat-welcome-acts';
+    for (const [label, target, kind] of [
+      ['Пригласить', '#roomActInvite', 'primary'],
+      ['Копировать ссылку', '#roomActCopy', 'ghost'],
+    ]) {
+      const b = document.createElement('button');
+      b.className = `btn small ${kind}`;
+      b.textContent = label;
+      b.onclick = () => $(target)?.click();
+      acts.append(b);
+    }
+    card.append(acts);
+  }
+  wrap.append(card);
+  return wrap;
+}
+
+async function renderMessagesNow() {
   const box = $('#chatMessages');
   if (!box || !cur) return;
   const nowMs = Date.now();
@@ -3457,15 +3633,12 @@ async function renderMessages() {
       new Date(a.msg.ts).toDateString() === new Date(b.msg.ts).toDateString();
     grp.set(x.hash, { first: !same(bubbleItems[i - 1], x), last: !same(x, bubbleItems[i + 1]) });
   });
+  // Личный чат (двое) — как в Telegram: без аватаров и ников у входящих.
+  const duo = knownMembers().length <= 2;
+  box.classList.toggle('duo', duo);
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
   box.replaceChildren();
-  const hasVisibleItems = items.some((it) => !CONTROL_TYPES.has(it.msg.type) && it.msg.type !== 'ecdh' && it.msg.type !== 'room-meta');
-  if (!hasVisibleItems) {
-    const emptyWelcome = document.createElement('div');
-    emptyWelcome.className = 'tg-chat-welcome';
-    emptyWelcome.innerHTML = `<div class="tg-chat-welcome-card"><div class="tg-chat-welcome-icon">🔒</div><b>Сквозное шифрование (E2EE + Ratchet)</b><p>Сообщений пока нет. Напишите первое сообщение, отправьте голосовое или пригласите собеседника по ссылке или коду.</p></div>`;
-    box.append(emptyWelcome);
-  }
+  if (!bubbleItems.length) box.append(welcomeCard(knownMembers().length < 2));
   let lastDayKey = '';
   for (const it of items) {
     const m = it.msg;
@@ -3480,7 +3653,7 @@ async function renderMessages() {
     if (m.type === 'intro') {
       const div = document.createElement('div');
       div.className = 'chat-sys';
-      div.textContent = `${m.nick || 'Участник'} присоединился к чату`;
+      div.textContent = `${m.nick || 'Участник'} теперь в чате`;
       box.append(div);
       continue;
     }
@@ -3516,7 +3689,7 @@ async function renderMessages() {
     if (m.type === 'leave') {
       const div = document.createElement('div');
       div.className = 'chat-sys';
-      div.textContent = `${m.nick || 'Участник'} вышел из чата`;
+      div.textContent = `${m.nick || 'Участник'} больше не в чате`;
       box.append(div);
       continue;
     }
@@ -3534,9 +3707,9 @@ async function renderMessages() {
       }
       const div = document.createElement('div');
       div.className = 'chat-sys';
-      if (d.op === 'start') div.textContent = `📞 ${m.nick || 'Участник'} начал групповой звонок`;
-      else if (d.op === 'join') div.textContent = `${m.nick || 'Участник'} присоединился к звонку`;
-      else if (d.op === 'leave') div.textContent = `${m.nick || 'Участник'} покинул звонок`;
+      if (d.op === 'start') div.textContent = `📞 ${m.nick || 'Участник'}: групповой звонок`;
+      else if (d.op === 'join') div.textContent = `${m.nick || 'Участник'} теперь в звонке`;
+      else if (d.op === 'leave') div.textContent = `${m.nick || 'Участник'} больше не в звонке`;
       else if (d.op === 'end') {
         const st = gStartTs.get(d.callId);
         const dur =
@@ -3561,9 +3734,16 @@ async function renderMessages() {
     }
     if (m.type === 'system' && typeof m.text === 'string' && m.text.startsWith('newdev:')) {
       // v28 (E): локальная строка о новом устройстве (вне сервера).
+      // Ник подставляется, как только устройство представилось (intro);
+      // хвост ключа — чтобы сверить с собеседником голосом.
+      const dev = m.text.slice(7);
+      const who = cur.rec.members?.[dev]?.nick;
       const div = document.createElement('div');
       div.className = 'chat-sys warn';
-      div.textContent = `⚠ К комнате подключилось новое устройство (…${m.text.slice(7).slice(-6)})`;
+      const key = document.createElement('span');
+      key.className = 'chat-sys-key';
+      key.textContent = `ключ …${dev.slice(-6)}`;
+      div.append(who ? `⚠ Новое устройство в чате: ${who}` : '⚠ К чату подключилось новое устройство', key);
       box.append(div);
       continue;
     }
@@ -3574,7 +3754,7 @@ async function renderMessages() {
       const div = document.createElement('div');
       div.className = 'chat-sys';
       const span = document.createElement('span');
-      span.textContent = `${m.nick || 'Участник'} создал групповой звонок `;
+      span.textContent = `📞 ${m.nick || 'Участник'}: групповой звонок `;
       const btn = document.createElement('button');
       btn.className = 'btn small primary';
       btn.textContent = 'Войти в групповой звонок';
@@ -3619,15 +3799,14 @@ async function renderMessages() {
       (it.mine ? ' mine' : '') +
       (g.first ? ' grp-first' : '') +
       (g.last ? ' grp-last' : '') +
-      (g.last && !g.first ? '' : '') +
       (g.last ? ' tail' : '');
     rowEl.dataset.hash = it.hash; // v27: цель для цитат, закрепа и поиска
-    if (!it.mine) {
+    if (!it.mine && !duo) {
       const av = document.createElement('span');
       // v28 (F): аватар виден только у нижнего сообщения группы (место в
       // раскладке сохраняется прозрачным слотом, чтобы пузыри не прыгали).
       av.className = 'chat-avatar' + (g.last ? '' : ' ghost');
-      av.style.background = `hsl(${hueOf(m.devPub || '')} 65% 42%)`;
+      av.style.background = avatarBg(m.devPub || '');
       av.textContent = (m.nick || 'У')[0].toUpperCase();
       rowEl.append(av);
     }
@@ -3710,7 +3889,7 @@ async function renderMessages() {
       body.textContent = 'Сообщение удалено';
       div.append(body);
     } else {
-      if (!it.mine && g.first) {
+      if (!it.mine && g.first && !duo) {
         // v28 (F): ник — только у первого сообщения группы одного автора.
         const head = document.createElement('div');
         head.className = 'chat-msg-head';
@@ -3778,6 +3957,14 @@ async function renderMessages() {
         e.stopPropagation();
         openMsgMenu(it, mb);
       });
+      if (TOUCH_UI) {
+        div.addEventListener('click', (e) => {
+          if (e.target.closest('button, a, input, .chat-quote, .chat-voice, .chat-file')) return;
+          if (window.getSelection()?.toString()) return;
+          e.stopPropagation(); // иначе общий обработчик клика сразу закроет меню
+          openMsgMenu(it, mb);
+        });
+      }
       div.addEventListener('dblclick', (e) => {
         if (window.getSelection()?.toString()) return;
         e.preventDefault();
@@ -3786,7 +3973,7 @@ async function renderMessages() {
         cur.editing = null;
         renderEditBar();
         renderReplyBar();
-        $('#chatroom #chatInput')?.focus();
+        $('#chatInput')?.focus();
       });
     }
     div.append(foot);
@@ -4032,7 +4219,10 @@ function initChatUI() {
   document.querySelectorAll('[data-home-tab]').forEach((tabBtn) => {
     tabBtn.onclick = () => {
       const target = tabBtn.dataset.homeTab;
-      document.querySelectorAll('[data-home-tab]').forEach((b) => b.classList.toggle('active', b === tabBtn));
+      document.querySelectorAll('[data-home-tab]').forEach((b) => {
+        b.classList.toggle('active', b.dataset.homeTab === target);
+        b.setAttribute('aria-selected', String(b.dataset.homeTab === target));
+      });
       document.querySelectorAll('[data-home-pane]').forEach((pane) => {
         pane.classList.toggle('tab-active', pane.dataset.homePane === target);
       });
@@ -4196,9 +4386,7 @@ function initChatUI() {
   }
   const send = $('#chatSend');
   const doSend = async () => {
-    const input = $('#chatInput');
-    // В index.html два #chatInput (комната чата и панель звонка): берём свой.
-    const myInput = $('#chatroom #chatInput') || input;
+    const myInput = $('#chatInput');
     const text = (myInput?.value || '').trim();
     if (!text || !cur) return;
     if (!cur.rec.nick) return note('Сначала введите никнейм.');
@@ -4225,7 +4413,7 @@ function initChatUI() {
     }
   };
   if (send) send.onclick = doSend;
-  const input = $('#chatroom #chatInput');
+  const input = $('#chatInput');
   if (input) {
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') doSend();
@@ -4424,8 +4612,18 @@ function initChatUI() {
       if (willShow) renderRoomMenuState();
     };
   }
-  const roomMenuClose = $('#roomActClose');
-  if (roomMenuClose) roomMenuClose.onclick = () => $('#chatRoomMenuBox')?.classList.add('hidden');
+  // Меню комнаты и состав участников закрываются кликом мимо, как обычные меню.
+  document.addEventListener('click', (e) => {
+    for (const [box, toggle] of [
+      ['#chatRoomMenuBox', '#chatRoomMenuBtn'],
+      ['#chatMembersList', '#chatTitleBox'],
+    ]) {
+      const el = $(box);
+      if (el && !el.classList.contains('hidden') && !el.contains(e.target) && !e.target.closest(toggle)) {
+        el.classList.add('hidden');
+      }
+    }
+  });
   const roomKeep = $('#roomActKeep');
   if (roomKeep) {
     roomKeep.onclick = async () => {
@@ -4466,6 +4664,16 @@ function initChatUI() {
       $('#chatRoomMenuBox')?.classList.add('hidden');
       const res = await deleteRoomForAll(rec);
       note(res);
+    };
+  }
+  // v36: на узком экране «Пригласить» и «Скопировать ссылку» живут в меню
+  // комнаты — пункты меню просто нажимают кнопки шапки.
+  for (const [itemId, targetId] of [['#roomActInvite', '#chatInviteBtn'], ['#roomActCopy', '#chatCopyLink']]) {
+    const item = $(itemId);
+    if (!item) continue;
+    item.onclick = () => {
+      $('#chatRoomMenuBox')?.classList.add('hidden');
+      $(targetId)?.click();
     };
   }
   // ---------- v29: меню комнаты в списке ----------
@@ -4529,12 +4737,12 @@ function initChatUI() {
   const recSend = $('#chatRecSend');
   if (recSend) recSend.onclick = () => stopVoiceRec(true);
   const syncMicSend = () => {
-    const inp = $('#chatroom #chatInput');
+    const inp = $('#chatInput');
     const empty = !(inp?.value || '').trim();
     $('#chatMic')?.classList.toggle('hidden', !empty);
     $('#chatSend')?.classList.toggle('hidden', empty);
   };
-  const micInput = $('#chatroom #chatInput');
+  const micInput = $('#chatInput');
   if (micInput) micInput.addEventListener('input', syncMicSend);
   syncMicSend();
 
@@ -4685,7 +4893,7 @@ function initChatUI() {
       if (!cur) return;
       cur.editing = null;
       renderEditBar();
-      const inp = $('#chatroom #chatInput');
+      const inp = $('#chatInput');
       if (inp) {
         inp.value = cur.rec.draft || '';
         inp.dispatchEvent(new Event('input'));
@@ -4715,7 +4923,7 @@ function initChatUI() {
     cur.editing = null;
     renderEditBar();
     renderReplyBar();
-    $('#chatroom #chatInput')?.focus();
+    $('#chatInput')?.focus();
   });
   document.querySelectorAll('.chat-react-emoji').forEach((b) => {
     b.onclick = () => {
@@ -4724,6 +4932,10 @@ function initChatUI() {
       if (it) toggleReaction(it, b.dataset.emoji).catch(() => {});
     };
   });
+  menuAct('#msgActCopy', async (it) => {
+    await navigator.clipboard.writeText(it.msg.text || '');
+    flash('Текст скопирован');
+  });
   menuAct('#msgActPin', (it) => sendMsg('pin', JSON.stringify({ target: it.hash })));
   menuAct('#msgActEdit', (it) => {
     if (!cur) return;
@@ -4731,7 +4943,7 @@ function initChatUI() {
     cur.replyTo = null;
     renderReplyBar();
     renderEditBar();
-    const inp = $('#chatroom #chatInput');
+    const inp = $('#chatInput');
     if (inp) {
       inp.value = it.msg.text || '';
       inp.dispatchEvent(new Event('input'));
@@ -4874,6 +5086,7 @@ async function sweepOtherRooms() {
     st.lastNotifiedSeq = Math.max(st.lastNotifiedSeq, ...items.map((i) => i.seq || 0));
     maybeNotifyMessage({
       roomId: r.roomId,
+      rec: r,
       nick: null,
       preview: items.length > 1 ? `Новых сообщений: ${items.length}` : 'Новое сообщение',
       mine: false,

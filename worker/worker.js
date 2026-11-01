@@ -88,12 +88,13 @@ export default {
     }
 
     if (url.pathname === '/' || url.pathname === '/health') {
+      // v36: флаг совпадает с теми же условиями, по которым /turn выдаёт креды.
       const hasTurn = !!(
         (env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) ||
-        (env.METERED_DOMAIN && env.METERED_API_KEY) ||
-        (env.TURN_URLS && env.TURN_USERNAME)
+        (env.METERED_DOMAIN && (env.METERED_API_KEY || env.METERED_API_TOKEN)) ||
+        (env.TURN_URLS && env.TURN_USERNAME && env.TURN_CREDENTIAL)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 32, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 36, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: !!env.VAPID_PRIVATE_JWK, ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {
@@ -241,7 +242,7 @@ export default {
       }
 
       // Провайдер 2: Metered.ca TURN
-      if (env.METERED_DOMAIN && env.METERED_API_TOKEN || (env.METERED_DOMAIN && env.METERED_API_KEY)) {
+      if (env.METERED_DOMAIN && (env.METERED_API_KEY || env.METERED_API_TOKEN)) {
         const key = env.METERED_API_KEY || env.METERED_API_TOKEN;
         tasks.push(
           fetch(

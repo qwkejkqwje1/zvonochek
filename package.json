@@ -1,0 +1,21 @@
+{
+  "name": "zvonochek",
+  "version": "36.0.0",
+  "private": true,
+  "description": "ZVONochek — личный мессенджер и звонки со сквозным шифрованием прямо в браузере",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "e2e": "node tests/e2e/run.mjs",
+    "live:mqtt": "node tests/mqtt-live.mjs",
+    "worker:dev": "npx --yes wrangler@4 dev --port 8787 --var ALLOWED_ORIGINS:http://127.0.0.1:8765",
+    "worker:deploy": "npx --yes wrangler@4 deploy"
+  },
+  "devDependencies": {
+    "acorn": "^8.19.0",
+    "playwright-core": "^1.64.1"
+  }
+}

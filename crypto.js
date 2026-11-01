@@ -735,6 +735,98 @@ export async function openWordPayload(phrase, blobB64) {
 }
 
 // =======================================================================
+// v36: АДРЕС КОДА — ИЗ МЕДЛЕННОГО KDF (схема 2).
+//
+// Проблема схем v25–v35: ключ blob-а защищён PBKDF2 (200k/600k), но адрес
+// записи на сервере — быстрый SHA-256(соль‖код). Тот, кто видит адреса
+// (оператор инфраструктуры, логи, дамп хранилища), перебирает коды и фразы
+// со скоростью SHA-256 на GPU и упирается в PBKDF2 ровно один раз — на
+// уже найденном ответе. Для фразы из 3 слов это часы, а не годы.
+//
+// Схема 2: один PBKDF2 → t1; адрес = HKDF(t1, 'zv-code-addr-v2'), ключ blob-а
+// = HKDF(t1, 'zv-code-key-v2'). Проверка любой догадки по адресу теперь
+// стоит полный PBKDF2. Сервер и формат адреса (64 hex) не меняются.
+//
+// Совместимость: claim сначала идёт по адресу схемы 2, при 404 — по старому
+// адресу (записи, созданные клиентами ≤ v35, живут до своего TTL; постоянные
+// короткие ссылки — до перевыпуска). Старый ключ — это сам t1: PBKDF2 с
+// длиной 256 бит и есть прежний deriveKey, поэтому один KDF кормит обе ветки.
+// =======================================================================
+const CODE_KINDS = {
+  greet: { salt: GREET_SALT, iterations: GREET_PBKDF2_ITER, legacyAddr: (c) => sha256hex(GREET_SALT + c) },
+  alias: { salt: ALIAS_SALT, iterations: ALIAS_PBKDF2_ITER, legacyAddr: (c) => sha256hex(ALIAS_SALT + c) },
+  word: { salt: WORD_SALT, iterations: WORD_PBKDF2_ITER, legacyAddr: (c) => sha256hex(WORD_SALT + ':' + c) },
+};
+
+const bytesHex = (buf) => [...new Uint8Array(buf)].map((x) => x.toString(16).padStart(2, '0')).join('');
+
+// Нормализация ввода общая для всех схем: фраза — normalizeWordPhrase,
+// коды — trim (как в v25–v35).
+function normalizeCode(kind, code) {
+  return kind === 'word' ? normalizeWordPhrase(code) : String(code).trim();
+}
+
+/**
+ * Материал доступа по коду/фразе.
+ * @param {'greet'|'alias'|'word'} kind
+ * @param {string} code
+ * @returns {Promise<{addr: string, key: CryptoKey, legacy: {addr: string, key: CryptoKey}}>}
+ */
+export async function codeAccess(kind, code) {
+  const spec = CODE_KINDS[kind];
+  if (!spec) throw new Error('unknown code kind: ' + kind);
+  const norm = normalizeCode(kind, code);
+  const base = await crypto.subtle.importKey('raw', te.encode(norm), 'PBKDF2', false, ['deriveBits']);
+  const t1 = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: te.encode(spec.salt), iterations: spec.iterations, hash: 'SHA-256' },
+    base,
+    256
+  );
+  const hk = await crypto.subtle.importKey('raw', t1, 'HKDF', false, ['deriveBits', 'deriveKey']);
+  const hkdf = (info) => ({ name: 'HKDF', hash: 'SHA-256', salt: te.encode(spec.salt), info: te.encode(info) });
+  const addrBits = await crypto.subtle.deriveBits(hkdf('zv-code-addr-v2'), hk, 256);
+  const key = await crypto.subtle.deriveKey(hkdf('zv-code-key-v2'), hk, { name: 'AES-GCM', length: 256 }, false, [
+    'encrypt',
+    'decrypt',
+  ]);
+  const legacyKey = await crypto.subtle.importKey('raw', t1, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  return { addr: bytesHex(addrBits), key, legacy: { addr: await spec.legacyAddr(norm), key: legacyKey } };
+}
+
+/** Запечатать объект ключом из codeAccess → base64url(nonce‖ct). */
+export async function sealCodeBlob(key, payloadObj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(JSON.stringify(payloadObj)))
+  );
+  const out = new Uint8Array(iv.length + ct.length);
+  out.set(iv, 0);
+  out.set(ct, iv.length);
+  return b64u.enc(out);
+}
+
+/** Открыть blob ключом из codeAccess; неверный ключ/битый blob → null. */
+export async function openCodeBlob(key, blobB64) {
+  try {
+    const raw = b64u.dec(blobB64);
+    if (raw.length < 13) return null;
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.subarray(0, 12) }, key, raw.subarray(12));
+    return JSON.parse(td.decode(pt));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Адрес записи для отзыва/обслуживания по схеме, которой она создана.
+ * scheme 2 — v36+, иначе — старый быстрый адрес (записи ≤ v35).
+ */
+export async function codeAddrForScheme(kind, code, scheme) {
+  if (scheme === 2) return (await codeAccess(kind, code)).addr;
+  return CODE_KINDS[kind].legacyAddr(normalizeCode(kind, code));
+}
+
+// =======================================================================
 // v27: мессенджерные управляющие сообщения (реакции, правки, удаление,
 // закреп) — ЧИСТЫЕ функции состояния. Живут здесь, потому что chat.js при
 // импорте трогает DOM и в Node-тестах не поднимается; вся логика применения

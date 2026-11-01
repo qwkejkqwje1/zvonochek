@@ -5,43 +5,32 @@
 //   4) Публичные Nostr-реле поверх WSS (порт 443, подписанные эфемерные события)
 //   5) Публичный ntfy.sh (POST + WebSocket; «слепой» pub/sub без регистрации)
 // Каждое сообщение сжимается и шифруется AES-256-GCM; дубли отсекаются по mid.
-import { seal, open, sha256hex } from './crypto.js?v=35';
-import { schnorr, utils } from './vendor/secp256k1.js?v=35';
+import { seal, open } from './crypto.js?v=36';
+import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=36';
+import { schnorr, utils } from './vendor/secp256k1.js?v=36';
 
 const hexs = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 const NOSTR_KIND = 29333; // эфемерные события: реле их не хранят, только пересылают
 
 const rid = () => crypto.getRandomValues(new Uint32Array(2)).join('-');
 
-// ---------- v35: ntfy ----------
-// Имя топика в ntfy: префикс + SHA-256 от топика комнаты — по образцу
-// MQTT-топика в chat-transport.js. Сам топик комнаты (производный секрета
-// ссылки) публичному серверу не показывается.
-export async function ntfyTopicForSignaling(topic) {
-  return 'zv1-' + (await sha256hex(String(topic)));
-}
+// ---------- ntfy ----------
+// Топик ntfy — префикс + усечённый SHA-256 топика комнаты (см. ntfy.js):
+// сам топик (производный секрета ссылки) публичному серверу не виден.
+export const ntfyTopicForSignaling = (topic) => ntfyTopic('zv1-', topic);
 
-// URL подписки: WebSocket ntfy + параметр since (unix-время, окно 30 с).
-// Публичный сервер хранит сообщения 12 часов — без since каждое
-// (пере)подключение получало бы весь кэш топика, включая вчерашние
-// конверты. 30 с — свежее, чем окно Nostr-подписки выше (60 с). Давность
-// сверх окна внутри сессии добивает дедуп по mid в _recv.
-export function ntfySubscribeUrl(base, topic, nowSec = Math.floor(Date.now() / 1000)) {
-  const b = String(base || '').replace(/\/$/, '').replace(/^http/, 'ws');
-  return b + '/' + topic + '/ws?since=' + Math.max(0, Math.floor(nowSec) - 30);
-}
-
-// Кадр ntfy по WebSocket — JSON {id, time, event, topic, message}. Нужны
-// только кадры event === 'message' со строкой message (наш запечатанный
-// конверт); служебные open/keepalive — null.
-export function parseNtfyFrame(data) {
-  try {
-    const j = typeof data === 'string' ? JSON.parse(data) : data;
-    if (!j || typeof j !== 'object' || j.event !== 'message' || typeof j.message !== 'string') return null;
-    return { id: j.id || '', time: j.time || 0, message: j.message };
-  } catch {
-    return null;
-  }
+// ntfy — резерв с жёсткими лимитами публичного сервера (троттлинг по IP и
+// дневная квота сообщений). Через него идёт только рукопожатие, а
+// периодический hello — не чаще раза в 30 с: квоты должно хватать на
+// реальные звонки, а не на ожидание собеседника.
+const NTFY_TYPES = new Set(['hello', 'hi', 'g_hi', 'full', 'desc', 'g_desc', 'cand', 'g_cand', 'ack', 'reset', 'bye']);
+const NTFY_HELLO_EVERY = 30000;
+export function ntfyWanted(type, state, now = Date.now()) {
+  if (!NTFY_TYPES.has(type)) return false;
+  if (type !== 'hello') return true;
+  if (now - (state.helloAt || 0) < NTFY_HELLO_EVERY) return false;
+  state.helloAt = now;
+  return true;
 }
 
 export class Signaling {
@@ -60,6 +49,7 @@ export class Signaling {
     this.relays = relays || [];
     this.ntfyBase = (ntfyBase || '').replace(/\/$/, '');
     this.ntfyTopic = null; // выводится асинхронно (SHA-256), см. _ntfyTopic()
+    this.ntfyState = { helloAt: 0 }; // троттлинг hello через ntfy
     this.ntfyWs = null;
     this.ntfyTimer = null;
     this.nostr = new Map(); // url -> текущий сокет
@@ -75,6 +65,10 @@ export class Signaling {
     // Стартуем без предположений о часах устройства: сервер сам сообщит своё время.
     this.lastPollTs = 0;
     this.seen = new Map();
+    // v36: кто из каналов доставил пакет первым и сколько копий пришло
+    // впустую — видно, какой путь реально держит звонок (панель статистики).
+    this.firstBy = {};
+    this.dupBy = {};
     this.closed = false;
     this.onTransportUp = () => {};
   }
@@ -402,7 +396,7 @@ export class Signaling {
   }
 
   _ntfyPost(data) {
-    if (!this.ntfyBase || this.closed) return;
+    if (!this.ntfyBase || this.closed || !fitsNtfy(data)) return;
     this._ntfyTopic()
       .then((t) => {
         if (this.closed) return;
@@ -527,7 +521,7 @@ export class Signaling {
     }
 
     // Г) ntfy.sh — POST тем же запечатанным конвертом, байт-в-байт как в MQTT
-    if (this.ntfyBase) this._ntfyPost(data);
+    if (this.ntfyBase && ntfyWanted(msg.type, this.ntfyState)) this._ntfyPost(data);
   }
 
   // Мгновенный сигнал выхода при закрытии вкладки на смартфоне/ПК
@@ -557,14 +551,23 @@ export class Signaling {
     // Раньше здесь отбрасывались пакеты старше 12 часов — при сбитых часах
     // устройства это ломало соединение целиком. Свежесть ограничивает сам транспорт.
     if (!m.mid) return;
-    if (this.seen.has(m.mid)) return;
+    if (this.seen.has(m.mid)) {
+      this.dupBy[via] = (this.dupBy[via] || 0) + 1;
+      return;
+    }
     this.seen.set(m.mid, Date.now());
+    this.firstBy[via] = (this.firstBy[via] || 0) + 1;
     if (this.seen.size > 2500) {
       const now = Date.now();
       for (const [k, t] of this.seen) if (now - t > 300000) this.seen.delete(k);
     }
     m.via = via;
     this.onMessage(m);
+  }
+
+  /** Счётчики доставки по каналам: { first: {via: n}, dup: {via: n} }. */
+  deliveryStats() {
+    return { first: { ...this.firstBy }, dup: { ...this.dupBy } };
   }
 
   close() {

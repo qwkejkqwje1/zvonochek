@@ -1,12 +1,14 @@
-import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=35';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=35';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh } from './identity.js?v=35';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=35';
-import { kvPut, kvAll } from './store.js?v=35';
-import { Signaling } from './signaling.js?v=35';
+import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=36';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=36';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh } from './identity.js?v=36';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, InboxListener } from './inbox.js?v=36';
+import { kvPut, kvAll, kvDel } from './store.js?v=36';
+import { Signaling } from './signaling.js?v=36';
+import { ROUTE_SHORT, readCounters, deriveSample, bridgeSample, CallRecorder, journalDigest } from './callstats.js?v=36';
+import { renderLiveStats, renderCallsDashboard, renderCallsList } from './stats-ui.js?v=36';
 
-export const APP_VERSION = 35;
-export const APP_BUILD = '2026-10-30';
+export const APP_VERSION = 36;
+export const APP_BUILD = '2026-11-01';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
 for (const el of document.querySelectorAll('[data-ver]')) el.textContent = 'v' + APP_VERSION;
@@ -20,7 +22,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=35').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=36').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -169,7 +171,10 @@ const S = {
   statsTimer: null,
   helloTimer: null,
   callStart: 0,
-  prevStats: null,
+  prevCounters: null, // v36: прошлый снимок getStats (callstats.readCounters)
+  callRec: null, // v36: CallRecorder текущего звонка
+  callMeta: null, // v36: { dir, name, key } для записи в журнал
+  lastSample: null,
   sigStatus: { mqttUp: 0, mqttTotal: 0, worker: 'off', workerHttp: 'off', nostrUp: 0, nostrTotal: 0, ntfyUp: 0, ntfyTotal: 0 },
   unread: 0,
   wakeLock: null,
@@ -192,7 +197,10 @@ const S = {
 function show(id) {
   ['home', 'prejoin', 'call'].forEach((s) => $('#' + s).classList.toggle('hidden', s !== id));
   document.body.dataset.screen = id;
-  if (id === 'home') refreshPersonalUI().catch(() => {});
+  if (id === 'home') {
+    refreshPersonalUI().catch(() => {});
+    renderCalls();
+  }
 }
 function syncChatOpen() {
   const call = $('#call');
@@ -400,6 +408,29 @@ function updateRemoteAudibility() {
   const viaEngine = !!(S.audioCtx && S.audioCtx.state === 'running' && S.remoteSource);
   vid.volume = viaEngine || S.deafened ? 0 : Math.min(1, S.audio.peerVol / 100);
   if (S.deafened) vid.volume = 0;
+}
+
+// Видео собеседника. На вертикальном экране вертикальное видео близких
+// пропорций заполняет экран (cover, срезаются лишь края) — как в Telegram;
+// в остальных случаях (горизонтальная камера, демонстрация экрана, десктоп)
+// кадр показывается целиком. Двойной клик/тап переключает режим вручную.
+function fitRemoteVideo() {
+  const v = $('#remote');
+  if (!v || !v.videoWidth || !v.videoHeight) return;
+  if (v.dataset.fit) return v.classList.toggle('fill', v.dataset.fit === 'fill');
+  const ratio = v.videoWidth / v.videoHeight / (innerWidth / innerHeight);
+  const portrait = innerHeight > innerWidth && v.videoHeight > v.videoWidth;
+  v.classList.toggle('fill', portrait && ratio > 0.75 && ratio < 1.33);
+}
+{
+  const v = $('#remote');
+  v?.addEventListener('resize', fitRemoteVideo);
+  v?.addEventListener('loadedmetadata', fitRemoteVideo);
+  v?.addEventListener('dblclick', () => {
+    v.dataset.fit = v.classList.contains('fill') ? 'fit' : 'fill';
+    fitRemoteVideo();
+  });
+  addEventListener('resize', fitRemoteVideo);
 }
 
 // Попытка оживить входящий звук без пересоздания звонка.
@@ -1163,8 +1194,8 @@ async function loadIce() {
 }
 
 // Эфемерные TURN-серверы: только из собственного Worker (/turn) или из
-// динамического Metered API, если он когда-нибудь будет настроен в config.
-// Никаких статических логинов/паролей в клиенте (их убрали в v14).
+// динамического Metered API, если он настроен в config (CONFIG.METERED).
+// Статических логинов/паролей в клиенте нет: в v36 они убраны окончательно.
 async function fetchTurnServers() {
   const out = [];
   const info = [];
@@ -1196,8 +1227,10 @@ async function fetchTurnServers() {
     );
   }
   await Promise.all(jobs);
-  // Резерв владельца: статические креды из config.js (возвращены решением
-  // от 27.10.2026). Попадают сюда, а не в стартовый ICE, поэтому трафик через
+  // Резерв для самостоятельных сборок: EXTRA_ICE_SERVERS из config.js.
+  // В v36 список пуст — креды TURN больше не лежат в публичном клиенте и
+  // выдаются Worker'ом из секретов (см. RELEASE.md). Даже если поле
+  // заполнено, серверы попадают сюда, а не в стартовый ICE: трафик через
   // них идёт только при реальной необходимости (ленивая догрузка).
   const stat = (CONFIG.EXTRA_ICE_SERVERS || []).filter(isTurn);
   if (stat.length) {
@@ -1392,6 +1425,7 @@ function activateBridge(reason = 'Активирован аудио-мост ч�
   $('#cPtt')?.classList.remove('hidden');
   showBridgeSafety();
   startBridgeRecorder();
+  startStats();
   updateStatus();
 }
 
@@ -1786,7 +1820,7 @@ async function onSignal(m) {
       if (!acceptPeer(m)) return;
       if (S.peer && typeof m.bc === 'number') S.peer.bridgeCodecs = !!m.bc;
       if (m.type === 'hello') {
-        S.sig.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0 });
+        S.sig?.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0 });
       }
       if ((m.ver || 0) !== APP_VERSION && !S.verWarned && (m.type === 'hello' || m.ver)) {
         S.verWarned = true;
@@ -1875,7 +1909,7 @@ function acceptPeer(m) {
       // Групповой режим: лишних не выгоняем, пока в комнате есть место —
       // их подберёт group.js (mesh). 'full' только при переполнении.
       if (rosterCount() <= MAX_REMOTE_PEERS) return false;
-      S.sig.send({ type: 'full', to: m.from, toInst: m.inst });
+      S.sig?.send({ type: 'full', to: m.from, toInst: m.inst });
       return false;
     }
     resetPC();
@@ -1939,6 +1973,7 @@ function newAttempt(gen) {
   resetPC(true);
   S.gen = gen;
   createPC();
+  if (S.bridgeActive) startStats();
 }
 
 function createPC() {
@@ -2026,7 +2061,7 @@ function createPC() {
       return;
     }
     S.cands.local[candidate.type] = (S.cands.local[candidate.type] || 0) + 1;
-    S.sig.send({ type: candMsgType(), ...to(), cand: candidate.toJSON() });
+    S.sig?.send({ type: candMsgType(), ...to(), cand: candidate.toJSON() });
     progressDetail();
   };
   pc.oniceconnectionstatechange = () => {
@@ -2056,7 +2091,7 @@ function armWatchdog(pc, ms) {
     log(`WebRTC P2P не соединился за ${Math.round(ms / 1000)} с — фоновая попытка №${g + 1}`);
     hintIfNeeded();
     newAttempt(g);
-    S.sig.send({ type: 'reset', ...to() });
+    S.sig?.send({ type: 'reset', ...to() });
   }, ms);
 }
 
@@ -2101,7 +2136,7 @@ async function sendDesc(pc) {
     sdp: tuneOpusSdp(pc.localDescription.sdp),
   };
   S.ackReceived = false;
-  S.sig.send({ type: descMsgType(), ...to(), desc });
+  S.sig?.send({ type: descMsgType(), ...to(), desc });
   log(
     `Отправлен ${desc.type === 'offer' ? 'запрос (offer)' : 'ответ (answer)'} (${
       sdpCands(desc.sdp).length
@@ -2119,7 +2154,7 @@ async function sendDesc(pc) {
         sdp: tuneOpusSdp(pc.localDescription.sdp),
       };
       if (sdpCands(fullDesc.sdp).length > sdpCands(desc.sdp).length) {
-        S.sig.send({ type: descMsgType(), ...to(), desc: fullDesc });
+        S.sig?.send({ type: descMsgType(), ...to(), desc: fullDesc });
       }
     }
   }
@@ -2135,7 +2170,7 @@ function scheduleResend(pc, desc, n) {
       ? { type: pc.localDescription.type, sdp: tuneOpusSdp(pc.localDescription.sdp) }
       : desc;
     log(`Повтор отправки ${latestDesc.type} (#${n})`);
-    S.sig.send({ type: descMsgType(), ...to(), desc: latestDesc });
+    S.sig?.send({ type: descMsgType(), ...to(), desc: latestDesc });
     scheduleResend(pc, latestDesc, n + 1);
   }, 2300);
 }
@@ -2144,7 +2179,7 @@ async function onDesc(desc, via) {
   const pc = S.pc;
   if (!pc) return;
   // Мгновенно подтверждаем получение SDP, чтобы собеседник знал, что канал жив
-  S.sig.send({ type: 'ack', ...to(), ackType: desc.type });
+  S.sig?.send({ type: 'ack', ...to(), ackType: desc.type });
 
   const collision = desc.type === 'offer' && (S.makingOffer || pc.signalingState !== 'stable');
   S.ignoreOffer = !S.polite && collision;
@@ -2281,6 +2316,7 @@ if (navigator.connection) {
 }
 
 function resetPC(keepBridge = false) {
+  if (!keepBridge) finishCallRecord();
   S.bridgeCounted = false;
   clearTimeout(S.restartTimer);
   clearTimeout(S.watchdog);
@@ -2295,7 +2331,7 @@ function resetPC(keepBridge = false) {
   S.ctrl = null;
   S.fileCh = null;
   if (!keepBridge) S.callStart = 0;
-  S.prevStats = null;
+  S.prevCounters = null;
   S.remote.getTracks().forEach((t) => S.remote.removeTrack(t));
   if (!keepBridge) {
     $('#safety').classList.add('hidden');
@@ -2309,9 +2345,9 @@ function peerLeft() {
   resetPC(false);
   S.peer = null;
   if ($('#peerNameTitle')) $('#peerNameTitle').textContent = 'Ожидаем собеседника…';
-  sysMsg(`${n} вышел из звонка`);
-  toast(`${n} вышел из звонка`);
-  log(`${n} вышел`);
+  sysMsg(`${n} больше не в звонке`);
+  toast(`${n} больше не в звонке`);
+  log(`${n}: выход из звонка`);
   progress(25, 'Ожидаем собеседника');
   updateStatus();
 }
@@ -2493,6 +2529,7 @@ function transportText() {
     `Канал 1 — MQTT-брокеры: ${sg.mqttUp}/${sg.mqttTotal} на связи\n` +
     `Канал 2 — Cloudflare Worker: ${wText}\n` +
     `Канал 3 — Nostr-реле (порт 443): ${sg.nostrUp || 0}/${sg.nostrTotal || 0} на связи\n` +
+    `Канал 4 — ntfy: ${sg.ntfyTotal ? (sg.ntfyUp ? 'на связи' : 'подключение…') : 'не настроен'}\n` +
     `TURN-ретранслятор: ${
       S.hasTurn ? 'есть (эфемерный, из Worker)' : S.turnLoaded ? 'недоступен — работаем без него' : 'не запрашивался (ленивый режим)'
     } (${S.turnInfo || '—'})\n` +
@@ -2509,102 +2546,92 @@ setInterval(() => {
   if (S.callLocked && $('#callLockTimer')) $('#callLockTimer').textContent = txt;
 }, 1000);
 
+// ---------- Статистика звонка (v36: callstats.js + панель «Качество связи») ----------
+const ROUTE_TEXT = { p2p: 'напрямую P2P', lan: 'напрямую (LAN)', turn: 'через TURN' };
+
 function startStats(now) {
   if (S.statsTimer) return;
-  const tick = async () => {
-    const pc = S.pc;
-    if (!pc) return;
-    const r = await pc.getStats().catch(() => null);
-    if (!r) return;
-    let pairId,
-      pair,
-      lost = 0,
-      recv = 0,
-      bytes = 0,
-      audioBytes = 0,
-      outLoss = 0;
-    r.forEach((x) => {
-      if (x.type === 'transport' && x.selectedCandidatePairId) pairId = x.selectedCandidatePairId;
-    });
-    r.forEach((x) => {
-      if (
-        x.type === 'candidate-pair' &&
-        (x.id === pairId || (!pairId && (x.selected || (x.nominated && x.state === 'succeeded'))))
-      )
-        pair = x;
-      if (x.type === 'inbound-rtp') {
-        lost += x.packetsLost || 0;
-        recv += x.packetsReceived || 0;
-        bytes += x.bytesReceived || 0;
-        if ((x.kind || x.mediaType) === 'audio') audioBytes += x.bytesReceived || 0;
-      }
-      if (x.type === 'remote-inbound-rtp' && x.kind === 'video' && typeof x.fractionLost === 'number')
-        outLoss = Math.max(outLoss, x.fractionLost * 100);
-    });
-    const curNow = Date.now(),
-      p = S.prevStats;
-    S.prevStats = { lost, recv, bytes, now: curNow };
-    if (!pair) return;
-    const lc = r.get(pair.localCandidateId),
-      rc = r.get(pair.remoteCandidateId);
-    const relay = lc?.candidateType === 'relay' || rc?.candidateType === 'relay';
-    const route = relay
-      ? 'через TURN'
-      : lc?.candidateType === 'host' && rc?.candidateType === 'host'
-      ? 'напрямую (LAN)'
-      : 'напрямую P2P';
-    const proto =
-      (lc?.protocol || '').toUpperCase() +
-      (lc?.relayProtocol ? '/' + lc.relayProtocol.toUpperCase() : '');
-    const method = `${route}, ${proto}`;
-    if (method !== S.method) {
-      S.method = method;
-      log('Маршрут медиа: ' + method);
-      if (!S.pcRouteCounted) {
-        S.pcRouteCounted = true;
-        countRoute(relay ? 'relay' : 'direct');
-      }
-    }
-    progress(100, 'Соединено: ' + route);
-    const rtt = Math.round((pair.currentRoundTripTime || 0) * 1000);
-    let loss = 0,
-      kbps = 0;
-    if (p && curNow > p.now) {
-      const dl = lost - p.lost,
-        dr = recv - p.recv;
-      loss = dl + dr > 0 ? (100 * dl) / (dl + dr) : 0;
-      kbps = ((bytes - p.bytes) * 8) / (curNow - p.now);
-    }
-    // «Тихая смерть» звука в долгих звонках: соединение живо, а входящие
-    // аудиобайты встали (уснул AudioContext / отвалился remote-трек).
-    // DTX теперь выключен, поэтому даже в тишине пакеты идут — полная
-    // остановка на ~10 секунд это аномалия, пробуем оживить тракт сами.
-    if (S.callStart && Date.now() - S.callStart > 45000 && audioBytes > 0) {
-      if (S.lastAudioBytes >= 0 && audioBytes === S.lastAudioBytes) S.audioStallN++;
-      else S.audioStallN = 0;
-      S.lastAudioBytes = audioBytes;
-      if (S.audioStallN >= 5) {
-        S.audioStallN = 0;
-        recoverRemoteAudio('нет входящих аудиобайт ~10 с при живом звонке');
-      }
-    }
-    const lvl = rtt < 200 && loss < 2 ? 'good' : rtt < 450 && loss < 7 ? 'mid' : 'bad';
-    adaptQuality(outLoss, rtt);
-    const q = $('#quality');
-    q.classList.remove('good', 'mid', 'bad');
-    q.classList.add(lvl, 'mono-pill');
-    if ($('#qualityText')) {
-      $('#qualityText').textContent = `${relay ? 'TURN' : 'P2P'} · ${rtt} мс · ${loss.toFixed(1)}% · ${
-        kbps > 100 ? (kbps / 1000).toFixed(1) + ' Мбит/с' : Math.round(kbps) + ' Кбит/с'
-      }`;
-    }
-    setUse('#quality use', lvl === 'bad' ? 'i-warning' : 'i-wifi');
-    q.classList.remove('hidden');
-    updateStatus();
-  };
-  S.statsTimer = setInterval(tick, 2000);
-  if (now) setTimeout(tick, 300);
+  S.statsTimer = setInterval(statsTick, 2000);
+  if (now) setTimeout(statsTick, 300);
 }
+
+async function statsTick() {
+  if (!S.callStart) return;
+  const rec = S.callRec || (S.callRec = new CallRecorder({ startedAt: S.callStart }));
+  const report = S.pc ? await S.pc.getStats().catch(() => null) : null;
+  const cur = report ? readCounters(report) : null;
+  if (!cur?.connected) {
+    // Мост через сигнал: метрик WebRTC нет, но время и маршрут пишем.
+    if (S.bridgeActive) {
+      S.lastSample = bridgeSample();
+      rec.push(S.lastSample);
+      renderStatsPanel();
+    }
+    return;
+  }
+  const smp = deriveSample(cur, S.prevCounters);
+  S.prevCounters = cur;
+  const method = `${ROUTE_TEXT[smp.route]}, ${smp.proto}`;
+  if (method !== S.method) {
+    S.method = method;
+    log('Маршрут медиа: ' + method);
+    if (!S.pcRouteCounted) {
+      S.pcRouteCounted = true;
+      countRoute(smp.route === 'turn' ? 'relay' : 'direct');
+    }
+  }
+  progress(100, 'Соединено: ' + ROUTE_TEXT[smp.route]);
+  // «Тихая смерть» звука в долгих звонках: соединение живо, а входящие
+  // аудиобайты встали (уснул AudioContext / отвалился remote-трек).
+  // DTX выключен, поэтому даже в тишине пакеты идут — полная остановка
+  // на ~10 секунд это аномалия, пробуем оживить тракт сами.
+  const audioBytes = cur.audioBytesIn;
+  if (Date.now() - S.callStart > 45000 && audioBytes > 0) {
+    if (S.lastAudioBytes >= 0 && audioBytes === S.lastAudioBytes) S.audioStallN++;
+    else S.audioStallN = 0;
+    S.lastAudioBytes = audioBytes;
+    if (S.audioStallN >= 5) {
+      S.audioStallN = 0;
+      recoverRemoteAudio('нет входящих аудиобайт ~10 с при живом звонке');
+    }
+  }
+  adaptQuality(smp.videoOutLoss, smp.rtt ?? 0);
+  rec.push(smp);
+  S.lastSample = smp;
+  const q = $('#quality');
+  q.classList.remove('good', 'mid', 'bad');
+  q.classList.add(smp.level, 'mono-pill');
+  if ($('#qualityText')) {
+    const loss = smp.loss >= 1 ? ` · ${smp.loss.toFixed(1)}%` : '';
+    $('#qualityText').textContent = `${ROUTE_SHORT[smp.route]} · ${smp.rtt ?? '—'} мс${loss}`;
+  }
+  setUse('#quality use', smp.level === 'bad' ? 'i-warning' : 'i-wifi');
+  q.classList.remove('hidden');
+  renderStatsPanel();
+  updateStatus();
+}
+
+function renderStatsPanel() {
+  const panel = $('#callStats');
+  if (!panel || panel.classList.contains('hidden')) return;
+  renderLiveStats($('#callStatsBody'), {
+    rec: S.callRec,
+    sample: S.lastSample,
+    callSec: S.callStart ? (Date.now() - S.callStart) / 1000 : 0,
+    delivery: S.sig?.deliveryStats?.() || null,
+    bridgeMode: S.bridgeActive ? S.bridgeMode : '',
+  });
+}
+
+function toggleStatsPanel() {
+  const panel = $('#callStats');
+  if (!panel) return;
+  panel.classList.toggle('hidden');
+  $('#quickAudioPop')?.classList.add('hidden');
+  renderStatsPanel();
+}
+$('#quality') && ($('#quality').onclick = toggleStatsPanel);
+$('#bridgeBadge') && ($('#bridgeBadge').onclick = toggleStatsPanel);
 
 const QLEVELS = [
   { maxBitrate: 2500000, scale: 1, fps: 30 }, // Full HD по умолчанию
@@ -2762,7 +2789,7 @@ $('#chatForm').onsubmit = (e) => {
   if (!v) return;
   if (rosterCount() > 1 && S.sig) {
     // Групповой чат: одно сообщение всем участникам через E2EE-сигналинг.
-    S.sig.send({ type: 'g_chat', text: v, name: myName() });
+    S.sig?.send({ type: 'g_chat', text: v, name: myName() });
     addMsg('Вы', v, true);
     if (inp) inp.value = '';
     return;
@@ -2771,7 +2798,7 @@ $('#chatForm').onsubmit = (e) => {
     sendCtrl({ t: 'chat', text: v });
   } else if (S.peer && S.sig) {
     // Если DataChannel ещё не открыт или заблокирован — отправляем сообщение через E2EE сигналинг!
-    S.sig.send({ type: 'sig_chat', to: S.peer.id, toInst: S.peer.inst, text: v });
+    S.sig?.send({ type: 'sig_chat', to: S.peer.id, toInst: S.peer.inst, text: v });
   } else {
     return toast('Собеседник ещё не вошёл в комнату');
   }
@@ -3291,6 +3318,7 @@ async function hangup() {
   await new Promise((r) => setTimeout(r, 200));
   S.leaving = true;
   resetPC(false);
+  S.callMeta = null;
   S.sig?.close();
   S.sig = null;
   S.peer = null;
@@ -3377,36 +3405,46 @@ function stopRingtone() {
   }
 }
 
-async function journalAdd(dir, name, outcome) {
-  try {
-    await kvPut('calls', `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, {
-      ts: Date.now(),
-      dir,
-      name: String(name || '').slice(0, 60),
-      outcome,
-    });
-  } catch {}
+// ---------- Журнал звонков (v36: длительность, маршрут и качество) ----------
+const JOURNAL_MAX = 200;
+const newJournalKey = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+/** Пишет запись журнала и сразу возвращает её ключ (запись — в фоне). */
+function journalAdd(dir, name, outcome, extra = null, key = newJournalKey()) {
+  const entry = { ts: Date.now(), dir, name: String(name || '').slice(0, 60), outcome, ...(extra || {}) };
+  kvPut('calls', key, entry)
+    .then(() => renderCalls())
+    .catch((e) => console.warn('journal', e));
+  return key;
 }
+
+/** Итог звонка в журнал: вызывается один раз, когда разговор закончился. */
+function finishCallRecord() {
+  const startedAt = S.callStart;
+  const rec = S.callRec;
+  const meta = S.callMeta || {};
+  S.callRec = null;
+  S.callMeta = null;
+  S.lastSample = null;
+  $('#callStats')?.classList.add('hidden');
+  if (!startedAt) return;
+  const sum = rec ? rec.summary() : { dur: Math.round((Date.now() - startedAt) / 1000), route: null };
+  if (!sum.route && S.bridgeActive) sum.route = 'bridge';
+  if (sum.dur < 2) return;
+  journalAdd(meta.dir || 'link', S.peer?.name || meta.name, 'completed', { ...sum, ts: startedAt }, meta.key);
+}
+
 async function renderCalls() {
-  const el = $('#callsList');
-  if (!el) return;
   let all = [];
   try {
-    all = (await kvAll('calls')).sort((a, b) => b.value.ts - a.value.ts).slice(0, 6);
-  } catch {}
-  el.replaceChildren();
-  if (!all.length) {
-    const li = document.createElement('li');
-    li.textContent = 'Пока пусто';
-    el.append(li);
-    return;
+    all = (await kvAll('calls')).filter((x) => x.value).sort((a, b) => b.value.ts - a.value.ts);
+  } catch (e) {
+    console.warn('journal', e);
   }
-  const names = { accepted: 'состоялся', declined: 'отклонён', missed: 'без ответа', cancelled: 'отменён', expired: 'без ответа' };
-  for (const { value: v } of all) {
-    const li = document.createElement('li');
-    li.textContent = `${v.dir === 'in' ? 'Входящий' : 'Исходящий'} · ${v.name || 'Без имени'} · ${names[v.outcome] || v.outcome} · ${new Date(v.ts).toLocaleString()}`;
-    el.append(li);
-  }
+  for (const old of all.slice(JOURNAL_MAX)) kvDel('calls', old.key).catch(() => {});
+  const entries = all.slice(0, JOURNAL_MAX).map((x) => x.value);
+  renderCallsList($('#callsList'), entries);
+  renderCallsDashboard($('#callsDash'), journalDigest(entries));
 }
 
 async function refreshPersonalUI() {
@@ -3430,7 +3468,6 @@ async function refreshPersonalUI() {
   if (linkEl) linkEl.value = personalLinkOf(p);
   startInboxListener();
   loadMissed().catch(() => {});
-  renderCalls();
   updatePushUI();
 }
 
@@ -3544,7 +3581,7 @@ $('#btnAccept') &&
       devicePub: S.personal.devicePub,
       sign: (t) => signWithDevice(t),
     }).catch(() => {});
-    journalAdd('in', inc.payload?.name, 'accepted');
+    S.callMeta = { dir: 'in', name: inc.payload?.name, key: journalAdd('in', inc.payload?.name, 'accepted') };
     S.autoJoinPending = true;
     let target = `k=${S.personal.secret}&d=${S.personal.fp}`;
     // v28: дозвон из чата несёт в запечатанном payload секрет отдельной
@@ -3597,19 +3634,20 @@ $('#btnSharePersonal') &&
 function updatePushUI() {
   const b = $('#btnEnablePush');
   if (!b) return;
-  if (!('PushManager' in window) || !CONFIG.VAPID_PUBLIC_KEY) {
+  const label = b.querySelector('span') || b;
+  if (!('PushManager' in window)) {
     b.disabled = true;
-    b.textContent = 'Уведомления недоступны на этом устройстве';
+    label.textContent = 'Push-уведомления не поддерживаются браузером';
     return;
   }
   if (Notification.permission === 'denied') {
     b.disabled = true;
-    b.textContent = 'Уведомления запрещены в настройках браузера';
+    label.textContent = 'Уведомления запрещены в браузере';
     return;
   }
   if (S.pushSub) {
     b.disabled = true;
-    b.textContent = 'Уведомления о звонках включены';
+    label.textContent = 'Push-уведомления включены';
   }
 }
 $('#btnEnablePush') &&
@@ -3617,14 +3655,20 @@ $('#btnEnablePush') &&
     try {
       const perm = await Notification.requestPermission();
       if (perm !== 'granted') return toast('Разрешение на уведомления не дано');
+      // v36: VAPID-ключ — у того же Worker, который подписывает пуши: у
+      // «своего сервера» своя пара ключей, и подписка на чужой ключ молча
+      // не доставлялась бы.
+      const key = (await fetchJson(getWorkerBase() + '/push-key').catch(() => null))?.public;
+      if (!key) return toast('Сервер не поддерживает push. Пока приложение открыто, звонки приходят и так');
+      const appKey = b64u.dec(key);
       const reg = await navigator.serviceWorker.ready;
       let sub = await reg.pushManager.getSubscription();
-      if (!sub) {
-        sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: b64u.dec(CONFIG.VAPID_PUBLIC_KEY),
-        });
+      const subKey = sub?.options?.applicationServerKey;
+      if (sub && subKey && b64u.enc(new Uint8Array(subKey)) !== b64u.enc(appKey)) {
+        await sub.unsubscribe().catch(() => {});
+        sub = null;
       }
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appKey });
       const j = sub.toJSON();
       S.pushSub = { endpoint: j.endpoint, keys: j.keys };
       await inboxRegister(getWorkerBase(), S.personalRoom.topic, S.personal, S.pushSub);
@@ -3644,17 +3688,17 @@ async function loadMissed() {
   const list = $('#missedList');
   if (!box || !list) return;
   box.classList.toggle('hidden', items.length === 0);
-  list.replaceChildren();
+  // v36: пропущенные рисуются тем же видом, что и журнал звонков.
+  const entries = [];
   for (const m of items) {
     let name = 'Неизвестный';
     try {
       const pl = await openSealed(S.personalRoom.key, m.blob, S.personalRoom.topic);
       if (pl?.name) name = pl.name;
     } catch {}
-    const li = document.createElement('li');
-    li.textContent = `${name} · ${new Date(m.ts).toLocaleString()} · не ответил`;
-    list.append(li);
+    entries.push({ ts: m.ts, dir: 'in', name, outcome: 'missed' });
   }
+  renderCallsList(list, entries);
 }
 $('#btnMissedClear') &&
   ($('#btnMissedClear').onclick = async () => {
@@ -3684,6 +3728,7 @@ async function startOutgoingCall() {
   const payload = { v: 1, ringId, fromFp, fromDevicePub, name: myName(), call: 'video', ts: Date.now() };
   const blob = await seal(room.key, payload, room.topic);
   S.outCall = { ringId, topic: room.topic, signFn, fromDevicePub, poll: null };
+  S.callMeta = { dir: 'out', name: 'Владелец ссылки' };
   $('#outgoingCall')?.classList.remove('hidden');
   const r = await inboxRing(getWorkerBase(), room.topic, { ringId, fromFp, fromDevicePub, blob }).catch(
     () => null
@@ -3943,16 +3988,25 @@ const isStandalonePwa = () =>
   window.matchMedia?.('(display-mode: standalone)')?.matches ||
   window.navigator?.standalone === true;
 
-function syncPwaUI() {
-  const installed = isStandalonePwa();
-  const topBtn = $('#btnInstallPwaTop');
-  if (topBtn) topBtn.classList.toggle('hidden', installed);
-  const banner = $('#pwaInstallBanner');
-  if (banner) {
-    let dismissed = false;
-    try { dismissed = sessionStorage.getItem('zvPwaDismissed') === '1'; } catch {}
-    banner.classList.toggle('hidden', installed || dismissed);
+// v36: предлагаем установку, только когда она реально возможна (событие
+// beforeinstallprompt или iOS Safari с ручной инструкцией). Баннер — лишь на
+// телефоне и не чаще раза в 30 дней после «Скрыть»: раньше он висел в каждой
+// сессии и наезжал на список чатов.
+const isIosSafari = () =>
+  /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const PWA_SNOOZE_MS = 30 * 86400000;
+function pwaSnoozed() {
+  try {
+    return Date.now() - Number(localStorage.getItem('zvPwaDismissedAt') || 0) < PWA_SNOOZE_MS;
+  } catch {
+    return false;
   }
+}
+function syncPwaUI() {
+  const canOffer = !isStandalonePwa() && (!!deferredPwaPrompt || isIosSafari());
+  $('#btnInstallPwaTop')?.classList.toggle('hidden', !canOffer);
+  const touch = window.matchMedia?.('(pointer: coarse)')?.matches;
+  $('#pwaInstallBanner')?.classList.toggle('hidden', !canOffer || !touch || pwaSnoozed());
 }
 
 async function triggerPwaInstall() {
@@ -4000,7 +4054,7 @@ window.addEventListener('appinstalled', () => {
 $('#btnInstallPwaTop') && ($('#btnInstallPwaTop').onclick = triggerPwaInstall);
 $('#btnInstallPwaBanner') && ($('#btnInstallPwaBanner').onclick = triggerPwaInstall);
 $('#btnDismissPwaBanner') && ($('#btnDismissPwaBanner').onclick = () => {
-  try { sessionStorage.setItem('zvPwaDismissed', '1'); } catch {}
+  try { localStorage.setItem('zvPwaDismissedAt', String(Date.now())); } catch {}
   $('#pwaInstallBanner')?.classList.add('hidden');
 });
 syncPwaUI();

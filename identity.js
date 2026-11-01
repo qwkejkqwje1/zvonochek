@@ -3,9 +3,9 @@
 // IndexedDB) удостоверяет ключи устройств; секрет личной ссылки зашифрован
 // vault-ключом устройства. Личная ссылка: #k=<секрет>&d=<fp>, где fp — первые
 // 32 hex SHA-256 от X9.62-представления master-публичного ключа.
-import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=35';
-import { kvGet, kvPut } from './store.js?v=35';
-import { utils as secpUtils } from './vendor/secp256k1.js?v=35';
+import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=36';
+import { kvGet, kvPut } from './store.js?v=36';
+import { utils as secpUtils } from './vendor/secp256k1.js?v=36';
 
 const te = new TextEncoder();
 let cached = null; // {secret, masterPub, masterPriv, fp, devicePub, devicePriv, cert, label}

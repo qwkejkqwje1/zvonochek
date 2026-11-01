@@ -1,4 +1,4 @@
-// ZVONochek v24 — ранняя диагностика загрузки (классический скрипт, НЕ модуль).
+// ZVONochek v36 — ранняя диагностика загрузки (классический скрипт, НЕ модуль, ES5).
 // Подключается в index.html ПЕРЕД модульными скриптами, чтобы перехватить и их
 // ошибки загрузки. Отдельным файлом, а не inline: CSP страницы
 // (script-src 'self') запрещает inline-скрипты — inline-вариант молча не
@@ -11,8 +11,12 @@
 // is not a function» при живом importKey/deriveKey (звонки работали, а
 // генерация ключей — нет). Поэтому окружение проверяется СРАЗУ при загрузке,
 // а не по нажатию кнопки, и его сводка дописывается к каждому баннеру.
+// v36: «ворота» старого браузера. Если браузер не умеет модули/ES2020,
+// WebRTC или IndexedDB, вместо молчаливо пустого экрана (так выглядел сбой
+// на старом телефоне) сразу показываем понятный экран «обновите браузер».
 (function () {
   var MAX = 10;
+  var gateShown = false;
   window.__zvErrors = [];
   function pushErr(msg, src) {
     try {
@@ -24,12 +28,73 @@
     } catch (x) {}
   }
   window.addEventListener('error', function (ev) {
-    pushErr(ev.message || (ev.error && ev.error.message) || 'error', ev.filename || '');
+    var msg = ev.message || (ev.error && ev.error.message) || 'error';
+    pushErr(msg, ev.filename || '');
+    // Синтаксис модулей не разобрался — браузер старше ES2020 (обычно Chrome < 80).
+    if (/SyntaxError|Unexpected token|expected expression|Invalid character/i.test(String(msg))) {
+      showGate(['этот браузер не понимает современный JavaScript (ES2020)']);
+    }
   });
   window.addEventListener('unhandledrejection', function (ev) {
     var r = ev.reason;
     pushErr('unhandledrejection: ' + ((r && r.message) || r || 'unknown'), '');
   });
+  // ---------- v36: экран «обновите браузер» ----------
+  function missingFeatures() {
+    var out = [];
+    try {
+      if (!('noModule' in document.createElement('script'))) out.push('нет поддержки JS-модулей');
+    } catch (x) {}
+    if (typeof window.BigInt !== 'function' || typeof Promise === 'undefined' || typeof Promise.allSettled !== 'function') {
+      out.push('устаревший движок JavaScript (нужен уровень ES2020)');
+    }
+    if (typeof window.RTCPeerConnection !== 'function') out.push('нет WebRTC — звонки невозможны');
+    if (!window.indexedDB) out.push('нет IndexedDB — ключи и чаты негде хранить');
+    return out;
+  }
+  function el(tag, css, text) {
+    var n = document.createElement(tag);
+    n.setAttribute('style', css);
+    if (text) n.appendChild(document.createTextNode(text));
+    return n;
+  }
+  function showGate(reasons) {
+    if (gateShown || !document.body) return;
+    gateShown = true;
+    try {
+      var wrap = el('div', 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:#0e1621;color:#f5f7fa;' +
+        'font:15px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;overflow:auto;padding:24px 18px;box-sizing:border-box');
+      wrap.id = 'zvGate';
+      wrap.setAttribute('role', 'alertdialog');
+      var card = el('div', 'max-width:460px;margin:8vh auto 0;background:#17212b;border-radius:18px;padding:26px 22px;' +
+        'box-shadow:0 10px 40px rgba(0,0,0,.4)');
+      card.appendChild(el('div', 'font-size:44px;line-height:1;margin-bottom:14px', '\u23F3'));
+      card.appendChild(el('div', 'font-size:20px;font-weight:700;margin-bottom:8px', 'Браузер устарел'));
+      card.appendChild(el('div', 'color:#aab8c5;margin-bottom:14px',
+        'ZVONochek шифрует звонки и сообщения прямо в браузере, а этот браузер не умеет нужного:'));
+      var ul = el('ul', 'margin:0 0 16px;padding-left:20px;color:#f5f7fa');
+      for (var i = 0; i < reasons.length; i++) ul.appendChild(el('li', 'margin:2px 0', reasons[i]));
+      card.appendChild(ul);
+      card.appendChild(el('div', 'font-weight:600;margin-bottom:6px', 'Что сделать (2 минуты):'));
+      var ol = el('ol', 'margin:0 0 18px;padding-left:20px;color:#d6e0ea');
+      ol.appendChild(el('li', 'margin:3px 0', 'Обновите Chrome через Google Play / App Store.'));
+      ol.appendChild(el('li', 'margin:3px 0', 'Или установите Firefox либо Яндекс Браузер и откройте эту же ссылку в нём.'));
+      ol.appendChild(el('li', 'margin:3px 0', 'На iPhone обновите iOS до 14 или новее (Safari обновляется вместе с ней).'));
+      card.appendChild(ol);
+      var btn = el('button', 'width:100%;border:0;border-radius:12px;padding:12px 14px;background:#2b5278;color:#fff;' +
+        'font:inherit;font-weight:600;cursor:pointer', 'Всё равно попробовать');
+      btn.type = 'button';
+      btn.onclick = function () {
+        try { wrap.parentNode.removeChild(wrap); } catch (x) {}
+      };
+      card.appendChild(btn);
+      card.appendChild(el('div', 'color:#6d7f8f;font-size:12px;margin-top:12px;word-break:break-word',
+        'Для разработчика: ' + (window.__zvEnvText ? window.__zvEnvText() : '')));
+      wrap.appendChild(card);
+      document.body.appendChild(wrap);
+    } catch (x) {}
+  }
+  window.__zvShowGate = showGate;
   // ---------- Проба окружения (v23) ----------
   window.__zvProbe = function () {
     var s = null;
@@ -101,6 +166,7 @@
       .join(' | ');
   }
   function watchdog() {
+    if (gateShown) return; // причина уже объяснена экраном «обновите браузер»
     var missing = [];
     if (!window.__zvAppBooted) missing.push('приложения');
     if (!window.__zvChatBooted) missing.push('чата');
@@ -118,6 +184,11 @@
   // subtle и мёртвом generateKeyPair баннер не показываем; проба
   // (__zvProbe/__zvEnvText) по-прежнему дописывается к любому баннеру.
   function envCheck() {
+    var lacks = missingFeatures();
+    if (lacks.length) {
+      showGate(lacks);
+      return;
+    }
     var p = window.__zvProbe();
     if (p.subtle !== 'object') {
       window.__zvShowDiag(
