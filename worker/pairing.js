@@ -16,7 +16,8 @@
 // Серверный дамп пары бесполезен после истечения TTL.
 //
 // API (путь внутри DO — после /pair):
-//   POST /create {codeHash, blob, exp} — создать пару (TTL ≤ 15 мин от now)
+//   POST /create {codeHash, blob, exp, nx?} — создать пару (TTL ≤ 15 мин от now;
+//                v39: nx:true — 409, если по адресу уже лежит живая запись)
 //   POST /claim  {codeHash}            — забрать blob: 200 / 404 / 410
 //   POST /word   {codeHash, blob, exp, adminHash} — v30: встреча по
 //                кодовому слову (TTL ≤ 24 ч, одноразовая, отзыв по admin)
@@ -346,6 +347,11 @@ export class Pairing {
       const expN = Number(exp);
       if (!Number.isFinite(expN) || expN <= now) return json({ error: 'bad exp' }, 400);
       if (expN > now + PAIR_TTL_MS + 30_000) return json({ error: 'ttl too long' }, 400);
+      // v39: nx — «только если свободно». Запрос привязки устройства и ответ
+      // на него не затираются чужой записью по тому же адресу, пока живы.
+      if (body.nx === true && this.meta('blob') && Number(this.meta('exp') || 0) > now) {
+        return json({ error: 'exists' }, 409);
+      }
       this.setMeta('code_hash', codeHash);
       this.setMeta('blob', blob);
       this.setMeta('exp', String(expN));

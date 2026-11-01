@@ -5,9 +5,9 @@
 //   4) Публичные Nostr-реле поверх WSS (порт 443, подписанные эфемерные события)
 //   5) Публичный ntfy.sh (POST + WebSocket; «слепой» pub/sub без регистрации)
 // Каждое сообщение сжимается и шифруется AES-256-GCM; дубли отсекаются по mid.
-import { seal, open } from './crypto.js?v=38';
-import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=38';
-import { schnorr, utils } from './vendor/secp256k1.js?v=38';
+import { seal, open } from './crypto.js?v=39';
+import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=39';
+import { schnorr, utils } from './vendor/secp256k1.js?v=39';
 
 const hexs = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 const NOSTR_KIND = 29333; // эфемерные события: реле их не хранят, только пересылают

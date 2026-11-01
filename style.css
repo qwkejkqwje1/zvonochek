@@ -4264,284 +4264,225 @@ body.eco-mode .avatar-ring {
   font-size: 13px;
 }
 
-/* ==========================================================================
-   v38: оформление «ZVON» (по умолчанию). Графит + сигнальный красный,
-   фирменный знак — колокол на зернистой красной плитке, словесный знак
-   «ZVON» фактурным красным + «ochek» белым. Всё ниже ограничено
-   html[data-skin="zvon"]: классический вид (data-skin="classic", настройка
-   «Оформление») остаётся нетронутым — откат одним переключателем.
-   ========================================================================== */
-
-/* Знак и словесный знак: по умолчанию (классика) — прежний логотип */
-.mark .logo-zvon {
-  display: none;
+/* ---------- v39: Мои устройства и привязка ----------
+   Классы строит devices.js: .device-row(.self), .device-ic, .device-main,
+   .device-meta, .link-word; app.js — содержимое .danger-keep. */
+.status-line.good {
+  color: var(--ok);
 }
-html[data-skin='zvon'] .mark .logo-zvon {
-  display: inline;
+.status-line.warn,
+.note.warn {
+  color: var(--warn);
 }
-html[data-skin='zvon'] .mark .logo-classic {
-  display: none;
+.note.good {
+  color: var(--ok);
 }
-.welcome-word {
-  display: none;
+.devices-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
 }
-
-html[data-skin='zvon'] {
-  color-scheme: dark;
-  --bg: #0d0d10;
-  --bg-2: #141418;
-  --bg-3: #1c1c22;
-  --bg-4: #25252d;
-  --bg-elev: #19191e;
-  --line: rgba(255, 255, 255, 0.06);
-  --line-2: rgba(255, 255, 255, 0.12);
-  --text: #f7f5f5;
-  --text-2: #bcb5b6;
-  --text-3: #857c7d;
-  --accent: #e3262c;
-  --accent-press: #c41d23;
-  --accent-ink: #ff6b70;
-  --accent-soft: rgba(227, 38, 44, 0.15);
-  --active: #3b171b;
-  --bubble-in: #1d1d23;
-  --bubble-out: #7a1b22;
-  --meta-out: #f2b0b3;
-  --ok: #3fd47a;
-  --warn: #f2a33a;
-  --bad: #ff4d52;
-  --danger: #e3262c;
-  --r: 14px;
-  --r-lg: 18px;
-  --shadow: 0 14px 36px rgba(0, 0, 0, 0.55);
-  --zv-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  --zv-red: linear-gradient(180deg, #ff5a5f 0%, #e3262c 48%, #a3141a 100%);
-  --wallpaper: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cg fill='none' stroke='%23ff3b41' stroke-opacity='.05' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M30 40c0-6 4.2-10 9.5-10S49 34 49 40v6l3 4.5H27l3-4.5z'/%3E%3Cpath d='M36 54a3.5 3.5 0 0 0 7 0'/%3E%3Cpath d='M56 30a9 9 0 0 1 2.4 6.2M23 30a9 9 0 0 0-2.4 6.2'/%3E%3Cpath d='M110 112c0-6 4.2-10 9.5-10s9.5 4 9.5 10v6l3 4.5h-25l3-4.5z'/%3E%3Cpath d='M116 126a3.5 3.5 0 0 0 7 0'/%3E%3Cpath d='M104 30h22M104 38h14'/%3E%3Cpath d='M28 116h20M28 124h12'/%3E%3C/g%3E%3C/svg%3E");
+.devices-head .card-title {
+  margin-bottom: 0;
 }
-html[data-skin='zvon'] ::selection {
-  background: rgba(227, 38, 44, 0.45);
-}
-
-/* Словесный знак: «ZVON» — фактурный красный (зерно + штриховка поверх
-   градиента), «ochek» — белый */
-html[data-skin='zvon'] .brand-name {
-  font-size: 19px;
-  font-weight: 800;
-  letter-spacing: 0.01em;
-}
-html[data-skin='zvon'] .bn-zvon {
-  background: var(--zv-grain), repeating-linear-gradient(118deg, rgba(255, 255, 255, 0.13) 0 1px, transparent 1px 4px),
-    var(--zv-red);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  -webkit-text-fill-color: transparent;
-  font-weight: 900;
-  letter-spacing: 0.03em;
-  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.65));
-}
-html[data-skin='zvon'] .bn-ochek {
-  color: #fff;
-  -webkit-text-fill-color: #fff;
-  font-weight: 700;
-}
-html[data-skin='zvon'] .welcome-word {
-  display: block;
-  font-size: 34px;
-  line-height: 1.05;
-  letter-spacing: 0.01em;
-}
-html[data-skin='zvon'] .brand .mark {
-  filter: drop-shadow(0 4px 12px rgba(227, 38, 44, 0.35));
-}
-
-/* Поверхности: графит с лёгким зерном, без синевы */
-html[data-skin='zvon'] .side,
-html[data-skin='zvon'] .tabbar {
-  background: var(--bg-2);
-}
-html[data-skin='zvon'] .appbar {
-  background: linear-gradient(180deg, rgba(227, 38, 44, 0.07), transparent);
-}
-html[data-skin='zvon'] .card,
-html[data-skin='zvon'] .list-card {
+.devices-head .pill {
+  height: 24px;
+  padding: 0 10px;
   background: var(--bg-3);
-  border: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
 }
-html[data-skin='zvon'] .drawer {
+.devices-list {
+  list-style: none;
+  margin: 8px 0 4px;
+  padding: 0;
+}
+.device-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+.device-row + .device-row {
+  border-top: 1px solid var(--line);
+}
+.device-ic {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
   background: var(--bg-3);
-  border: 1px solid var(--line-2);
+  color: var(--text-2);
 }
-html[data-skin='zvon'] .welcome {
-  background: rgba(20, 20, 24, 0.86);
-  border: 1px solid var(--line);
+.device-ic .ic {
+  width: 20px;
+  height: 20px;
 }
-html[data-skin='zvon'] .toast {
-  background: rgba(30, 30, 36, 0.97);
-  border: 1px solid var(--line-2);
-}
-html[data-skin='zvon'] .modal {
-  background: rgba(5, 5, 7, 0.68);
-}
-html[data-skin='zvon'] .hero-ic,
-html[data-skin='zvon'] .banner-ic {
-  background: var(--zv-red);
-  box-shadow: 0 4px 14px rgba(227, 38, 44, 0.35);
-}
-html[data-skin='zvon'] .banner {
-  background: linear-gradient(90deg, rgba(227, 38, 44, 0.18), rgba(227, 38, 44, 0.06));
-  border: 1px solid rgba(227, 38, 44, 0.22);
-}
-
-/* Нижняя навигация: активная вкладка — красная «таблетка» */
-html[data-skin='zvon'] .tab.active {
-  color: #fff;
-}
-html[data-skin='zvon'] .tab.active .tab-ic {
+.device-row.self .device-ic {
   background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px rgba(227, 38, 44, 0.35);
   color: var(--accent-ink);
 }
-
-/* Кнопки */
-html[data-skin='zvon'] .btn.primary,
-html[data-skin='zvon'] .fab {
-  background: var(--zv-red);
-  box-shadow: 0 6px 18px rgba(227, 38, 44, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.18);
-}
-html[data-skin='zvon'] .btn.primary:hover,
-html[data-skin='zvon'] .fab:hover {
-  background: linear-gradient(180deg, #ff6a6e 0%, #ea2d33 48%, #b0161d 100%);
-}
-html[data-skin='zvon'] .btn.primary:active,
-html[data-skin='zvon'] .fab:active {
-  background: var(--accent-press);
-}
-
-/* Список чатов */
-html[data-skin='zvon'] .chat-room-item.active {
-  background: linear-gradient(90deg, rgba(227, 38, 44, 0.28), rgba(227, 38, 44, 0.1));
-}
-html[data-skin='zvon'] .chat-room-item.active .chat-room-when,
-html[data-skin='zvon'] .chat-room-item.active .chat-room-preview-text {
-  color: #f0c9cb;
-}
-html[data-skin='zvon'] .chat-unread-badge {
-  background: var(--accent);
-  color: #fff;
-}
-html[data-skin='zvon'] .chat-room-item.active .chat-unread-badge {
-  background: #fff;
-  color: var(--accent);
-}
-
-/* Переписка: исходящие — глубокий красный с градиентом, входящие — графит */
-html[data-skin='zvon'] .chat-msg {
-  border: 1px solid rgba(255, 255, 255, 0.04);
-}
-html[data-skin='zvon'] .chat-msg.mine {
-  background: linear-gradient(160deg, #8f2028 0%, #6c171d 100%);
-  border-color: rgba(255, 90, 95, 0.18);
-}
-html[data-skin='zvon'] .chat-msg.mine .chat-quote {
-  border-left-color: #ffb3b6;
-  background: rgba(0, 0, 0, 0.18);
-}
-html[data-skin='zvon'] .chat-msg.mine .chat-quote b {
-  color: #ffd6d8;
-}
-html[data-skin='zvon'] .chat-msg.mine .chat-msg-text a {
-  color: #ffd0d2;
-}
-html[data-skin='zvon'] .chat-msg.mine .chat-receipt.st-read {
-  color: #ffc2c5;
-}
-html[data-skin='zvon'] .chat-date-chip,
-html[data-skin='zvon'] .chat-sys,
-html[data-skin='zvon'] .chat-empty-pill,
-html[data-skin='zvon'] .chat-empty-note,
-html[data-skin='zvon'] .tg-chat-welcome-card,
-html[data-skin='zvon'] .chat-act-btn {
-  background: rgba(20, 20, 24, 0.72);
-}
-html[data-skin='zvon'] .topbar-strip {
-  background: var(--bg-2);
-}
-html[data-skin='zvon'] .strip-mark {
-  background: var(--accent);
-}
-
-/* Звонок: тёмная сцена без синевы, аватар — красный */
-html[data-skin='zvon'] .stage {
-  background: radial-gradient(120% 90% at 50% 30%, #2a1416 0%, #110b0c 62%, #060506 100%);
-}
-html[data-skin='zvon'] .avatar,
-html[data-skin='zvon'] .call-av {
-  background: var(--zv-red);
-}
-html[data-skin='zvon'] .conn,
-html[data-skin='zvon'] .call-pop {
-  background: rgba(20, 20, 24, 0.82);
-}
-html[data-skin='zvon'] .round.off,
-html[data-skin='zvon'] .ctrl-main .round.off {
-  background: #18181d;
-}
-html[data-skin='zvon'] .preview {
-  background: #060506;
-}
-
-/* Настройки: выбор оформления */
-.skin-row {
-  display: flex;
-  gap: 10px;
-}
-.skin-opt {
-  flex: 1;
+.device-main {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 8px;
-  border: 1px solid var(--line-2);
+  flex: 1;
+  min-width: 0;
+}
+.device-main b {
+  font-size: 14.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-meta {
+  margin-top: 2px;
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--text-3);
+}
+.device-row > .btn {
+  flex: none;
+}
+.devices-excluded {
+  margin: 8px 0;
+  padding: 12px;
   border-radius: var(--r);
-  background: var(--bg-3);
-  cursor: pointer;
+  background: rgba(240, 169, 64, 0.1);
+  color: var(--warn);
   font-size: 13.5px;
 }
-.skin-opt input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
+.devices-excluded p {
+  margin: 0 0 10px;
 }
-.skin-opt:has(input:checked) {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
+#btnLinkDevice {
+  margin-top: 6px;
 }
-.skin-swatch {
+.link-box {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.link-row {
   display: flex;
-  width: 100%;
-  height: 34px;
-  overflow: hidden;
-  border-radius: 10px;
+  gap: 8px;
+  align-items: center;
 }
-.skin-swatch i {
+.link-row input {
   flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 16px;
+  letter-spacing: 0.06em;
 }
-.skin-swatch.zvon i:nth-child(1) {
-  background: #0d0d10;
+.link-row .btn {
+  flex: none;
+  min-height: 42px;
 }
-.skin-swatch.zvon i:nth-child(2) {
-  background: #1c1c22;
+.link-qr {
+  width: min(220px, 100%);
+  margin: 6px auto 10px;
+  padding: 10px;
+  border-radius: var(--r);
+  background: #fff;
+  line-height: 0;
 }
-.skin-swatch.zvon i:nth-child(3) {
-  background: linear-gradient(180deg, #ff5a5f, #a3141a);
+.link-qr:empty {
+  display: none;
 }
-.skin-swatch.classic i:nth-child(1) {
-  background: #0e1621;
+.link-qr svg {
+  width: 100%;
+  height: auto;
 }
-.skin-swatch.classic i:nth-child(2) {
-  background: #17212b;
+.link-code {
+  margin: 4px 0 8px;
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  user-select: all;
+  -webkit-user-select: all;
 }
-.skin-swatch.classic i:nth-child(3) {
-  background: #3390ec;
+.link-code:empty {
+  display: none;
+}
+.link-words {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin: 6px 0 10px;
+}
+.link-word {
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+.link-scan {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  margin: 10px 0 4px;
+  border-radius: var(--r);
+  background: #000;
+  object-fit: cover;
+}
+.link-confirm {
+  margin-top: 12px;
+}
+.link-warn {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 10px;
+  padding: 12px;
+  border: 1px solid rgba(240, 169, 64, 0.35);
+  border-radius: var(--r);
+  background: rgba(240, 169, 64, 0.1);
+  color: #f6d7a4;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.link-warn .ic {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--warn);
+}
+.link-warn b {
+  color: #ffe2b0;
+}
+.danger-keep {
+  margin: 0 0 8px;
+  padding: 4px 12px;
+  border-radius: var(--r);
+  background: var(--bg);
+}
+.danger-keep .hint {
+  margin: 8px 0 2px;
+}
+.danger-keep .check {
+  font-size: 13.5px;
+}
+@media (max-width: 380px) {
+  .link-code {
+    font-size: 22px;
+  }
+  .device-row {
+    flex-wrap: wrap;
+  }
+  .device-row > .btn {
+    margin-left: 50px;
+  }
 }

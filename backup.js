@@ -21,7 +21,7 @@
 // воскрешает комнату, чей tombstone новее её записи в бэкапе; локальный
 // источник tombstones — тот же localStorage-ключ 'zvDeletedRooms',
 // который ведёт chat.js при удалении.
-import { CONFIG, getWorkerBase } from './config.js?v=38';
+import { CONFIG, getWorkerBase } from './config.js?v=39';
 import {
   b64u,
   newSecret,
@@ -34,9 +34,9 @@ import {
   sealBackup,
   openBackup,
   backupIdHash,
-} from './crypto.js?v=38';
-import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=38';
-import { isRoomTombstoned } from './chat-transport.js?v=38';
+} from './crypto.js?v=39';
+import { kvGet, kvPut, kvAll, normalizeRoomRecord } from './store.js?v=39';
+import { isRoomTombstoned } from './chat-transport.js?v=39';
 import {
   getPersonal,
   ensurePersonal,
@@ -48,7 +48,7 @@ import {
   fpOfPubRaw,
   getRecoveryState,
   saveRecoveryState,
-} from './identity.js?v=38';
+} from './identity.js?v=39';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -192,6 +192,18 @@ async function renderBackupStatus() {
       statusEl.textContent = `Бэкап включён · обновлён ${when}. Фраза восстановления — единственный ключ: храните её офлайн.`;
     }
   } else {
+    // v39: на привязанном устройстве нет master-ключа — фразу создают на
+    // основном (она восстанавливает весь профиль, включая это устройство).
+    const p = await getPersonal().catch(() => null);
+    if (p?.linked) {
+      if (setupEl) setupEl.classList.add('hidden');
+      if (statusEl) {
+        statusEl.classList.remove('hidden');
+        statusEl.textContent =
+          'Это привязанное устройство профиля. Фразу восстановления включают на основном устройстве (где номер создан или восстановлен) — она восстанавливает весь профиль.';
+      }
+      return;
+    }
     if (statusEl) statusEl.classList.add('hidden');
     if (setupEl) setupEl.classList.remove('hidden');
   }
@@ -225,7 +237,13 @@ async function activateBackup() {
   if (!$('#backupConfirmCheck')?.checked) return bkNote('Подтвердите, что записали фразу.');
   try {
     const personal = await ensurePersonal();
-    if (!personal.masterPriv) throw new Error('master-ключ недоступен на этом устройстве');
+    if (!personal.masterPriv) {
+      throw new Error(
+        personal.linked
+          ? 'фразу восстановления создают на основном устройстве профиля (там, где номер создан или восстановлен) — это устройство привязанное'
+          : 'master-ключ недоступен на этом устройстве'
+      );
+    }
     const pair = await deriveRecoveryPair(pendingSeed);
     // Recovery-сертификат: master удостоверяет recovery-публичный ключ.
     const cert = await signDeviceCert(

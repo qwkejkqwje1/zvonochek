@@ -95,7 +95,7 @@ test('уровень ECMAScript по файлам', async (t) => {
     return t.skip('acorn не установлен (npm install)');
   }
   const level = (f) =>
-    f === 'zvdiag.js' ? [5, 'script'] : ['mqtt-lite.js', 'vendor/qrcode.js', 'skin.js'].includes(f) ? [2017, 'script'] : f === 'sw.js' ? [2020, 'script'] : [2020, 'module'];
+    f === 'zvdiag.js' ? [5, 'script'] : ['mqtt-lite.js', 'vendor/qrcode.js'].includes(f) ? [2017, 'script'] : f === 'sw.js' ? [2020, 'script'] : [2020, 'module'];
   for (const f of clientJs) {
     const [ecmaVersion, sourceType] = level(f);
     assert.doesNotThrow(() => acorn.parse(read(f), { ecmaVersion, sourceType }), `${f}: выше ES${ecmaVersion}`);
@@ -116,4 +116,30 @@ test('относительные ссылки в документации вед
     }
   }
   assert.deepEqual(broken, []);
+});
+
+// v39: правила доверия синхронизации устройств. Поведенчески их проверяет
+// e2e «профиль»; здесь — страховка от случайного удаления проверок при
+// правках (каждая закрывает конкретную атаку украденного устройства).
+test('devices.js: rekey, реестр и история принимаются только с подписями', () => {
+  const src = read('devices.js');
+  const fn = (name) => {
+    const i = src.search(new RegExp(`(async )?function ${name}\\(`));
+    assert.ok(i >= 0, `нет функции ${name}`);
+    return src.slice(i, src.indexOf('\n}\n', i));
+  };
+  // rekey от чужого устройства — только с подписью master/фразы, ДО разбора завёрток.
+  const hr = fn('handleRekey');
+  assert.ok(hr.indexOf('verifyRekeyAuth') >= 0 && hr.indexOf('verifyRekeyAuth') < hr.indexOf('wraps?.['), 'handleRekey без verifyRekeyAuth');
+  assert.match(fn('verifyRekeyAuth'), /masterCandidates\(\)\.includes[\s\S]*adminProofOk[\s\S]*K\.gid/);
+  assert.match(fn('doRekey'), /adminSigner[\s\S]*rekeyText\([\s\S]*post\('rekey', \{ wraps, auth/);
+  // dev:X — сертификат + подпись самого X; удаление — только с отзывом.
+  const ar = fn('acceptRemote');
+  assert.match(ar, /devItemOk/);
+  assert.match(ar, /out\['rev:' \+ dev\] && !isRevoked\(dev\)/);
+  assert.match(fn('devItemOk'), /certTrusted[\s\S]*verifyChatSig\(dev, v\.esig, devText\([\s\S]*mainText/);
+  // Запрос привязки несёт подпись записи реестра, основное её проверяет.
+  assert.match(src, /typeof req\.esig === 'string' &&\s*\(await verifyChatSig\(req\.devicePub, req\.esig/);
+  // История переписки — только от подключившего устройства и один раз.
+  assert.match(fn('processMsg'), /env\.dev === st\.addedBy && st\.histExpected && !st\.histDone/);
 });

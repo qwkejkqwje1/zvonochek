@@ -1,15 +1,25 @@
-import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=38';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=38';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh, rotatePersonal, encryptWithVault, decryptWithVault } from './identity.js?v=38';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, inboxRetire, InboxListener } from './inbox.js?v=38';
-import { kvGet, kvPut, kvAll, kvDel, wipeDatabase } from './store.js?v=38';
-import { Signaling } from './signaling.js?v=38';
-import { ROUTE_SHORT, readCounters, deriveSample, bridgeSample, CallRecorder, journalDigest, plural } from './callstats.js?v=38';
-import { renderLiveStats, renderCallsDashboard, renderCallsList, renderContactsList } from './stats-ui.js?v=38';
-import { anonName, randomAnonName } from './anon-names.js?v=38';
-import { VQ_CHOICES, deviceClass, captureTier, tierConstraints, rxCap, parseCap, videoEncoding, QLEVELS, audioCodecOrder, videoCodecOrder, CLASS_TEXT, sdpFirstCodec } from './media-policy.js?v=38';
+import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=39';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=39';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh, rotatePersonal, encryptWithVault, decryptWithVault, adminSigner, resetIdentityCache } from './identity.js?v=39';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, inboxRetire, InboxListener } from './inbox.js?v=39';
+import { kvGet, kvPut, kvAll, kvDel, wipeDatabase } from './store.js?v=39';
+import { Signaling } from './signaling.js?v=39';
+import { ROUTE_SHORT, readCounters, deriveSample, bridgeSample, CallRecorder, journalDigest, plural } from './callstats.js?v=39';
+import { renderLiveStats, renderCallsDashboard, renderCallsList, renderContactsList } from './stats-ui.js?v=39';
+import { anonName, randomAnonName } from './anon-names.js?v=39';
+import {
+  startDevices,
+  hasOtherDevices,
+  isLinkedDevice,
+  unlinkSelf,
+  rotationCandidates,
+  rotateWithDevices,
+  openAdminLink,
+  SYNC_SETTINGS,
+} from './devices.js?v=39';
+import { VQ_CHOICES, deviceClass, captureTier, tierConstraints, rxCap, parseCap, videoEncoding, QLEVELS, audioCodecOrder, videoCodecOrder, CLASS_TEXT, sdpFirstCodec } from './media-policy.js?v=39';
 
-export const APP_VERSION = 38;
+export const APP_VERSION = 39;
 export const APP_BUILD = '2026-11-01';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -24,7 +34,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=38').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=39').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -70,6 +80,12 @@ try {
     // 1080p@30, на телефоне — 720p, на слабом — 480p. 2K/720 — ручной выбор, не трогаем.
     if (localStorage.zvVQ === '1080') localStorage.zvVQ = 'auto';
     localStorage.zvSettingsV = '37';
+  }
+  if (Number(localStorage.zvSettingsV || 0) < 39) {
+    // v39: оформление «ZVON» (красное) удалено по решению владельца —
+    // остаётся одно, классическое; сохранённый выбор больше не нужен.
+    localStorage.removeItem('zvSkin');
+    localStorage.zvSettingsV = '39';
   }
 } catch {}
 
@@ -328,6 +344,21 @@ function beep(freq = 880, dur = 0.14) {
 // ---------- Маршрутизация и Главный экран ----------
 function route() {
   const params = new URLSearchParams(location.hash.slice(1));
+  // v39: QR нового устройства, открытый камерой телефона: #link=<код>.<bind>.
+  // Код — одноразовый доступ к запросу привязки: убираем его из адреса и
+  // истории сразу, обрабатывает devices.js на вкладке «Мой номер».
+  if (params.get('link')) {
+    const raw = location.hash;
+    try {
+      history.replaceState(null, '', location.pathname + location.search);
+    } catch {}
+    show('home');
+    setTimeout(() => {
+      document.querySelector('[data-home-tab="personal"]')?.click();
+      openAdminLink(raw).catch(() => {});
+    }, 50);
+    return;
+  }
   // v21: ссылка приватного чата (#chat=<seed>) — обрабатывает chat.js,
   // звонковая маршрутизация ниже её не касается.
   if (params.get('chat')) {
@@ -1386,6 +1417,7 @@ async function join() {
   $('#btnJoin').disabled = true;
   if (S.callNameOverride) S.callNameOverride = $('#name').value.trim() || S.callNameOverride;
   else localStorage.zvName = $('#name').value.trim();
+  syncLocal();
   try {
     [S.ice, S.room] = await Promise.all([loadIce(), deriveRoom(S.secret)]);
   } catch {
@@ -3556,16 +3588,7 @@ async function openSettingsModal() {
     }
   };
 
-  // v38: оформление (ZVON / классическое) и проверка рингтона.
-  const skinNow = window.__zvSkin?.get?.() || 'zvon';
-  b.querySelectorAll('input[name="sSkin"]').forEach((r) => {
-    r.checked = r.value === skinNow;
-    r.onchange = () => {
-      if (!r.checked) return;
-      window.__zvSkin?.set?.(r.value);
-      toast(r.value === 'classic' ? 'Классическое оформление включено' : 'Оформление ZVON включено');
-    };
-  });
+  // v38: проверка рингтона (v39: выбор оформления убран — одно оформление).
   const sTestRing = $('#sTestRing', b);
   if (sTestRing) {
     sTestRing.onclick = () => {
@@ -3824,7 +3847,10 @@ const newJournalKey = () => `${Date.now()}-${Math.random().toString(36).slice(2,
 function journalAdd(dir, name, outcome, extra = null, key = newJournalKey()) {
   const entry = { ts: Date.now(), dir, name: String(name || '').slice(0, 60), outcome, ...(extra || {}) };
   kvPut('calls', key, entry)
-    .then(() => renderCalls())
+    .then(() => {
+      renderCalls();
+      syncLocal();
+    })
     .catch((e) => console.warn('journal', e));
   return key;
 }
@@ -3922,7 +3948,72 @@ async function contactsSave() {
   } catch (e) {
     console.warn('contacts', e);
   }
+  syncLocal();
 }
+// v39: локальное изменение того, что едет на другие устройства профиля.
+function syncLocal() {
+  try {
+    window.dispatchEvent(new CustomEvent('zv-sync-local'));
+  } catch {}
+}
+// v39: контакты в синхронизации профиля (devices.js): секрет номера —
+// в зашифрованной комнате синхронизации, время последнего звонка — до дня
+// (чтобы каждый звонок не гонял синхронизацию).
+window.__zvAppSync = {
+  async contactsView() {
+    const book = await contactsLoad();
+    const out = {};
+    for (const [fp, c] of Object.entries(book.items)) {
+      if (!c || !validFp(fp) || !c.secretEnc) continue;
+      let secret;
+      try {
+        secret = await decryptWithVault(c.secretEnc);
+      } catch {
+        continue;
+      }
+      out['contact:' + fp] = {
+        name: c.name || '',
+        secret,
+        saved: !!c.saved,
+        addedAt: c.addedAt || 0,
+        day: Math.floor((c.lastAt || c.addedAt || 0) / 864e5),
+      };
+    }
+    return out;
+  },
+  async contactApply(fp, v) {
+    if (!validFp(fp)) return true;
+    const book = await contactsLoad();
+    if (v === null) {
+      if (book.items[fp]) {
+        delete book.items[fp];
+        await kvPut('identity', 'contacts', book).catch(() => {});
+        renderContacts().catch(() => {});
+      }
+      return true;
+    }
+    if (!v || !validSecret(v.secret)) return true;
+    if (S.personal && fp === S.personal.fp) return true;
+    const prev = book.items[fp];
+    let secretEnc = null;
+    if (prev?.secretEnc) {
+      try {
+        if ((await decryptWithVault(prev.secretEnc)) === v.secret) secretEnc = prev.secretEnc;
+      } catch {}
+    }
+    book.items[fp] = {
+      fp,
+      name: String(v.name || '').slice(0, 40),
+      secretEnc: secretEnc || (await encryptWithVault(v.secret)),
+      saved: !!v.saved,
+      addedAt: Number(v.addedAt) || 0,
+      lastAt: Math.max(prev?.lastAt || 0, (Number(v.day) || 0) * 864e5),
+    };
+    await kvPut('identity', 'contacts', book).catch(() => {});
+    renderContacts().catch(() => {});
+    return true;
+  },
+};
 /** Запомнить номер собеседника (save — сразу в контакты, с именем). */
 async function rememberPeer({ secret, fp, name = '', save = false }) {
   if (!validSecret(secret) || !validFp(fp)) return null;
@@ -4190,9 +4281,19 @@ function stopInboxListeners() {
   S.chatDialTopic = null;
 }
 
-async function changeNumber(say) {
+async function changeNumber(say, keep = []) {
   const prev = S.personal || (await getPersonal());
   if (!prev) throw new Error('номера ещё нет');
+  // v39: на подключённом устройстве master-ключа нет — номер меняет основное.
+  if (!(await adminSigner().catch(() => null))) {
+    throw new Error('сменить номер можно только на основном устройстве профиля (или после восстановления по фразе)');
+  }
+  if (hasOtherDevices()) {
+    return rotateWithDevices(() => changeNumberCore(prev, say), keep);
+  }
+  return changeNumberCore(prev, say);
+}
+async function changeNumberCore(prev, say) {
   const oldTopics = [];
   try {
     oldTopics.push((await deriveRoom(prev.secret)).topic);
@@ -4220,12 +4321,18 @@ async function changeNumber(say) {
   return msg;
 }
 
-async function wipeEverything(say, { backupToo = false } = {}) {
+async function wipeEverything(say, { backupToo = false, revoked = false, query = 'wiped=1' } = {}) {
   say('Стираем…');
   if (S.joined) await Promise.resolve(hangup()).catch(() => {});
   const tasks = [];
   const p = S.personal || (await getPersonal().catch(() => null));
-  if (p && getWorkerBase()) {
+  // v39: у профиля есть другие устройства — номер живёт на них: этот
+  // аппарат только отвязывается (сервер входящих забывает его одного),
+  // а не гасит номер целиком. Отвязанное (revoked) — уже отвязано.
+  const multi = !revoked && hasOtherDevices();
+  if (multi) {
+    tasks.push(unlinkSelf().catch(() => {}));
+  } else if (p && getWorkerBase() && !revoked) {
     tasks.push(
       (async () => {
         const topics = [];
@@ -4258,7 +4365,7 @@ async function wipeEverything(say, { backupToo = false } = {}) {
   try {
     for (const r of (await navigator.serviceWorker?.getRegistrations?.()) || []) await r.unregister();
   } catch {}
-  location.replace(location.pathname + '?wiped=1');
+  location.replace(location.pathname + '?' + query);
 }
 
 let dangerKind = null;
@@ -4274,15 +4381,52 @@ function openDanger(kind) {
   $('#wipeBackupOpt')?.classList.toggle('hidden', kind !== 'wipe');
   const wbt = $('#wipeBackupToo');
   if (wbt) wbt.checked = false;
+  const keepBox = $('#dangerKeepBox');
+  if (keepBox) {
+    keepBox.replaceChildren();
+    keepBox.classList.add('hidden');
+  }
   if (kind === 'number') {
     title.textContent = 'Сменить номер?';
     text.textContent =
       'Будет создана новая личная ссылка — новый крипто-номер. По старой ссылке до вас больше не дозвониться: сервер удалит её вместе с push-подписками и пропущенными. Новую ссылку отправьте заново тем, кому доверяете. Чаты, контакты и журнал останутся. Резервную копию (17 слов) нужно будет создать заново.';
     (go.querySelector('span') || go).textContent = 'Сменить номер';
+    // v39: другие устройства профиля — выбрать, какие получат новый номер
+    // (остальные отвязываются: как смена номера с потерянным телефоном).
+    const cands = hasOtherDevices() ? rotationCandidates() : [];
+    if (keepBox && cands.length) {
+      const head = document.createElement('p');
+      head.className = 'hint';
+      head.textContent = 'Новый номер получат отмеченные устройства. Снимите галочку с потерянного или чужого — оно будет отвязано.';
+      keepBox.append(head);
+      for (const c of cands) {
+        const lab = document.createElement('label');
+        lab.className = 'check';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.dataset.keepDev = c.dev;
+        lab.append(cb, ` ${c.label} · ключ …${c.dev.slice(-6)}`);
+        keepBox.append(lab);
+      }
+      keepBox.classList.remove('hidden');
+    }
+    if (isLinkedDevice() || dangerKind === 'number') {
+      adminSigner()
+        .then((a) => {
+          if (a || dangerKind !== 'number') return;
+          text.textContent =
+            'Номер профиля меняет основное устройство (на нём хранится master-ключ) или устройство, где введена фраза восстановления. Откройте «Мой номер» на основном устройстве.';
+          go.disabled = true;
+        })
+        .catch(() => {});
+    }
   } else {
     title.textContent = 'Стереть всё с этого устройства?';
-    text.textContent =
-      'Будут удалены личность и номер, все чаты и их ключи, контакты, журнал звонков, настройки, кэш приложения и push-подписка; сервер забудет ваш номер. Отменить нельзя. Если резервная копия включена и вы оставите её на сервере, личность и список чатов можно вернуть фразой из 17 слов.';
+    text.textContent = hasOtherDevices()
+      ? 'С этого устройства будут удалены личность, чаты и их ключи, контакты, журнал, настройки и кэш; устройство отвяжется от профиля. Номер продолжит работать на других ваших устройствах.' +
+        (isLinkedDevice() ? '' : ' Это основное устройство: после стирания подключать новые устройства и менять номер можно будет только с фразой восстановления.')
+      : 'Будут удалены личность и номер, все чаты и их ключи, контакты, журнал звонков, настройки, кэш приложения и push-подписка; сервер забудет ваш номер. Отменить нельзя. Если резервная копия включена и вы оставите её на сервере, личность и список чатов можно вернуть фразой из 17 слов.';
     (go.querySelector('span') || go).textContent = 'Стереть всё';
   }
   delete go.dataset.armed;
@@ -4313,7 +4457,10 @@ $('#dangerGo') &&
     go.disabled = true;
     try {
       if (dangerKind === 'number') {
-        const msg = await changeNumber(say);
+        const keep = [...document.querySelectorAll('#dangerKeepBox input[data-keep-dev]')]
+          .filter((x) => x.checked)
+          .map((x) => x.dataset.keepDev);
+        const msg = await changeNumber(say, keep);
         say(msg);
         toast('Номер сменён');
         setTimeout(() => $('#dangerBox')?.classList.add('hidden'), 9000);
@@ -4331,6 +4478,7 @@ $('#shareBack') &&
     try {
       localStorage.zvShareBack = e.target.checked ? '1' : '0';
     } catch {}
+    syncLocal();
   });
 
 async function refreshPersonalUI() {
@@ -4359,6 +4507,65 @@ async function refreshPersonalUI() {
   const sb = $('#shareBack');
   if (sb) sb.checked = shareBackOn();
   retryPendingRetire().catch(() => {});
+  // v39: синхронизация с другими устройствами профиля (если они есть).
+  startDevices().catch((e) => console.warn('devices', e));
+}
+
+// v39: события синхронизации профиля (devices.js).
+window.addEventListener('zv-identity-changed', () => {
+  // Номер сменён на основном устройстве (или это устройство только что
+  // подключено): новый секрет, новый topic, новый сертификат.
+  stopInboxListeners();
+  resetIdentityCache();
+  S.personal = null;
+  S.personalRoom = null;
+  refreshPersonalUI().catch(() => {});
+  window.ZVChat?.identityChanged?.();
+  window.__zvBackup?.render?.()?.catch?.(() => {});
+});
+window.addEventListener('zv-device-revoked', (e) => {
+  // Это устройство отвязано (с основного или само): стираем данные
+  // профиля локально; номер на сервере не трогаем — он живёт на других.
+  const by = e?.detail?.by || '';
+  toast(by === 'self' ? 'Устройство отвязано — стираем данные' : 'Это устройство отвязано от профиля — стираем данные', 4000);
+  setTimeout(() => {
+    wipeEverything(() => {}, { revoked: true, query: 'unlinked=1' }).catch(() => {});
+  }, by === 'self' ? 200 : 1500);
+});
+window.addEventListener('zv-settings-synced', () => {
+  const sb = $('#shareBack');
+  if (sb) sb.checked = shareBackOn();
+  const nm = $('#name');
+  if (nm && !S.joined && !S.callNameOverride && document.activeElement !== nm) nm.value = localStorage.zvName || '';
+});
+window.addEventListener('zv-journal-synced', () => {
+  renderCalls();
+});
+window.addEventListener('zv-devices-changed', () => {
+  // Новое устройство в профиле — честное уведомление на всех остальных
+  // (урок фишинга через привязку: владелец должен заметить чужое).
+  devicesSeenCheck().catch(() => {});
+});
+let knownDevs = null;
+async function devicesSeenCheck() {
+  const st = window.ZVDevices?.state?.();
+  if (!st?.items) {
+    if (knownDevs === null) knownDevs = new Set();
+    return;
+  }
+  const now = Object.keys(st.items).filter((k) => k.startsWith('dev:') && st.items[k] && !st.items[k].del);
+  if (knownDevs === null) {
+    knownDevs = new Set(now);
+    return;
+  }
+  const me = S.personal?.devicePub || (await getPersonal().catch(() => null))?.devicePub || '';
+  for (const k of now) {
+    if (knownDevs.has(k)) continue;
+    knownDevs.add(k);
+    if (k === 'dev:' + me || st.items[k]?.v?.addedBy === me) continue;
+    const label = st.items[k]?.v?.label || 'Устройство';
+    toast(`К вашему профилю подключено устройство: ${label}. Если это не вы — «Мой номер» → «Мои устройства» → «Отвязать».`, 8000);
+  }
 }
 
 function inboxStateHandler(m) {
@@ -4438,12 +4645,21 @@ async function handleIncomingRing({ ringId, blob, fromFp }) {
 async function handleChatDialRing({ ringId, blob, fromFp }) {
   if (S.incoming || S.joined || !S.personal || !S.chatDialTopic) return;
   try {
-    if (typeof blob !== 'string' || !blob.startsWith('ecd1.')) return;
+    if (typeof blob !== 'string' || !(blob.startsWith('ecd1.') || blob.startsWith('ecd2.'))) return;
     const env = JSON.parse(new TextDecoder().decode(b64u.dec(blob.slice(5))));
     const mine = await getChatDeviceEcdh();
     if (!mine?.ecdhPriv) return;
     const key = await chatDialKey(mine.ecdhPriv, b64u.dec(env.eph), S.chatDialTopic);
-    const payload = await openSealed(key, env.blob, S.chatDialTopic);
+    let payload = null;
+    // v39: 'ecd2.' — завёртки на все устройства человека; наша — одна из них.
+    for (const w of blob.startsWith('ecd2.') ? (Array.isArray(env.wraps) ? env.wraps.slice(0, 5) : []) : [env.blob]) {
+      try {
+        payload = await openSealed(key, w, S.chatDialTopic);
+      } catch {
+        payload = null;
+      }
+      if (payload) break;
+    }
     if (!payload) return;
     presentIncomingRing({ ringId, payload, fromFp, topic: S.chatDialTopic, viaChat: true });
   } catch {}
@@ -4888,14 +5104,31 @@ async function ringPersonalFromChat(masterPub, link, opts = {}) {
       callKind: opts.callKind || 'single',
     };
     const eph = await genP256KeyPair(['deriveBits'], 'ECDH');
-    const dialKey = await chatDialKey(eph.privateKey, b64u.dec(opts.ecdhPub), dialTopic);
-    const inner = await seal(dialKey, payload, dialTopic);
     const ephRaw = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
-    const blob =
-      'ecd1.' +
-      b64u.enc(
-        new TextEncoder().encode(JSON.stringify({ eph: b64u.enc(ephRaw), blob: inner }))
-      );
+    // v39: у человека несколько устройств — завёртка на каждое ('ecd2.'),
+    // звонят все сразу; одно устройство — прежний формат 'ecd1.'.
+    const pubs = [...new Set([opts.ecdhPub, ...(opts.ecdhPubs || [])].filter((x) => /^[A-Za-z0-9_-]{87}$/.test(x || '')))];
+    let blob;
+    if (pubs.length > 1) {
+      const wraps = [];
+      for (const pub of pubs.slice(0, 5)) {
+        const k = await chatDialKey(eph.privateKey, b64u.dec(pub), dialTopic);
+        wraps.push(await seal(k, payload, dialTopic));
+      }
+      blob = 'ecd2.' + b64u.enc(new TextEncoder().encode(JSON.stringify({ eph: b64u.enc(ephRaw), wraps })));
+      while (blob.length > 4096 && wraps.length > 1) {
+        wraps.pop();
+        blob = 'ecd2.' + b64u.enc(new TextEncoder().encode(JSON.stringify({ eph: b64u.enc(ephRaw), wraps })));
+      }
+    } else {
+      const dialKey = await chatDialKey(eph.privateKey, b64u.dec(opts.ecdhPub), dialTopic);
+      const inner = await seal(dialKey, payload, dialTopic);
+      blob =
+        'ecd1.' +
+        b64u.enc(
+          new TextEncoder().encode(JSON.stringify({ eph: b64u.enc(ephRaw), blob: inner }))
+        );
+    }
     const r = await inboxRing(getWorkerBase(), dialTopic, {
       ringId,
       fromFp,
@@ -5008,11 +5241,19 @@ window.__zvAppBooted = true;
   if (ringQ) setTimeout(() => refreshPersonalUI().catch(() => {}), 200);
   if (sp.get('tab') === 'calls') setTimeout(() => document.querySelector('[data-home-tab="calls"]')?.click(), 300);
   if (sp.has('wiped')) setTimeout(() => toast('Все данные ZVONochek на этом устройстве стёрты', 5000), 600);
-  if (sp.has('ring') || sp.has('act') || sp.has('tab') || sp.has('wiped')) {
+  if (sp.has('unlinked')) setTimeout(() => toast('Устройство отвязано от профиля, данные ZVONochek на нём стёрты', 6000), 600);
+  if (sp.has('linked')) {
+    // Вкладку «Мой номер» открывает сохранённый выбор (devices.js кладёт его
+    // перед перезагрузкой): отложенный клик перебивал бы уже нажатую вкладку.
+    setTimeout(() => toast('Устройство подключено к профилю: тот же номер, чаты и контакты', 6000), 400);
+  }
+  if (sp.has('ring') || sp.has('act') || sp.has('tab') || sp.has('wiped') || sp.has('unlinked') || sp.has('linked')) {
     sp.delete('ring');
     sp.delete('act');
     sp.delete('tab');
     sp.delete('wiped');
+    sp.delete('unlinked');
+    sp.delete('linked');
     const q = sp.toString();
     try {
       history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);

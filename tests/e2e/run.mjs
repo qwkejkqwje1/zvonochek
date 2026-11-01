@@ -2,7 +2,9 @@
 // Борис) общаются через локальный Worker. Проверяются чат (ник, сообщения,
 // ответ, реакция, список комнат), звонок (соединение, статистика,
 // журнал) и v38-сценарий «номер» (дозвон по личной ссылке, контакт из
-// журнала, смена номера, стирание данных). Скриншоты — в tests/e2e/shots при SHOTS=1.
+// журнала, смена номера, стирание данных) и v39-сценарий «профиль» (второе
+// устройство по коду: тот же номер, чаты, контакты, свои сообщения — «мои»,
+// отвязка). Скриншоты — в tests/e2e/shots при SHOTS=1.
 //
 //   npm run worker:dev            # локальный Worker на :8787 (отдельный терминал)
 //   npm run e2e                   # CHROMIUM_PATH=… — свой Chromium, если нужно
@@ -10,7 +12,7 @@
 // Переменные: WORKER_URL (по умолчанию http://127.0.0.1:8787), PORT сайта
 // (8765 — этот Origin разрешён воркеру в «npm run worker:dev»),
 // VIEWPORTS (390x844,1440x900), CHROMIUM_PATH, SHOTS=1, ONLY=<сценарий>
-// (чат | звонок | номер), DEBUG=1 — консоль страниц в вывод.
+// (чат | звонок | номер | профиль), DEBUG=1 — консоль страниц в вывод.
 import http from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -253,6 +255,189 @@ async function numberScenario(browser, base, vp, errors) {
   await B.context().close();
 }
 
+// v39: второе устройство того же человека. Анна (A) с номером, чатом с
+// Борисом (C) и контактом подключает ноутбук (A2) по 12-значному коду.
+async function linkScenario(browser, base, vp, errors) {
+  const mkPersonal = async (p) => {
+    await p.click('[data-home-tab="personal"]');
+    await p.click('#btnCreatePersonal');
+    await p.waitForSelector('#personalMain:not(.hidden)');
+    assert.ok(await until(async () => /доступны/.test((await p.textContent('#personalStatus')) || ''), 15000), 'Inbox не подключился');
+    return p.inputValue('#personalLink');
+  };
+  const send = async (p, text) => {
+    await p.fill('#chatInput', text);
+    await p.press('#chatInput', 'Enter');
+    await p.waitForTimeout(300);
+  };
+  const openFirstRoom = async (p) => {
+    await p.click('[data-home-tab="chats"]');
+    await p.waitForSelector('#chatRoomsList .tg-chat-item', { timeout: 20000 });
+    await p.locator('#chatRoomsList .tg-chat-item').first().click();
+    await p.waitForSelector('#chatInput', { state: 'visible', timeout: 20000 });
+  };
+  const rowCount = (p, sel, text) => p.locator(sel, { hasText: text }).count();
+  // Из чата на главную: на телефоне — «назад», на широком экране — домой из сайдбара
+  const leaveChat = (p) => p.click(vp[0] < 920 ? '#chatBack' : '#chatSidebarHomeBtn');
+  const t0 = Date.now();
+  const step = (name) => process.env.DEBUG === '1' && console.log(`  · ${((Date.now() - t0) / 1000).toFixed(1)} с: ${name}`);
+
+  const A = await profile(browser, base, vp, 'A', errors);
+  const linkA = await mkPersonal(A);
+  const C = await profile(browser, base, vp, 'C', errors);
+  const linkC = await mkPersonal(C);
+  step('номера созданы');
+  await A.click('[data-home-tab="chats"]');
+  await A.click('#btnCreateChat');
+  await A.waitForSelector('#chatNickBox:not(.hidden)');
+  await A.fill('#chatNickInput', 'Анна');
+  await A.click('#chatNickSave');
+  await A.waitForSelector('.tg-chat-welcome-acts');
+  await send(A, 'Сообщение с телефона');
+  await C.goto(A.url());
+  await C.waitForSelector('#chatNickBox:not(.hidden)');
+  await C.fill('#chatNickInput', 'Борис');
+  await C.click('#chatNickSave');
+  assert.ok(await until(() => rowCount(C, '.chat-msg-row:not(.mine)', 'Сообщение с телефона').then((n) => n >= 1)), 'Борис не получил сообщение');
+  await send(C, 'Привет, Анна');
+  assert.ok(await until(() => rowCount(A, '.chat-msg-row:not(.mine)', 'Привет, Анна').then((n) => n >= 1)), 'Анна не получила ответ');
+  await leaveChat(A);
+  await A.click('[data-home-tab="calls"]');
+  await A.click('#btnContactAdd');
+  await A.fill('#contactAddName', 'Борис');
+  await A.fill('#contactAddLink', linkC);
+  await A.click('#contactAddSave');
+  assert.ok(await until(async () => /Борис/.test((await A.textContent('#contactsList')) || ''), 5000), 'контакт не сохранился');
+
+  step('чат и контакт готовы');
+  // Новое устройство показывает код и контрольные слова
+  const A2 = await profile(browser, base, vp, 'A2', errors);
+  await A2.click('[data-home-tab="personal"]');
+  await A2.click('#btnLinkNew');
+  assert.ok(await until(async () => /\d{4}/.test((await A2.textContent('#linkNewCode')) || ''), 20000), 'нет кода привязки');
+  await A2.evaluate(() => {
+    window.__e2ePreLink = 1; // исчезнет при перезагрузке после привязки
+  });
+  const code = (await A2.textContent('#linkNewCode')).trim();
+  const words = (await A2.textContent('#linkNewWords')).trim();
+  assert.ok(words.length > 3, 'нет контрольных слов');
+  await shot(A2, 'link-new', vp);
+  // Основное: «Подключить устройство» → код → сверка слов → подтверждение
+  await A.click('[data-home-tab="personal"]');
+  await A.waitForSelector('#devicesCard:not(.hidden)');
+  await A.click('#btnLinkDevice');
+  await A.fill('#linkCodeInput', code);
+  await A.click('#btnLinkFind');
+  await A.waitForSelector('#linkConfirmBox:not(.hidden)', { timeout: 20000 });
+  assert.equal((await A.textContent('#linkReqWords')).trim(), words, 'контрольные слова не совпали');
+  await shot(A, 'link-confirm', vp);
+  await A.click('#btnLinkConfirm');
+  step('подтверждено на основном');
+  // A2 получает профиль, историю и перезагружается (?linked=1)
+  const linked = await until(
+    () =>
+      A2.evaluate(
+        () => !window.__e2ePreLink && !!window.__zvAppBooted && !!window.__zvChatBooted && !!window.ZVDevices?.isLinkedDevice?.()
+      ).catch(() => false),
+    150000,
+    1000
+  );
+  assert.ok(linked, 'новое устройство не подключилось: ' + ((await A2.textContent('#linkNewStatus').catch(() => '')) || ''));
+  step('второе устройство перезагрузилось');
+  await A2.click('[data-home-tab="personal"]');
+  await A2.waitForSelector('#personalMain:not(.hidden)');
+  assert.equal(await A2.inputValue('#personalLink'), linkA, 'на втором устройстве другой номер');
+  assert.ok(await until(() => A2.locator('#devicesList .device-row').count().then((n) => n === 2), 20000), 'в списке устройств нет двух строк');
+  assert.ok(await until(() => A.locator('#devicesList .device-row').count().then((n) => n === 2), 20000), 'основное не видит второе устройство');
+  await shot(A2, 'devices', vp);
+  await shot(A, 'devices-main', vp);
+  // Контакт приехал
+  await A2.click('[data-home-tab="calls"]');
+  assert.ok(await until(async () => /Борис/.test((await A2.textContent('#contactsList')) || ''), 30000), 'контакт не синхронизировался');
+  // Чат приехал, история — своя «моя», чужая — чужая
+  await openFirstRoom(A2);
+  assert.ok(await until(() => rowCount(A2, '.chat-msg-row.mine', 'Сообщение с телефона').then((n) => n >= 1), 30000), 'своё старое сообщение не «моё» на втором устройстве');
+  assert.ok(await until(() => rowCount(A2, '.chat-msg-row:not(.mine)', 'Привет, Анна').then((n) => n >= 1), 30000), 'нет сообщения Бориса на втором устройстве');
+  step('история на втором устройстве');
+  await send(A2, 'Сообщение с ноутбука');
+  await shot(A2, 'link-chat', vp);
+  // У Анны на телефоне — «моё»; у Бориса — от Анны, устройство подтверждено профилем
+  await openFirstRoom(A);
+  assert.ok(await until(() => rowCount(A, '.chat-msg-row.mine', 'Сообщение с ноутбука').then((n) => n >= 1), 30000), 'сообщение со второго устройства не «моё» на основном');
+  assert.ok(await until(() => rowCount(C, '.chat-msg-row:not(.mine)', 'Сообщение с ноутбука').then((n) => n >= 1), 30000), 'Борис не получил сообщение со второго устройства');
+  assert.ok(
+    await until(async () => /Анна: новое устройство \(подтверждено/.test((await C.textContent('#chatMessages')) || ''), 15000),
+    'у Бориса новое устройство Анны не опознано как её'
+  );
+  assert.equal(await C.textContent('#chatRoomTitle'), 'Анна', 'у Бориса чат перестал быть личным');
+  await shot(C, 'link-peer', vp);
+  // Смена номера на основном: отмеченное второе устройство получает новый
+  await leaveChat(A);
+  await A.click('[data-home-tab="personal"]');
+  step('сообщения сошлись, меняем номер');
+  if (process.env.DEBUG === '1') {
+    await A2.evaluate(() => {
+      window.__e2eEv = [];
+      for (const n of ['zv-inbox-authfail', 'zv-inbox-revoked', 'zv-identity-changed', 'zv-devices-changed']) {
+        window.addEventListener(n, () => window.__e2eEv.push(n + '@' + Date.now()));
+      }
+    });
+  }
+  await A.click('#btnChangeNumber');
+  assert.ok(await isShown(A, '#dangerKeepBox'), 'нет выбора устройств при смене номера');
+  await shot(A, 'rotate-keep', vp);
+  await A.click('#dangerGo');
+  await A.click('#dangerGo');
+  assert.ok(await until(async () => /Готово/.test((await A.textContent('#dangerNote')) || ''), 30000), 'номер не сменился: ' + (await A.textContent('#dangerNote')));
+  step('номер сменён на основном');
+  const linkAnew = await A.inputValue('#personalLink');
+  assert.notEqual(linkAnew, linkA, 'ссылка не изменилась');
+  await leaveChat(A2);
+  await A2.click('[data-home-tab="personal"]');
+  assert.ok(
+    await until(async () => (await A2.inputValue('#personalLink').catch(() => '')) === linkAnew, 90000, 1000),
+    'второе устройство не получило новый номер'
+  );
+  step('новый номер на втором устройстве');
+  assert.ok(await until(async () => /доступны/.test((await A2.textContent('#personalStatus')) || ''), 20000), 'второе устройство не слушает новый номер');
+  step('новый номер на обоих, звоним');
+  // Звонок на номер звонит на обоих устройствах; ответ на одном гасит другое
+  const inCall = (p) => p.evaluate(() => !document.querySelector('#call').classList.contains('hidden'));
+  await C.goto(linkAnew);
+  await C.waitForSelector('#prejoin:not(.hidden)');
+  await C.waitForSelector('#callOwnerBox:not(.hidden)');
+  await C.click('#btnCallOwner');
+  await A.waitForSelector('#incomingCall:not(.hidden)', { timeout: 20000 });
+  await A2.waitForSelector('#incomingCall:not(.hidden)', { timeout: 20000 });
+  await shot(A2, 'link-incoming', vp);
+  await A2.click('#btnAccept');
+  assert.ok(await until(async () => !(await isShown(A, '#incomingCall')), 15000), 'основное звонит после ответа на втором');
+  assert.ok(await until(async () => (await isShown(A2, '#quality')) && (await isShown(C, '#quality')), 40000), 'звонок на второе устройство не соединился');
+  await A2.waitForTimeout(1500);
+  await C.click('#cHang');
+  await A2.waitForTimeout(1500);
+  if (await inCall(A2)) await A2.click('#cHang');
+  await A2.waitForTimeout(800);
+  step('звонок принят на втором, отвязываем');
+  if (process.env.DEBUG === '1') console.log('  A2 events:', await A2.evaluate(() => (window.__e2eEv || []).map((x) => x.replace(/@(\d+)/, (m, t) => '@' + ((t - performance.timeOrigin) / 1000).toFixed(1)))).catch(() => 'reloaded'));
+  // Отвязка: «Отвязать» × 2 на основном → второе стирает себя
+  const unlinkBtn = A.locator('#devicesList .device-row:not(.self) button');
+  await unlinkBtn.click();
+  await unlinkBtn.click();
+  assert.ok(await until(async () => /отвязано/.test((await A.textContent('#devicesNote')) || ''), 30000), 'отвязка не прошла: ' + (await A.textContent('#devicesNote')));
+  const wiped = await until(
+    () => A2.evaluate(() => !!window.__zvAppBooted && localStorage.getItem('zvWorkerUrl') === null).catch(() => false),
+    90000,
+    1000
+  );
+  assert.ok(wiped, 'отвязанное устройство не стёрло данные');
+  assert.equal(await A.locator('#devicesList .device-row').count(), 1, 'отвязанное устройство осталось в списке');
+  assert.equal(await A.inputValue('#personalLink'), linkAnew, 'номер основного изменился после отвязки');
+  await A.context().close();
+  await A2.context().close();
+  await C.context().close();
+}
+
 // ---------- запуск ----------
 const health = await fetch(WORKER + '/health').then((r) => r.json()).catch(() => null);
 if (!health?.ok) {
@@ -269,7 +454,7 @@ const browser = await chromium.launch({
 let failed = 0;
 for (const vp of VIEWPORTS) {
   let list = [['чат', chatScenario], ['звонок', callScenario]];
-  if (vp === VIEWPORTS[0]) list.push(['номер', numberScenario]);
+  if (vp === VIEWPORTS[0]) list.push(['номер', numberScenario], ['профиль', linkScenario]);
   if (process.env.ONLY) list = list.filter(([n]) => n === process.env.ONLY);
   for (const [name, fn] of list) {
     const errors = [];
@@ -281,6 +466,14 @@ for (const vp of VIEWPORTS) {
     } catch (e) {
       failed++;
       console.log(`✖ ${name} ${vp.join('×')}: ${e.message}`);
+      if (SHOTS) {
+        for (const [i, ctx] of browser.contexts().entries()) {
+          for (const [j, pg] of ctx.pages().entries()) {
+            await pg.screenshot({ path: path.join(SHOTS, `fail-${name}-${i}${j}.png`) }).catch(() => {});
+          }
+        }
+      }
+      for (const ctx of browser.contexts()) await ctx.close().catch(() => {});
     }
   }
 }

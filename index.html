@@ -6,7 +6,7 @@
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#121216">
+<meta name="theme-color" content="#17212b">
 <meta name="description" content="ZVONochek — личный мессенджер для своих: зашифрованные чаты и звонки в браузере, без регистрации и номера телефона.">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -18,8 +18,7 @@
 <link rel="icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=38">
-<script src="skin.js?v=38"></script>
+<link rel="stylesheet" href="style.css?v=39">
 </head>
 <body>
 
@@ -33,28 +32,6 @@
       <stop offset="0" stop-color="#6cc3ff"/><stop offset=".55" stop-color="#3390ec"/><stop offset="1" stop-color="#2463c8"/>
     </linearGradient>
   </defs>
-  <defs>
-    <linearGradient id="zvGrad" x1="8" y1="0" x2="40" y2="48" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ff5257"/><stop offset=".5" stop-color="#e3262c"/><stop offset="1" stop-color="#9e1217"/>
-    </linearGradient>
-    <filter id="zvGrain" x="0" y="0" width="100%" height="100%">
-      <feTurbulence type="fractalNoise" baseFrequency="1.15" numOctaves="2" seed="7" result="t"/>
-      <feColorMatrix in="t" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1.1 -0.42" result="m"/>
-      <feComposite in="m" in2="SourceGraphic" operator="in"/>
-    </filter>
-  </defs>
-  <symbol id="i-logo-zvon" viewBox="0 0 48 48">
-    <rect x="1" y="1" width="46" height="46" rx="13" fill="url(#zvGrad)"/>
-    <rect x="1" y="1" width="46" height="46" rx="13" fill="#000" filter="url(#zvGrain)" opacity=".4"/>
-    <g transform="rotate(-12 24 25)">
-      <path d="M24 10.2c-5.4 0-9.3 4.3-9.3 9.7v5.5l-3 4.5h24.6l-3-4.5v-5.5c0-5.4-3.9-9.7-9.3-9.7Z" fill="#fff"/>
-      <circle cx="24" cy="9.5" r="1.8" fill="#fff"/>
-      <circle cx="24" cy="33.2" r="2.9" fill="#fff"/>
-    </g>
-    <g fill="none" stroke="#fff" stroke-width="2.3" stroke-linecap="round">
-      <path d="M36.4 14.6a10.5 10.5 0 0 1 2.7 7.2"/><path d="M11.4 14.6a10.5 10.5 0 0 0-2.7 7.2"/>
-    </g>
-  </symbol>
   <symbol id="i-logo" viewBox="0 0 48 48">
     <rect x="1" y="1" width="46" height="46" rx="14" fill="url(#brandGrad)"/>
     <path d="M24 11c-5 0-8.8 3.9-8.8 8.8v5.4l-2.5 4.3h22.6l-2.5-4.3v-5.4c0-4.9-3.8-8.8-8.8-8.8Z" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
@@ -107,6 +84,8 @@
   <symbol id="i-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10v4M7 7v10M11 4v16M15 7v10M19 10v4"/></symbol>
   <symbol id="i-flip-cam" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3l-2-2H9L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><path d="M15 13a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/><path d="M17 11l1.5-1.5L20 11"/></symbol>
   <symbol id="i-smartphone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2.5"/><path d="M12 18h.01"/><path d="M12 6v6m-2.5-2l2.5 2.5 2.5-2.5"/></symbol>
+  <symbol id="i-phone-dev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18.5h2"/></symbol>
+  <symbol id="i-laptop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="11" rx="1.8"/><path d="M2 19h20"/></symbol>
   <symbol id="i-leaf" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.4 19 2c1 2 2 4.2 2 8 0 5.5-4.8 10-10 10Z"/><path d="M2 21c0-3 1.8-5.4 5.1-6C9.5 14.5 12 13 13 12"/></symbol>
   <symbol id="i-unlock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 7.4-2.1"/><circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none"/></symbol>
   <symbol id="i-phone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 16.4v3a2 2 0 0 1-2.2 2 19.6 19.6 0 0 1-8.6-3 19.3 19.3 0 0 1-6-6 19.6 19.6 0 0 1-3-8.6A2 2 0 0 1 3.7 1.6h3a2 2 0 0 1 2 1.7c.13.96.36 1.9.7 2.8a2 2 0 0 1-.45 2.1L7.7 9.4a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.45c.9.34 1.84.57 2.8.7a2 2 0 0 1 1.7 2z"/></symbol>
@@ -133,10 +112,10 @@
     <aside class="side" aria-label="ZVONochek">
       <header class="appbar">
         <div class="brand">
-          <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use class="logo-classic" href="#i-logo"/><use class="logo-zvon" href="#i-logo-zvon"/></svg>
+          <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use href="#i-logo"/></svg>
           <div class="brand-text">
-            <b class="brand-name" aria-label="ZVONochek"><span class="bn-zvon">ZVON</span><span class="bn-ochek">ochek</span></b>
-            <span class="brand-sub"><svg class="ic"><use href="#i-lock"/></svg> сквозное шифрование · <span data-ver>v38</span></span>
+            <b class="brand-name">ZVONochek</b>
+            <span class="brand-sub"><svg class="ic"><use href="#i-lock"/></svg> сквозное шифрование · <span data-ver>v39</span></span>
           </div>
         </div>
         <div class="appbar-actions">
@@ -257,6 +236,20 @@
               <p class="hint">Личная ссылка, по которой вам звонят с рингтоном — как по номеру телефона, но без аккаунтов и SIM-карт.</p>
               <button id="btnCreatePersonal" class="btn primary block"><span>Создать мою ссылку</span></button>
             </div>
+            <div id="linkNewCard" class="card">
+              <b class="card-title">Номер уже есть на другом устройстве?</b>
+              <p class="hint">Подключите это устройство к своему профилю: тот же номер, чаты, контакты и журнал — как «Связанные устройства» в Signal. Синхронизация сквозная, сервер видит только шифротекст.</p>
+              <button id="btnLinkNew" class="btn small"><svg class="ic"><use href="#i-smartphone"/></svg><span>Подключить к моему профилю</span></button>
+              <div id="linkNewBox" class="link-box hidden">
+                <p class="hint">На основном устройстве: «Мой номер» → «Мои устройства» → «Подключить устройство». Отсканируйте QR или введите код.</p>
+                <div id="linkNewQr" class="link-qr" aria-label="QR-код подключения"></div>
+                <div id="linkNewCode" class="link-code" aria-label="Код подключения"></div>
+                <p class="hint">Контрольные слова — должны совпасть на обоих экранах:</p>
+                <div id="linkNewWords" class="link-words"></div>
+                <p id="linkNewStatus" class="status-line"></p>
+                <button id="btnLinkNewCancel" class="btn small ghost"><span>Отмена</span></button>
+              </div>
+            </div>
             <div id="restoreBox" class="card">
               <b class="card-title">Восстановить по фразе</b>
               <p class="hint">17 слов, которые вы записали при включении резервной копии. Вернутся личность и список чатов.</p>
@@ -289,6 +282,35 @@
               <button id="btnBackupToggle" class="list-item"><svg class="ic"><use href="#i-shield"/></svg><span>Резервная копия (17 слов)</span></button>
               <button id="btnChangeNumber" class="list-item"><svg class="ic"><use href="#i-refresh"/></svg><span>Сменить номер (новая ссылка)</span></button>
             </div>
+            <div id="devicesCard" class="card devices-card hidden">
+              <div class="devices-head"><b class="card-title">Мои устройства</b><span id="devicesSyncState" class="pill hidden"></span></div>
+              <ul id="devicesList" class="devices-list"></ul>
+              <div id="devicesExcluded" class="devices-excluded hidden"></div>
+              <p id="devicesHint" class="hint hidden"></p>
+              <button id="btnLinkDevice" class="btn small primary hidden"><svg class="ic"><use href="#i-plus"/></svg><span>Подключить устройство</span></button>
+              <div id="linkAdminBox" class="link-box hidden">
+                <p class="hint">На новом устройстве откройте ZVONochek → «Мой номер» → «Подключить к моему профилю». Отсканируйте его QR или введите 12 цифр.</p>
+                <div class="link-row">
+                  <input id="linkCodeInput" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="1234 5678 9012" aria-label="Код с экрана нового устройства">
+                  <button id="btnLinkFind" class="btn small primary"><span>Найти</span></button>
+                  <button id="btnLinkScan" class="btn small" aria-label="Сканировать QR"><svg class="ic"><use href="#i-qr"/></svg></button>
+                </div>
+                <video id="linkScanVideo" class="link-scan hidden" playsinline muted></video>
+                <div id="linkConfirmBox" class="link-confirm hidden">
+                  <p class="link-warn"><svg class="ic"><use href="#i-warning"/></svg><span><b>Подключайте только своё устройство, которое сейчас у вас в руках.</b> Никогда не вводите код и не сканируйте QR, присланные кем-то: в 2025 году так угоняли переписку в Signal (атаки, которые Google связывает с группами ГРУ). Подключённое устройство получит ваш номер, чаты и контакты.</span></p>
+                  <p class="hint">Устройство: <b id="linkReqLabel"></b></p>
+                  <p class="hint">Контрольные слова — сверьте с экраном нового устройства:</p>
+                  <div id="linkReqWords" class="link-words"></div>
+                  <label class="check"><input type="checkbox" id="linkHistory" checked> Перенести историю переписки (последние 45 дней)</label>
+                  <div class="btn-row">
+                    <button id="btnLinkConfirm" class="btn small primary"><span>Слова совпали — подключить</span></button>
+                    <button id="btnLinkDecline" class="btn small ghost"><span>Отклонить</span></button>
+                  </div>
+                </div>
+                <p id="linkAdminNote" class="note"></p>
+              </div>
+              <p id="devicesNote" class="note"></p>
+            </div>
             <div id="backupBox" class="card hidden">
               <b class="card-title">Фраза восстановления</b>
               <p class="hint">17 слов восстанавливают личность и список чатов на новом устройстве. Сервер хранит только зашифрованную копию.</p>
@@ -315,6 +337,7 @@
           <div id="dangerBox" class="card danger-card hidden" role="alertdialog" aria-labelledby="dangerTitle">
             <b id="dangerTitle" class="card-title"></b>
             <p id="dangerText" class="hint"></p>
+            <div id="dangerKeepBox" class="danger-keep hidden"></div>
             <label id="wipeBackupOpt" class="check danger-opt hidden"><input type="checkbox" id="wipeBackupToo"> Удалить и резервную копию на сервере (тогда фраза из 17 слов больше ничего не восстановит)</label>
             <div class="btn-row">
               <button id="dangerGo" class="btn small danger"><span>Да</span></button>
@@ -329,7 +352,7 @@
               <span><svg class="ic"><use href="#i-lock"/></svg>E2EE</span>
               <span><svg class="ic"><use href="#i-wifi"/></svg>5 каналов связи</span>
             </div>
-            <p class="about-ver">ZVONochek <b data-ver>v38</b> · сборка <span data-build>dev</span></p>
+            <p class="about-ver">ZVONochek <b data-ver>v39</b> · сборка <span data-build>dev</span></p>
           </div>
         </div>
       </div>
@@ -343,8 +366,7 @@
 
     <main class="detail detail-welcome" aria-hidden="true">
       <div class="welcome">
-        <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use class="logo-classic" href="#i-logo"/><use class="logo-zvon" href="#i-logo-zvon"/></svg>
-        <b class="welcome-word" aria-hidden="true"><span class="bn-zvon">ZVON</span><span class="bn-ochek">ochek</span></b>
+        <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><use href="#i-logo"/></svg>
         <b>Выберите чат или начните звонок</b>
         <span>Ключи шифрования живут только на ваших устройствах. Если основной сервер недоступен, сообщения и сигнал звонка идут через резервные каналы.</span>
       </div>
@@ -589,7 +611,7 @@
     <header class="side-header">
       <button id="btnBackHome" class="icon-btn" title="На главную" aria-label="На главную"><svg class="ic"><use href="#i-arrow-left"/></svg></button>
       <b>Звонок</b>
-      <span class="ver-tag" data-ver>v38</span>
+      <span class="ver-tag" data-ver>v39</span>
     </header>
 
     <div class="preview-col">
@@ -703,7 +725,7 @@
           <button id="btnForceBridge" class="btn small" title="Передавать голос через сигнал, не дожидаясь WebRTC/TURN"><svg class="ic"><use href="#i-shield"/></svg><span>Мост без TURN</span></button>
           <button id="btnDiag" class="btn small ghost"><svg class="ic"><use href="#i-diag"/></svg><span>Диагностика</span></button>
         </div>
-        <div class="conn-ver">ZVONochek <span data-ver>v38</span></div>
+        <div class="conn-ver">ZVONochek <span data-ver>v39</span></div>
       </div>
     </div>
 
@@ -824,12 +846,7 @@
   <h3>Настройки</h3>
 
   <div class="settings-sec">
-    <h4>Оформление</h4>
-    <div class="skin-row" role="radiogroup" aria-label="Оформление">
-      <label class="skin-opt"><input type="radio" name="sSkin" value="zvon"><span class="skin-swatch zvon"><i></i><i></i><i></i></span><span>ZVON</span></label>
-      <label class="skin-opt"><input type="radio" name="sSkin" value="classic"><span class="skin-swatch classic"><i></i><i></i><i></i></span><span>Классическое</span></label>
-    </div>
-    <p class="sec-hint">ZVON — новое фирменное оформление. «Классическое» возвращает прежний вид; переключается сразу, данные не затрагиваются.</p>
+    <h4>Рингтон</h4>
     <div class="btn-row">
       <button type="button" id="sTestRing" class="btn small"><svg class="ic"><use href="#i-bell"/></svg><span>Проверить рингтон</span></button>
     </div>
@@ -1006,12 +1023,12 @@
 
 <noscript><p class="noscript">Для ZVONochek нужен JavaScript.</p></noscript>
 
-<script src="mqtt-lite.js?v=38"></script>
-<script src="vendor/qrcode.js?v=38"></script>
-<script src="zvdiag.js?v=38"></script>
-<script type="module" src="app.js?v=38"></script>
-<script type="module" src="group.js?v=38"></script>
-<script type="module" src="chat.js?v=38"></script>
-<script type="module" src="backup.js?v=38"></script>
+<script src="mqtt-lite.js?v=39"></script>
+<script src="vendor/qrcode.js?v=39"></script>
+<script src="zvdiag.js?v=39"></script>
+<script type="module" src="app.js?v=39"></script>
+<script type="module" src="group.js?v=39"></script>
+<script type="module" src="chat.js?v=39"></script>
+<script type="module" src="backup.js?v=39"></script>
 </body>
 </html>

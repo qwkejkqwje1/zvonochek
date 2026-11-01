@@ -62,7 +62,7 @@
 //     цепочки — транзитом через 'drx'); при живой DR-сессии контент не
 //     в режиме d1 от собеседника не принимается (анти-downgrade);
 //   · сообщения ≤v30 расшифровываются статичными ключами, как раньше.
-import { CONFIG, getWorkerBase } from './config.js?v=38';
+import { CONFIG, getWorkerBase } from './config.js?v=39';
 import {
   b64u,
   newSecret,
@@ -121,7 +121,7 @@ import {
   genP256KeyPair,
   chainKeyAt,
   chainAdvanceSend,
-} from './crypto.js?v=38';
+} from './crypto.js?v=39';
 import {
   kvGet,
   kvPut,
@@ -131,10 +131,10 @@ import {
   kvDelPrefix,
   kvDelMany,
   normalizeRoomRecord,
-} from './store.js?v=38';
-import { coalesced } from './coalesce.js?v=38';
-import { plural } from './callstats.js?v=38';
-import { anonName, randomAnonName } from './anon-names.js?v=38';
+} from './store.js?v=39';
+import { coalesced } from './coalesce.js?v=39';
+import { plural } from './callstats.js?v=39';
+import { anonName, randomAnonName } from './anon-names.js?v=39';
 import {
   getChatDevice,
   getChatDeviceEcdh,
@@ -143,7 +143,9 @@ import {
   verifyChatSig,
   encryptWithVault,
   decryptWithVault,
-} from './identity.js?v=38';
+  verifyDeviceCertClient,
+} from './identity.js?v=39';
+import { personKeyOf, groupPersons } from './sync-core.js?v=39';
 import {
   ChatTransportManager,
   FallbackTransport,
@@ -157,7 +159,7 @@ import {
   aggregateGcallState,
   gcallEventsFromEntries,
   shouldSweepRoom,
-} from './chat-transport.js?v=38';
+} from './chat-transport.js?v=39';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();
@@ -241,9 +243,20 @@ const saveRoom = (rec) => {
   const prevFp = backupFpCache.get(rec.roomId);
   backupFpCache.set(rec.roomId, fp);
   if (prevFp !== undefined && prevFp !== fp) notifyRoomsChanged();
+  // v39: то, что едет на другие устройства профиля (devices.js), — ник,
+  // «не удалять», короткая ссылка, кодовое слово, эпохи, создатель.
+  const sfp = `${rec.nick || ''}|${rec.keepForever ? 1 : 0}|${rec.alias?.code || ''}|${rec.word?.exp || 0}|${(rec.epochs || []).length}|${rec.creatorPub || ''}`;
+  const prevSfp = syncFpCache.get(rec.roomId);
+  syncFpCache.set(rec.roomId, sfp);
+  if (prevSfp !== undefined && prevSfp !== sfp) {
+    try {
+      window.dispatchEvent(new CustomEvent('zv-sync-local'));
+    } catch {}
+  }
   return kvPut('rooms', rec.roomId, rec);
 };
 const backupFpCache = new Map(); // roomId -> отпечаток полей, входящих в бэкап
+const syncFpCache = new Map(); // v39: roomId -> отпечаток синхронизируемых полей
 const loadRoom = (roomId) => kvGet('rooms', roomId);
 
 // v38: сводки списка комнат кэшируются по комнате и сбрасываются при любой
@@ -340,8 +353,42 @@ function hideChatScreen() {
 // Своё устройство (запоминается при открытии комнаты): собственный intro,
 // пришедший с историей, не должен превращать личный чат в «Анна, Борис».
 let selfDev = '';
-const peersOf = (rec) =>
-  Object.entries(rec?.members || {}).filter(([d, m]) => m && !m.left && m.nick && d !== selfDev);
+// v39: несколько устройств одного человека — один собеседник. Свои
+// устройства профиля (реестр devices.js) — «я»; чужие устройства с
+// проверенным сертификатом одного master — один человек (personKeyOf).
+const myProfile = () => window.__zvProfile || null;
+function ownSetOf() {
+  const own = new Set(myProfile()?.own || []);
+  if (selfDev) own.add(selfDev);
+  if (cur?.device?.devicePub) own.add(cur.device.devicePub);
+  return own;
+}
+function ownDev(dev, rec = cur?.rec) {
+  if (!dev) return false;
+  if (cur && dev === cur.device.devicePub) return false; // это устройство — it.mine
+  if (myProfile()?.own?.has(dev)) return true;
+  const m = rec?.members?.[dev];
+  const master = myProfile()?.master;
+  return !!(master && m?.certOk === true && m.masterPub === master);
+}
+const isOwnEntry = (it, rec = cur?.rec) => !!it && (it.mine || ownDev(it.msg?.devPub, rec));
+function personOf(dev, rec = cur?.rec) {
+  return personKeyOf(dev, rec?.members?.[dev], ownSetOf(), myProfile()?.master || '');
+}
+const peersOf = (rec) => {
+  const out = [];
+  const seen = new Set();
+  const own = ownSetOf();
+  const master = myProfile()?.master || '';
+  for (const [d, m] of Object.entries(rec?.members || {})) {
+    if (!m || m.left || !m.nick || d === selfDev) continue;
+    const k = personKeyOf(d, m, own, master);
+    if (k === 'self' || seen.has(k)) continue;
+    seen.add(k);
+    out.push([d, m]);
+  }
+  return out;
+};
 // Аватар личного чата — аватар собеседника (как в Telegram): тот же цвет
 // в списке, шапке и составе комнаты. У групп — цвет комнаты.
 const roomAvatarBg = (rec) => {
@@ -450,6 +497,7 @@ async function noteRoomDevice(dev, { hasIntro = false } = {}) {
   const res = observeDevice(cur.rec.seenDevices, dev, { hasIntro, silent });
   cur.rec.seenDevices = res.seen;
   const roomId = cur.rec.roomId;
+  const recAt = cur.rec;
   await saveRoom(cur.rec).catch(() => {});
   if (!res.shouldAlert || !cur || cur.rec.roomId !== roomId) return;
   const entry = {
@@ -473,15 +521,45 @@ async function noteRoomDevice(dev, { hasIntro = false } = {}) {
   };
   await storeMessage(cur.rec, entry).catch(() => {});
   if (cur && cur.rec.roomId === roomId) renderMessages().catch(() => {});
-  maybeNotifyMessage({
-    roomId,
-    rec: cur?.rec,
-    nick: null,
-    preview: '⚠ К чату подключилось новое устройство',
-    mine: false,
-    roomActive: chatVisible(),
-    system: true,
-  }).catch(() => {});
+  // v39: уведомление — через несколько секунд, когда устройство успело
+  // представиться (dial с сертификатом приходит первым): своё устройство
+  // профиля — без тревоги, новое устройство знакомого человека — спокойно.
+  setTimeout(() => {
+    // Комнату к этому моменту могли закрыть — классифицируем по ней же.
+    const kind = newDevKind(dev, cur && cur.rec.roomId === roomId ? cur.rec : recAt);
+    if (kind.own) return;
+    maybeNotifyMessage({
+      roomId,
+      rec: cur && cur.rec.roomId === roomId ? cur.rec : null,
+      nick: null,
+      preview: kind.person
+        ? `Новое устройство: ${kind.nick}`
+        : kind.nick
+          ? `⚠ Новое устройство в чате: ${kind.nick}`
+          : '⚠ К чату подключилось новое устройство',
+      mine: false,
+      roomActive: chatVisible(),
+      system: true,
+    }).catch(() => {});
+  }, 4000);
+}
+
+// v39: чьё это новое устройство. own — моё (реестр профиля или мой master
+// с проверенным сертификатом); person — ещё одно устройство участника,
+// который уже есть в чате (тот же master, сертификат проверен).
+function newDevKind(dev, rec = cur?.rec) {
+  if (myProfile()?.own?.has(dev) || ownDev(dev, rec)) {
+    return { own: true, person: true, nick: myProfile()?.labels?.[dev] || 'другое ваше устройство' };
+  }
+  if (!rec) return { own: false, person: false, nick: '' };
+  const m = rec.members?.[dev];
+  if (m?.certOk === true && m.masterPub) {
+    for (const [d, o] of Object.entries(rec.members || {})) {
+      if (d === dev || !o || o.certOk !== true || o.masterPub !== m.masterPub) continue;
+      return { own: false, person: true, nick: o.nick || m.nick || 'участник' };
+    }
+  }
+  return { own: false, person: false, nick: m?.nick || '' };
 }
 
 // Интерфейс только русский — локаль фиксирована, чтобы 24-часовое время
@@ -586,7 +664,7 @@ function previewOf(m) {
 }
 function unreadOf(rec, msgs) {
   const readSeq = rec.lastReadSeq || 0;
-  return msgs.filter((it) => !it.mine && !it.local && (it.seq || 0) > readSeq).length;
+  return msgs.filter((it) => !isOwnEntry(it, rec) && !it.local && (it.seq || 0) > readSeq).length;
 }
 
 // v30: один построитель пункта списка комнат — используется и главным
@@ -640,7 +718,7 @@ function buildRoomListItem({ r, last, unread }, { sidebar = false } = {}) {
     // Префикс автора — только в группах (в личном чате он очевиден).
     const group = peersOf(r).length > 1;
     const senderPrefix =
-      !last || !group || last.msg.type !== 'text' ? '' : last.mine ? 'Вы: ' : last.msg.nick ? `${last.msg.nick}: ` : '';
+      !last || !group || last.msg.type !== 'text' ? '' : isOwnEntry(last, r) ? 'Вы: ' : last.msg.nick ? `${last.msg.nick}: ` : '';
     pv.textContent = last ? senderPrefix + previewOf(last.msg) : 'Нет сообщений · нажмите, чтобы открыть';
   }
   bottom.append(pv);
@@ -701,7 +779,7 @@ function applySidebarFilter() {
 
 // v38: сводка комнаты для списка: последнее видимое сообщение и seq
 // чужих видимых сообщений (непрочитанные считаются от lastReadSeq).
-async function roomSummary(roomId) {
+async function roomSummary(roomId, rec = null) {
   const hit = roomSummaryCache.get(roomId);
   if (hit) return hit;
   const msgs = await roomMessages(roomId);
@@ -709,7 +787,7 @@ async function roomSummary(roomId) {
   // (реакции, правки, закрепы) и обмен ключами эпохи в превью не показываем.
   const visible = msgs.filter((x) => !CONTROL_TYPES.has(x.msg.type) && x.msg.type !== 'ecdh');
   const last = visible.length ? visible[visible.length - 1] : null;
-  const others = visible.filter((it) => !it.mine && !it.local).map((it) => it.seq || 0);
+  const others = visible.filter((it) => !isOwnEntry(it, rec) && !it.local).map((it) => it.seq || 0);
   const sm = { last, others };
   roomSummaryCache.set(roomId, sm);
   return sm;
@@ -724,7 +802,7 @@ async function renderRoomListNow() {
   for (const r0 of rooms) {
     // Открытая комната: актуальные lastReadSeq/ник — в памяти, не в IDB.
     const r = cur && cur.rec.roomId === r0.roomId ? cur.rec : r0;
-    const sm = await roomSummary(r.roomId);
+    const sm = await roomSummary(r.roomId, r);
     const readSeq = r.lastReadSeq || 0;
     enriched.push({
       r,
@@ -1627,6 +1705,8 @@ async function openRoomBySeed(seedStr, opts = {}) {
       rec.pushEp = sub.endpoint;
       rec.pushAt = Date.now();
     }
+    if (init.status === 200 && applyHistFloor(rec, init.data?.lastSeq)) await saveRoom(rec);
+    if (init.status === 200) verifyMemberCerts(cur).catch(() => {});
     setTimeout(() => aliasRenewIfDue().catch(() => {}), 5000);
     // v29: серверная копия уже удалена — не воскрешаем локальную запись.
     if (init.status === 410) {
@@ -1662,6 +1742,10 @@ async function openRoomBySeed(seedStr, opts = {}) {
       $('#chatNickBox')?.classList.add('hidden');
       renderMessages().catch(() => {});
       await sendRoomMetaIfNeeded(); // v29: room-meta — строго первым сообщением
+      // v39: комната пришла с другого устройства профиля — сначала 'dial'
+      // (сертификат: собеседники увидят «ещё одно устройство того же
+      // человека», а не нового участника), затем intro.
+      if (cur.rec.linkImport && !cur.rec.introSent) await sendDialInfoIfNeeded();
       await sendIntroIfNeeded();
       await sendEcdhIfNeeded();
       await sendDialInfoIfNeeded();
@@ -1887,7 +1971,7 @@ async function handleRemoteDeleted(roomId) {
 // 'leave' и 'room-delete' из списка комнат): ключи выводятся из seedEnc
 // записи, подпись — текущим устройством. Шифрование базовым ключом эпохи 0:
 // получатели пробуют его при расшифровке всегда (decryptAny).
-async function postSystemStandalone(rec, type, text) {
+async function postSystemStandalone(rec, type, text, { quiet = false } = {}) {
   const seed = await decryptWithVault(rec.seedEnc);
   const seedBytes = b64u.dec(seed);
   let pinIkm = null;
@@ -1914,7 +1998,7 @@ async function postSystemStandalone(rec, type, text) {
   const blob = await encryptChatMessage(keys.roomKey, m);
   const r = await api(rec.roomId, keys.accessToken, '/msg', {
     method: 'POST',
-    body: { blob: b64u.enc(blob), dev: device.devicePub },
+    body: { blob: b64u.enc(blob), dev: device.devicePub, ...(quiet ? { quiet: true } : {}) },
   });
   return r.status;
 }
@@ -2524,6 +2608,12 @@ async function sendReadAck() {
 
 function applyReceipt(dev, delivered, read) {
   if (!cur || dev === cur.device.devicePub) return;
+  // v39: прочитано на другом своём устройстве — прочитано и здесь.
+  if (ownDev(dev) && (read || 0) > (cur.rec.lastReadSeq || 0)) {
+    cur.rec.lastReadSeq = read;
+    saveRoom(cur.rec).catch(() => {});
+    renderRoomList().catch(() => {});
+  }
   const prev = cur.receipts.get(dev) || { delivered: 0, read: 0 };
   cur.receipts.set(dev, {
     delivered: Math.max(prev.delivered, delivered || 0),
@@ -2576,7 +2666,12 @@ async function ingestNow(item, { viaFetch = false, retry = false, live = false }
   // v38: заглушка «не расшифровано» заменяется настоящим сообщением при повторе.
   if (!seen || (retry && seen.msg?.ratchetMiss)) {
     const dec = await decryptIncoming(raw);
-    if (dec?.__miss) {
+    const undec = !dec || dec.__miss || dec.__retry || dec.v !== 1;
+    if (undec && !seen && floorSkip(item)) {
+      // v39: история до подключения этого устройства к профилю, которую
+      // ему не расшифровать (Double Ratchet, чужие эпохи), — не заглушки:
+      // её перенесло основное устройство (или владелец выбрал «без истории»).
+    } else if (dec?.__miss) {
       // v31: ключ сообщения навсегда недоступен (использован и удалён или
       // вытеснен из skipped-окна) — кладём заглушку и НЕ выходим: seq-хвост
       // ниже обязан продвинуть lastSeq, иначе fetch принесёт это снова.
@@ -2633,12 +2728,18 @@ async function ingestNow(item, { viaFetch = false, retry = false, live = false }
       try {
         const d = JSON.parse(msg.text || '');
         if (d && typeof d.masterPub === 'string' && /^[A-Za-z0-9_-]{87}$/.test(d.masterPub)) {
+          // v39: сертификат устройства под этим master — основание считать
+          // несколько устройств одним человеком (и своими — свои).
+          const certOk = await verifyDeviceCertClient(d.masterPub, msg.devPub, d.cert || null, d.chain || null).catch(
+            () => false
+          );
           cur.rec.members[msg.devPub] = {
             ...cur.rec.members[msg.devPub],
             masterPub: d.masterPub,
             masterFp: d.masterFp || null,
             cert: d.cert || null,
             chain: d.chain || null,
+            certOk: !!certOk,
           };
           await saveRoom(cur.rec);
           renderMembersList();
@@ -2720,7 +2821,8 @@ async function ingestNow(item, { viaFetch = false, retry = false, live = false }
       renderMessages().catch(() => {});
       if (!mine) renderRoomList().catch(() => {});
       // v28 (B): уведомление, пока приложение живо (v38: не при «лечении» истории).
-      if (!mine && !CONTROL_TYPES.has(msg.type) && msg.type !== 'ecdh' && !cur.healing) {
+      // v39: своё сообщение с другого устройства профиля — без уведомления.
+      if (!mine && !ownDev(msg.devPub) && !CONTROL_TYPES.has(msg.type) && msg.type !== 'ecdh' && !cur.healing) {
         maybeNotifyMessage({
           roomId: cur.rec.roomId,
           rec: cur.rec,
@@ -2748,6 +2850,39 @@ async function ingestNow(item, { viaFetch = false, retry = false, live = false }
     // Доставка и прочтение — пачкой (раньше: два запроса на КАЖДОЕ
     // сообщение — сотни запросов к бесплатному воркеру при докачке).
     if (!cur.healing || item.seq > (cur.healKeepSeq || 0)) queueAck(item.seq);
+  }
+}
+
+// v39: граница истории подключённого устройства (см. applyHistFloor).
+function floorSkip(item) {
+  const f = cur?.rec?.histFloor;
+  return Number.isFinite(f) && f > 0 && Number.isFinite(item?.seq) && item.seq <= f;
+}
+// Первое /init комнаты, пришедшей синхронизацией профиля: всё, что было
+// на сервере до этого момента (seq ≤ lastSeq), — «старая» история.
+// histMode 'none' — владелец не переносил историю: начинаем с «сейчас».
+function applyHistFloor(rec, serverLastSeq) {
+  if (!rec?.linkImport || Number.isFinite(rec.histFloor)) return false;
+  rec.histFloor = Number(serverLastSeq) || 0;
+  if (rec.histMode === 'none' && (rec.lastSeq || 0) < rec.histFloor) rec.lastSeq = rec.histFloor;
+  return true;
+}
+
+// v39: участники, записанные до v39 (dial без проверки сертификата), —
+// проверяем один раз при открытии комнаты.
+async function verifyMemberCerts(c) {
+  if (!c) return;
+  let changed = false;
+  for (const [d, m] of Object.entries(c.rec.members || {})) {
+    if (!m || !m.masterPub || !m.cert || typeof m.certOk === 'boolean') continue;
+    m.certOk = !!(await verifyDeviceCertClient(m.masterPub, d, m.cert, m.chain || null).catch(() => false));
+    changed = true;
+  }
+  if (changed && cur === c) {
+    await saveRoom(c.rec);
+    renderPresence();
+    renderMembersList();
+    renderMessages().catch(() => {});
   }
 }
 
@@ -3916,13 +4051,40 @@ function knownMembers() {
   );
 }
 
+// v39: участники по людям: Map(personKey → {key, devs, nick}).
+function knownPersons() {
+  const obj = {};
+  for (const d of knownMembers()) obj[d] = cur.rec.members?.[d] || {};
+  return groupPersons(obj, ownSetOf(), myProfile()?.master || '');
+}
+function personReceipts(persons) {
+  const others = [];
+  const map = new Map();
+  for (const [k, g] of persons) {
+    if (k === 'self') continue;
+    others.push(k);
+    let delivered = 0;
+    let read = 0;
+    for (const d of g.devs) {
+      const r = cur.receipts.get(d);
+      if (!r) continue;
+      delivered = Math.max(delivered, r.delivered || 0);
+      read = Math.max(read, r.read || 0);
+    }
+    map.set(k, { delivered, read });
+  }
+  return { others, map };
+}
+const personOnline = (g) => g.devs.some((d) => cur.online.has(d));
+const personLastSeen = (g) => Math.max(0, ...g.devs.map((d) => cur.rec.members?.[d]?.lastSeen || 0));
+
 // Как в Telegram: в личном чате — «в сети» / «был(а) в 14:05»,
 // в группе — «3 участника · 2 в сети».
 function presenceText(total, others, onlineCount) {
   if (others.length === 1) {
-    const [dev] = others;
-    if (cur.online.has(dev)) return 'в сети';
-    const ls = cur.rec.members?.[dev]?.lastSeen;
+    const [g] = others;
+    if (personOnline(g)) return 'в сети';
+    const ls = personLastSeen(g);
     return ls ? 'был(а) ' + fmtSeen(ls) : 'не в сети';
   }
   const count = `${total} ${plural(total, 'участник', 'участника', 'участников')}`;
@@ -3942,12 +4104,16 @@ function renderPresence() {
       roomAv.textContent = (dt.replace(/^Чат\s+/i, '').trim()[0] || '💬').toUpperCase();
     }
   }
-  const members = knownMembers();
-  const others = members.filter((d) => d !== cur.device.devicePub);
-  const onlineCount = others.filter((d) => cur.online.has(d)).length;
-  const typing = cur.typing && cur.typing.until > Date.now() && cur.typing.dev !== cur.device.devicePub;
+  const persons = knownPersons();
+  const others = [...persons.values()].filter((g) => g.key !== 'self');
+  const onlineCount = others.filter(personOnline).length;
+  const typing =
+    cur.typing &&
+    cur.typing.until > Date.now() &&
+    cur.typing.dev !== cur.device.devicePub &&
+    !ownDev(cur.typing.dev);
   if (typing) line.textContent = others.length === 1 ? 'печатает…' : `${nickOf(cur.typing.dev)} печатает…`;
-  else line.textContent = presenceText(members.length, others, onlineCount);
+  else line.textContent = presenceText(Math.max(1, persons.size), others, onlineCount);
   // Акцентный цвет — как у Telegram для «в сети» и «печатает…».
   line.toggleAttribute('data-live', typing || (others.length === 1 && onlineCount === 1));
   // v28 (A): групповой звонок имеет смысл при двух и более собеседниках.
@@ -3968,7 +4134,11 @@ function renderMembersList() {
       ` · эпоха ${cur.rec.epoch || 0}`;
     box.append(ph);
   }
-  for (const dev of knownMembers()) {
+  // v39: строка на человека; несколько устройств — пометка «N устройства».
+  const persons = [...knownPersons().values()].sort((a, b) => (a.key === 'self' ? -1 : b.key === 'self' ? 1 : 0));
+  for (const g of persons) {
+    const isMe = g.key === 'self';
+    const dev = isMe ? cur.device.devicePub : g.devs.find((d) => cur.online.has(d)) || g.devs[0];
     const row = document.createElement('div');
     row.className = 'chat-member-row';
     const av = document.createElement('span');
@@ -3976,30 +4146,33 @@ function renderMembersList() {
     av.style.background = avatarBg(dev);
     av.textContent = (nickOf(dev)[0] || '?').toUpperCase();
     const dot = document.createElement('span');
-    const isMe = dev === cur.device.devicePub;
-    const isOnline = isMe || cur.online.has(dev);
+    const isOnline = isMe || personOnline(g);
     dot.className = 'chat-dot' + (isOnline ? ' on' : '');
     av.append(dot);
     const name = document.createElement('span');
     name.className = 'chat-member-name';
     // v28 (E): устройство без intro видно честной строкой, а не «Участник».
-    const hasIntro = !!cur.rec.members?.[dev]?.nick;
+    const nickDev = g.devs.find((d) => cur.rec.members?.[d]?.nick);
+    const hasIntro = !!nickDev;
     name.textContent = isMe
-      ? nickOf(dev)
+      ? nickOf(cur.device.devicePub)
       : hasIntro
-        ? nickOf(dev)
+        ? nickOf(nickDev)
         : `Без ника · устройство …${dev.slice(-6)}`;
     const seen = document.createElement('span');
     seen.className = 'chat-member-seen';
-    if (isMe) seen.textContent = 'это вы';
-    else if (cur.online.has(dev)) seen.textContent = 'в сети';
+    const nDev = g.devs.length;
+    const devTail = nDev > 1 ? ` · ${nDev} ${plural(nDev, 'устройство', 'устройства', 'устройств')}` : '';
+    if (isMe) seen.textContent = 'это вы' + devTail;
+    else if (personOnline(g)) seen.textContent = 'в сети' + devTail;
     else {
-      const ls = cur.rec.members?.[dev]?.lastSeen;
-      seen.textContent = ls ? 'был(а) ' + fmtSeen(ls) : 'не в сети';
+      const ls = personLastSeen(g);
+      seen.textContent = (ls ? 'был(а) ' + fmtSeen(ls) : 'не в сети') + devTail;
     }
     row.append(av, name, seen);
     // v28 (A): кнопка дозвона участнику с личной идентичностью.
-    if (!isMe && cur.rec.members?.[dev]?.masterPub) {
+    const dialDev = isMe ? null : g.devs.find((d) => cur.rec.members?.[d]?.masterPub);
+    if (dialDev) {
       const cb = document.createElement('button');
       cb.className = 'btn small ghost chat-member-call';
       cb.textContent = '📞';
@@ -4007,7 +4180,7 @@ function renderMembersList() {
       cb.setAttribute('aria-label', 'Позвонить участнику');
       cb.onclick = (e) => {
         e.stopPropagation();
-        dialMember(dev)
+        dialMember(dialDev)
           .then((r) => {
             if (!r.dialed) note('Не удалось дозвониться участнику — отправлено приглашение в чат.');
             else openCallFromChat(r.secret, { autoJoin: true }); // v38: сразу ждём в звонке
@@ -4316,13 +4489,16 @@ async function renderMessagesNow() {
     const same = (a, b) =>
       !!a &&
       !!b &&
-      a.msg.devPub === b.msg.devPub &&
+      (a.msg.devPub === b.msg.devPub || personOf(a.msg.devPub) === personOf(b.msg.devPub)) &&
       Math.abs(b.msg.ts - a.msg.ts) < 5 * 60000 &&
       new Date(a.msg.ts).toDateString() === new Date(b.msg.ts).toDateString();
     grp.set(x.hash, { first: !same(bubbleItems[i - 1], x), last: !same(x, bubbleItems[i + 1]) });
   });
   // Личный чат (двое) — как в Telegram: без аватаров и ников у входящих.
-  const duo = knownMembers().length <= 2;
+  // v39: считаются люди, а не устройства (второе своё устройство — не третий).
+  const persons = knownPersons();
+  const duo = persons.size <= 2;
+  const rcpt = personReceipts(persons);
   box.classList.toggle('duo', duo);
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
   // v38: в DOM — только последние renderLimit строк (раньше лента из
@@ -4346,6 +4522,7 @@ async function renderMessagesNow() {
     box.append(more);
   }
   let lastDayKey = '';
+  const introduced = new Set(); // v39: люди, чей «теперь в чате» уже показан
   for (const it of start > 0 ? items.slice(start) : items) {
     const m = it.msg;
     const dk = new Date(m.ts).toDateString();
@@ -4357,6 +4534,11 @@ async function renderMessagesNow() {
       box.append(chip);
     }
     if (m.type === 'intro') {
+      // v39: ещё одно устройство уже знакомого человека (и ваше) — без
+      // повторного «теперь в чате»: о нём говорит строка «новое устройство».
+      const pk = personOf(m.devPub);
+      if (introduced.has(pk)) continue;
+      introduced.add(pk);
       const div = document.createElement('div');
       div.className = 'chat-sys';
       div.textContent = `${m.nick || 'Участник'} теперь в чате`;
@@ -4393,6 +4575,13 @@ async function renderMessagesNow() {
       continue; // v29: служебная метка создателя — в ленте не показываем
     }
     if (m.type === 'leave') {
+      // v39: человек вышел с одного из устройств, но остался на другом.
+      const pk = personOf(m.devPub);
+      const still = Object.entries(cur.rec.members || {}).some(
+        ([d, o]) => d !== m.devPub && o && !o.left && o.nick && personOf(d) === pk
+      );
+      if (still) continue;
+      introduced.delete(pk);
       const div = document.createElement('div');
       div.className = 'chat-sys';
       div.textContent = `${m.nick || 'Участник'} больше не в чате`;
@@ -4446,12 +4635,22 @@ async function renderMessagesNow() {
       // хвост ключа — чтобы сверить с собеседником голосом.
       const dev = m.text.slice(7);
       const who = cur.rec.members?.[dev]?.nick;
+      const kind = newDevKind(dev);
       const div = document.createElement('div');
-      div.className = 'chat-sys warn';
+      div.className = 'chat-sys' + (kind.person ? '' : ' warn');
       const key = document.createElement('span');
       key.className = 'chat-sys-key';
       key.textContent = `ключ …${dev.slice(-6)}`;
-      div.append(who ? `⚠ Новое устройство в чате: ${who}` : '⚠ К чату подключилось новое устройство', key);
+      // v39: устройство, подписанное тем же master, что и уже знакомый
+      // участник (или вы сами), — не чужак; остальные — по-прежнему с ⚠.
+      const text = kind.own
+        ? `Ваше устройство подключилось к чату: ${kind.nick}`
+        : kind.person
+          ? `${kind.nick}: новое устройство (подтверждено ключом профиля)`
+          : who
+            ? `⚠ Новое устройство в чате: ${who}`
+            : '⚠ К чату подключилось новое устройство';
+      div.append(text, key);
       box.append(div);
       continue;
     }
@@ -4475,12 +4674,12 @@ async function renderMessagesNow() {
       const div = document.createElement('div');
       div.className = 'chat-sys';
       const span = document.createElement('span');
-      span.textContent = it.mine ? 'Вы позвонили ' : `${m.nick || 'Участник'} приглашает на звонок `;
+      span.textContent = isOwnEntry(it) ? 'Вы позвонили ' : `${m.nick || 'Участник'} приглашает на звонок `;
       const btn = document.createElement('button');
       btn.className = 'btn small primary';
       // v38: старое приглашение (больше 3 часов) — просто «Позвонить» заново.
       const fresh = Date.now() - (it.lts || m.ts || 0) < 3 * 3600000;
-      btn.textContent = fresh && !it.mine ? 'Ответить' : 'Войти в звонок';
+      btn.textContent = fresh && !isOwnEntry(it) ? 'Ответить' : 'Войти в звонок';
       btn.onclick = () => openCallFromChat(m.text.slice(5), { autoJoin: true });
       div.append(span, btn);
       box.append(div);
@@ -4495,15 +4694,18 @@ async function renderMessagesNow() {
       continue;
     }
     const g = grp.get(it.hash) || { first: true, last: true };
+    // v39: сообщение с другого своего устройства — тоже «моё» (справа, без
+    // ника); править и удалять его можно только там, где оно написано.
+    const own = isOwnEntry(it);
     const rowEl = document.createElement('div');
     rowEl.className =
       'chat-msg-row' +
-      (it.mine ? ' mine' : '') +
+      (own ? ' mine' : '') +
       (g.first ? ' grp-first' : '') +
       (g.last ? ' grp-last' : '') +
       (g.last ? ' tail' : '');
     rowEl.dataset.hash = it.hash; // v27: цель для цитат, закрепа и поиска
-    if (!it.mine && !duo) {
+    if (!own && !duo) {
       const av = document.createElement('span');
       // v28 (F): аватар виден только у нижнего сообщения группы (место в
       // раскладке сохраняется прозрачным слотом, чтобы пузыри не прыгали).
@@ -4513,7 +4715,7 @@ async function renderMessagesNow() {
       rowEl.append(av);
     }
     const div = document.createElement('div');
-    div.className = 'chat-msg' + (it.mine ? ' mine' : '') + (g.last ? ' tail' : '');
+    div.className = 'chat-msg' + (own ? ' mine' : '') + (g.last ? ' tail' : '');
     if (!m.deleted && (m.type === 'file' || m.type === 'voice')) {
       let meta = null;
       try {
@@ -4591,7 +4793,7 @@ async function renderMessagesNow() {
       body.textContent = 'Сообщение удалено';
       div.append(body);
     } else {
-      if (!it.mine && g.first && !duo) {
+      if (!own && g.first && !duo) {
         // v28 (F): ник — только у первого сообщения группы одного автора.
         const head = document.createElement('div');
         head.className = 'chat-msg-head';
@@ -4620,10 +4822,11 @@ async function renderMessagesNow() {
     const tm = document.createElement('span');
     tm.textContent = fmtTime(m.ts);
     foot.append(tm);
-    if (it.mine) {
+    if (own) {
       // v28 (F): статус — галочками в стиле Telegram, подпись — в title.
-      const others = knownMembers().filter((d) => d !== cur.device.devicePub);
-      const st = receiptState(it, cur.receipts, others);
+      // v39: по людям — «прочитано», когда прочитал каждый собеседник на
+      // любом своём устройстве; свои устройства в расчёт не входят.
+      const st = receiptState(it, rcpt.map, rcpt.others);
       const rc = document.createElement('span');
       rc.className = 'chat-receipt st-' + st;
       rc.textContent = RECEIPT_GLYPHS[st] || '✓';
@@ -4910,9 +5113,17 @@ async function dialMember(dev, { group = false, secret = null, link = null } = {
   const roomId = cur.rec.roomId;
   const sec = secret || newSecret();
   const lnk = link || callLinkOf(sec);
+  // v39: звенят все устройства человека (подтверждённые его master), а
+  // не только то, с которого он писал: ring несёт завёртку на каждое.
+  const ecdhPubs = [];
+  for (const [d, m] of Object.entries(cur.rec.members || {})) {
+    if (!m || m.left || !m.ecdhPub) continue;
+    if (d === dev || (m.certOk === true && member.certOk === true && m.masterPub === member.masterPub)) ecdhPubs.push(m.ecdhPub);
+  }
   const res = await dial
     .ringPersonal(member.masterPub, lnk, {
       ecdhPub: member.ecdhPub || memberEcdhPub(dev),
+      ecdhPubs: [...new Set(ecdhPubs)].slice(0, 5),
       name: cur.rec.nick || 'Участник чата',
       callKind: group ? 'group' : 'single',
       onState: (state) => {
@@ -6052,10 +6263,22 @@ async function sweepOtherRoomsNow({ force = false, onlyPrefix = null } = {}) {
       continue;
     }
     if (!res || res.status !== 200) continue;
-    const items = res.data.messages || [];
+    const all = res.data.messages || [];
+    if (!all.length) continue;
+    const top = Math.max(st.lastNotifiedSeq, ...all.map((i) => i.seq || 0));
+    // v39: комната пришла с другого устройства профиля — первый опрос
+    // только запоминает позицию (старое уже прочитано там).
+    if (r.linkImport && !st.primed) {
+      st.primed = true;
+      st.lastNotifiedSeq = top;
+      continue;
+    }
+    st.primed = true;
+    // v39: свои сообщения с других устройств профиля — не «новые».
+    const items = all.filter((i) => !ownBlob(i.blob));
+    st.lastNotifiedSeq = top;
     if (!items.length) continue;
     st.lastNewAt = now;
-    st.lastNotifiedSeq = Math.max(st.lastNotifiedSeq, ...items.map((i) => i.seq || 0));
     maybeNotifyMessage({
       roomId: r.roomId,
       rec: r,
@@ -6065,6 +6288,35 @@ async function sweepOtherRoomsNow({ force = false, onlyPrefix = null } = {}) {
       roomActive: false,
     }).catch(() => {});
   }
+}
+
+// v39: blob цепочки (c1) несёт 2 байта ключа автора — по ним опрос фона
+// отличает сообщения с других своих устройств, не расшифровывая их.
+const ownTagCache = new Map();
+function ownBlob(blobB64) {
+  const own = myProfile()?.own;
+  if (!own || own.size < 2 || typeof blobB64 !== 'string') return false;
+  let nonce;
+  try {
+    nonce = b64u.dec(blobB64.slice(0, 24)).subarray(0, 12);
+  } catch {
+    return false;
+  }
+  const h = parseBlobHint(nonce);
+  if (!h || h.mode !== 'c1') return false;
+  for (const d of own) {
+    let t = ownTagCache.get(d);
+    if (!t) {
+      try {
+        t = [...pubTagOf(b64u.dec(d)).subarray(0, 2)];
+      } catch {
+        continue;
+      }
+      ownTagCache.set(d, t);
+    }
+    if (tagBytesEq(t, h.tag)) return true;
+  }
+  return false;
 }
 
 function checkHash() {
@@ -6131,7 +6383,228 @@ async function onIdentityChanged() {
   }
 }
 
+// ---------- v39: хуки синхронизации профиля (devices.js) ----------
+// Живая запись открытой комнаты — cur.rec (её же сохраняет saveRoom);
+// для остальных — запись из IndexedDB.
+async function liveRoom(id) {
+  if (cur && cur.rec.roomId === id) return cur.rec;
+  return loadRoom(id);
+}
+let introSweepTimer = 0;
+let introSweepRunning = false;
+function scheduleIntroSweep(ms = 3000) {
+  clearTimeout(introSweepTimer);
+  introSweepTimer = setTimeout(() => introSweep().catch(() => {}), ms);
+}
+// Комнаты, пришедшие с другого устройства профиля: это устройство
+// представляется в них само — dial (сертификат профиля: собеседники видят
+// «ещё одно устройство того же человека»), затем intro и ecdh. Без этого
+// оно было бы молчаливым читателем, а v28 таких как раз подсвечивает.
+async function introSweep() {
+  if (introSweepRunning) return;
+  introSweepRunning = true;
+  try {
+    const device = await getChatDevice();
+    if (device.guest) return;
+    const rooms = (await kvAll('rooms')).map((x) => x.value).filter((r) => r && r.linkImport && !r.introSent && r.nick);
+    for (const r0 of rooms) {
+      if (cur && cur.rec.roomId === r0.roomId) continue; // открытая комната представится сама
+      try {
+        const keys = await standaloneKeys(r0);
+        if (!keys) continue;
+        const sub = await existingPushSub();
+        const init = await api(r0.roomId, keys.accessToken, '/init', {
+          method: 'POST',
+          body: { dev: device.devicePub, sub },
+        });
+        if (init.status === 410) {
+          await wipeLocalRoom(r0.roomId, { silent: true });
+          continue;
+        }
+        if (init.status !== 200) continue;
+        if (cur && cur.rec.roomId === r0.roomId) continue;
+        const r = await loadRoom(r0.roomId);
+        if (!r || r.introSent) continue;
+        applyHistFloor(r, init.data?.lastSeq);
+        if (sub?.endpoint) {
+          r.pushEp = sub.endpoint;
+          r.pushAt = Date.now();
+        }
+        if (!r.dialInfoSent && device.masterPub) {
+          const dial = JSON.stringify({
+            masterPub: device.masterPub,
+            masterFp: device.masterFp || null,
+            cert: device.cert || null,
+            chain: device.chain || null,
+          });
+          if ((await postSystemStandalone(r, 'dial', dial, { quiet: true })) === 201) r.dialInfoSent = true;
+        }
+        if ((await postSystemStandalone(r, 'intro', r.nick, { quiet: true })) === 201) r.introSent = true;
+        if (!r.ecdhSent) {
+          const e = await getChatDeviceEcdh();
+          if ((await postSystemStandalone(r, 'ecdh', e.ecdhPub, { quiet: true })) === 201) r.ecdhSent = true;
+        }
+        await saveRoom(r);
+      } catch (e) {
+        console.warn('intro sweep', e);
+      }
+      await new Promise((ok) => setTimeout(ok, 150));
+    }
+  } finally {
+    introSweepRunning = false;
+  }
+}
+// Перенос истории с основного устройства: записи ленты с теми же hash,
+// что дал бы сервер (повторный fetch их не задвоит), плюс состояние комнаты.
+async function importHistory(data) {
+  const device = await getChatDevice();
+  let n = 0;
+  for (const [roomId, h] of Object.entries(data?.rooms || {})) {
+    const live = await liveRoom(roomId);
+    if (!live || !h || !Array.isArray(h.entries)) continue;
+    for (const e of h.entries) {
+      if (!e || typeof e.hash !== 'string' || !e.msg || typeof e.msg !== 'object') continue;
+      const key = roomId + ':' + e.hash;
+      if (await kvGet('messages', key)) continue;
+      await kvPut('messages', key, { ...e, roomId, mine: e.msg.devPub === device.devicePub, imported: true });
+      n++;
+    }
+    touchRoomMsgs(roomId);
+    const st = h.st || {};
+    live.members = live.members || {};
+    for (const [d, m] of Object.entries(st.members || {})) {
+      if (!m || typeof m !== 'object') continue;
+      live.members[d] = { ...m, ...(live.members[d] || {}) };
+    }
+    live.seenDevices = live.seenDevices || {};
+    for (const [d, sd] of Object.entries(st.seenDevices || {})) {
+      if (!live.seenDevices[d] && sd && typeof sd === 'object') live.seenDevices[d] = { ...sd, alerted: true };
+    }
+    if (!live.creatorPub && typeof st.creatorPub === 'string') live.creatorPub = st.creatorPub;
+    if (!live.pinned && st.pinned) live.pinned = st.pinned;
+    if (!live.ttlSec && st.ttlSec > 0) live.ttlSec = st.ttlSec;
+    if ((st.lastReadSeq || 0) > (live.lastReadSeq || 0)) live.lastReadSeq = st.lastReadSeq;
+    if (!live.histImported) {
+      live.histImported = true;
+      // Всё до lastSeq основного устройства уже здесь — с сервера только новее.
+      if ((st.lastSeq || 0) > (live.lastSeq || 0)) live.lastSeq = st.lastSeq;
+    }
+    await saveRoom(live);
+  }
+  if (cur) {
+    cur.msgIds = null;
+    renderMessages().catch(() => {});
+  }
+  renderRoomList().catch(() => {});
+  return n;
+}
+const syncHooks = {
+  async saveNewRoom(rec) {
+    if (await loadRoom(rec.roomId)) return true;
+    await saveRoom(normalizeRoomRecord(rec));
+    roomSummaryCache.delete(rec.roomId);
+    renderRoomList().catch(() => {});
+    scheduleIntroSweep();
+    return true;
+  },
+  async patchRoom(id, patch) {
+    const rec = await liveRoom(id);
+    if (!rec) return false;
+    let changed = false;
+    for (const [k, v] of Object.entries(patch || {})) {
+      if (JSON.stringify(rec[k]) === JSON.stringify(v)) continue;
+      rec[k] = v;
+      changed = true;
+    }
+    if (!changed) return true;
+    if ('nick' in patch && rec.nick && !rec.introSent && rec.linkImport) scheduleIntroSweep();
+    await saveRoom(rec);
+    renderRoomList().catch(() => {});
+    if (cur && cur.rec === rec) {
+      renderPresence();
+      renderRoomMenuState();
+    }
+    return true;
+  },
+  async removeRoom(id) {
+    const rec = await liveRoom(id);
+    if (!rec) return true;
+    try {
+      if (rec.nick && rec.introSent) await postSystemStandalone(rec, 'leave', rec.nick || '', { quiet: true });
+    } catch {}
+    if (rec.word) await wordRevokeCurrent(rec).catch(() => {});
+    await unsubscribeRoom(rec).catch(() => {});
+    await wipeLocalRoom(id, { silent: true });
+    return true;
+  },
+  async markRead(id, seq) {
+    const rec = await liveRoom(id);
+    if (!rec) return false;
+    if (seq > (rec.lastReadSeq || 0)) {
+      rec.lastReadSeq = seq;
+      await saveRoom(rec);
+      renderRoomList().catch(() => {});
+    }
+    return true;
+  },
+  async epochs(id, list) {
+    const rec = await liveRoom(id);
+    if (!rec) return false;
+    rec.epochs = Array.isArray(rec.epochs) ? rec.epochs : [];
+    let changed = false;
+    for (const e of list || []) {
+      if (!e || !Number.isInteger(e.n) || e.n <= 0 || typeof e.secret !== 'string') continue;
+      if (rec.epochs.some((x) => x.n === e.n)) continue;
+      rec.epochs.push({ n: e.n, secret: e.secret, ts: e.ts || Date.now() });
+      changed = true;
+    }
+    if (!changed) return true;
+    const top = Math.max(0, ...rec.epochs.map((x) => x.n || 0));
+    const isCur = !!cur && cur.rec === rec;
+    if (top > (rec.epoch || 0)) {
+      rec.epoch = top;
+      if (isCur) {
+        const k = await keyForEpoch(top);
+        if (k) cur.keys = { ...cur.keys, roomKey: k };
+        cur.epochMissing = false;
+        pruneOldEpochChains(top);
+      }
+    }
+    await saveRoom(rec);
+    if (isCur) {
+      scheduleRetry(800);
+      renderMessages().catch(() => {});
+    }
+    return true;
+  },
+  roomsChanged() {
+    roomSummaryCache.clear();
+    renderRoomList().catch(() => {});
+  },
+  importHistory,
+  introSweep,
+};
+window.addEventListener('zv-devices-changed', () => {
+  roomSummaryCache.clear();
+  ownTagCache.clear();
+  renderRoomList().catch(() => {});
+  if (cur) {
+    renderPresence();
+    renderMembersList();
+    renderMessages().catch(() => {});
+  }
+});
+window.addEventListener('zv-settings-synced', () => {
+  const nt = $('#chatNotifyText');
+  if (nt) nt.checked = notifyTextOn();
+  const ns = $('#chatNotifySound');
+  if (ns) ns.checked = notifySoundOn();
+  const adt = $('#chatAutoDelToggle');
+  if (adt) adt.checked = autoDeleteOn();
+});
+
 window.ZVChat = {
+  sync: syncHooks,
   identityChanged: () => onIdentityChanged().catch(() => {}),
   openRoomBySeed,
   openFromHash: checkHash,

@@ -2,7 +2,7 @@
 // слушатель входящих по WebSocket, ответы и пропущенные. Протокол и подписи —
 // см. worker/inbox.js. Ring идёт ТОЛЬКО через Worker (не через публичные
 // транспорты — иначе «кому звонят» узнали бы все наблюдатели сигналинга).
-import { signWithDevice } from './identity.js?v=38';
+import { signWithDevice } from './identity.js?v=39';
 
 const base = (workerUrl, topic) => `${workerUrl.replace(/\/$/, '')}/inbox/${topic}`;
 
@@ -49,6 +49,15 @@ export async function inboxRetire(workerUrl, topic, bundle) {
   const ts = Date.now();
   const sig = await signWithDevice(`retire|${topic}|${bundle.devicePub}|${ts}`);
   return post(workerUrl, topic, '/retire', { devicePub: bundle.devicePub, ts, sig });
+}
+
+// v39: отвязка устройства профиля. signer(text) → подпись; by — 'master'
+// (основное устройство), 'recovery' (ключ фразы восстановления, extra:
+// {recoveryPub, recoveryCert}) или 'self' (подпись ключом самого target).
+export async function inboxRevoke(workerUrl, topic, target, by, signer, extra = {}) {
+  const ts = Date.now();
+  const sig = await signer(`revoke|${topic}|${target}|${ts}`);
+  return post(workerUrl, topic, '/revoke', { target, ts, sig, by, ...extra });
 }
 
 export async function inboxRing(workerUrl, topic, { ringId, fromFp, fromDevicePub, blob }) {
@@ -180,11 +189,26 @@ export class InboxListener {
         this.authFails = (this.authFails || 0) + 1;
         this.backoff = Math.min(60000, 1000 * 2 ** this.authFails);
         this.onStatus?.('offline');
+        // v39: устройство не узнано — номер могли сменить на другом
+        // устройстве профиля; синхронизация проверит это сразу.
+        try {
+          window.dispatchEvent(new CustomEvent('zv-inbox-authfail'));
+        } catch {}
       }
     };
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       clearInterval(this.pingTimer);
       this.onStatus?.('offline');
+      // v39: сервер закрыл сокет как «revoked» — устройство отвязали от
+      // профиля. Слову сервера не верим (иначе он мог бы стирать устройства):
+      // синхронизация проверит подписанный отзыв и только тогда сотрёт.
+      if (e && e.code === 4003) {
+        this.authFails = Math.max(this.authFails || 0, 5);
+        this.backoff = 60000;
+        try {
+          window.dispatchEvent(new CustomEvent('zv-inbox-revoked'));
+        } catch {}
+      }
       this.retry();
     };
     ws.onerror = () => {

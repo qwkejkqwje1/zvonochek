@@ -28,7 +28,7 @@ npx wrangler deploy
 ## Шаг 2. Проверить
 
 Cloudflare покажет адрес вида `https://zvonochek.<аккаунт>.workers.dev`.
-Откройте `…/health` — ответ `{"ok":true,"app":"ZVONochek","v":38,…,"push":true,…}`.
+Откройте `…/health` — ответ `{"ok":true,"app":"ZVONochek","v":39,…,"push":true,…,"devices":true,"revoke":true,"linkNx":true,…}`.
 
 ## Шаг 3. Подключить приложение
 

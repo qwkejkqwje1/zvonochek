@@ -13,6 +13,8 @@
 //   listen:  `listen|<topic>|<devicePub>|<ts>`       (ключ устройства)
 //   missed:  `missed|<topic>|<ts>`                   (ключ устройства)
 //   retire:  `retire|<topic>|<devicePub>|<ts>`       (ключ устройства, v38)
+//   revoke:  `revoke|<topic>|<targetDevicePub>|<ts>` (v39: master, recovery
+//            по цепочке master → recovery или сам отзываемый ключ устройства)
 import { sendPush, b64u } from './push.js';
 
 const te = new TextEncoder();
@@ -250,6 +252,11 @@ export class Inbox {
       if (!(await verifySig(devicePub, sig, `register|${topic}|${devicePub}|${ts}`))) {
         return json({ error: 'bad sig' }, 403);
       }
+      // v39: отвязанное устройство (POST /revoke) обратно не регистрируется —
+      // даже с валидным сертификатом от master: отзыв окончательный.
+      if (this.one(`SELECT device_pub FROM devices WHERE device_pub=? AND revoked=1`, devicePub)) {
+        return json({ error: 'revoked' }, 403);
+      }
       this.sql.exec(
         `INSERT INTO devices (device_pub, cert, label, exp, revoked) VALUES (?,?,?,?,0)
          ON CONFLICT(device_pub) DO UPDATE SET cert=excluded.cert, label=excluded.label, exp=excluded.exp`,
@@ -308,6 +315,57 @@ export class Inbox {
       } catch {}
       await this.state.storage.deleteAlarm().catch(() => {});
       return json({ ok: true, retired: true });
+    }
+
+    // ---------- v39: отвязка устройства профиля ----------
+    // Подпись над revoke|topic|target|ts одним из трёх ключей:
+    //   by:'master'   — master-ключ номера (основное устройство);
+    //   by:'recovery' — recovery-ключ из фразы восстановления, удостоверенный
+    //                   master (cert с label 'recovery', как в /register);
+    //   by:'self'     — ключ самого отзываемого устройства («Отвязать это
+    //                   устройство» и автоматический выход отозванного).
+    // Устройство помечается revoked=1 (повторная регистрация — 403), его
+    // push-подписки удаляются, открытые WebSocket закрываются. Устройство,
+    // которого ещё нет в таблице, вносится сразу отозванным: отзыв, пришедший
+    // раньше первой регистрации, тоже окончательный.
+    if (path === '/revoke' && req.method === 'POST') {
+      const { target, ts, sig, by, masterPub, recoveryPub, recoveryCert } = body;
+      if (typeof target !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(target) || !sig || !freshTs(ts)) {
+        return json({ error: 'bad revoke' }, 400);
+      }
+      const text = `revoke|${topic}|${target}|${ts}`;
+      const metaFp = this.one(`SELECT v FROM meta WHERE k='masterFp'`)?.v || '';
+      let ok = false;
+      if (by === 'self') {
+        ok = await verifySig(target, sig, text);
+      } else if ((by === 'master' || by === 'recovery') && typeof masterPub === 'string' && metaFp) {
+        if ((await fpOfPub(masterPub)) === metaFp) {
+          if (by === 'master') {
+            ok = await verifySig(masterPub, sig, text);
+          } else if (
+            typeof recoveryPub === 'string' &&
+            recoveryCert?.label === 'recovery' &&
+            (await verifyDeviceCert(masterPub, recoveryPub, recoveryCert))
+          ) {
+            ok = await verifySig(recoveryPub, sig, text);
+          }
+        }
+      }
+      if (!ok) return json({ error: 'forbidden' }, 403);
+      this.sql.exec(
+        `INSERT INTO devices (device_pub, cert, label, exp, revoked) VALUES (?, '{}', '', 0, 1)
+         ON CONFLICT(device_pub) DO UPDATE SET revoked=1`,
+        target
+      );
+      this.sql.exec(`DELETE FROM subs WHERE device_pub=?`, target);
+      for (const ws of this.state.getWebSockets()) {
+        const att = ws.deserializeAttachment() || {};
+        if (att.devicePub !== target) continue;
+        try {
+          ws.close(4003, 'revoked');
+        } catch {}
+      }
+      return json({ ok: true, revoked: true });
     }
 
     // ---------- Публичный список устройств (для проверки подписи владельца) ----------

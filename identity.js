@@ -3,9 +3,9 @@
 // IndexedDB) удостоверяет ключи устройств; секрет личной ссылки зашифрован
 // vault-ключом устройства. Личная ссылка: #k=<секрет>&d=<fp>, где fp — первые
 // 32 hex SHA-256 от X9.62-представления master-публичного ключа.
-import { b64u, newSecret, genP256KeyPair } from './crypto.js?v=38';
-import { kvGet, kvPut, kvDel } from './store.js?v=38';
-import { utils as secpUtils } from './vendor/secp256k1.js?v=38';
+import { b64u, newSecret, genP256KeyPair, deriveRecoveryPair } from './crypto.js?v=39';
+import { kvGet, kvPut, kvDel } from './store.js?v=39';
+import { utils as secpUtils } from './vendor/secp256k1.js?v=39';
 
 const te = new TextEncoder();
 let cached = null; // {secret, masterPub, masterPriv, fp, devicePub, devicePriv, cert, label}
@@ -112,6 +112,8 @@ export async function ensurePersonal(label = 'Владелец') {
     // master → recovery → device; chain уходит в inboxRegister как есть.
     chain: dev.chain || null,
     restored: !!rec.restored,
+    // v39: устройство привязано к профилю другого (основного) устройства.
+    linked: !!rec.linked,
     label: dev.label,
   };
   return cached;
@@ -320,4 +322,158 @@ export async function verifyChatSig(devicePubB64, sigB64, text) {
   } catch {
     return false;
   }
+}
+
+// =======================================================================
+// v39: несколько устройств одного профиля (devices.js).
+// Модель доверия (как «Связанные устройства» Signal + кросс-подпись Matrix):
+// master-ключ номера живёт на ОСНОВНОМ устройстве (невыгружаемый); любое
+// устройство профиля удостоверено сертификатом от master — напрямую или по
+// цепочке master → recovery → device (recovery-ключ из фразы
+// восстановления). Подключённое устройство получает тот же секрет номера
+// (те же входящие звонки), но master-приватника у него нет: подключать и
+// отвязывать другие устройства и менять номер может только основное
+// устройство или устройство, знающее фразу восстановления.
+// =======================================================================
+export const CERT_TTL_MS = 10 * 365 * 24 * 3600000;
+export const LINKED_CERT_LABEL = 'Устройство';
+
+export function resetIdentityCache() {
+  cached = null;
+}
+
+async function verifyRaw(pubB64, sigB64, text) {
+  return verifyChatSig(pubB64, sigB64, text);
+}
+
+// Сертификат устройства под master: прямой или по цепочке recovery.
+export async function verifyDeviceCertClient(masterPub, devicePub, cert, chain = null) {
+  if (!masterPub || !devicePub || !cert?.sig) return false;
+  if (Number(cert.exp || 0) && Number(cert.exp) < Date.now()) return false;
+  if (chain?.recoveryPub && chain?.recoveryCert?.sig) {
+    if (chain.recoveryCert.label !== 'recovery') return false;
+    const recOk = await verifyRaw(
+      masterPub,
+      chain.recoveryCert.sig,
+      deviceCertText(chain.recoveryPub, chain.recoveryCert.label, chain.recoveryCert.exp)
+    );
+    if (!recOk) return false;
+    return verifyRaw(chain.recoveryPub, cert.sig, deviceCertText(devicePub, cert.label, cert.exp));
+  }
+  return verifyRaw(masterPub, cert.sig, deviceCertText(devicePub, cert.label, cert.exp));
+}
+
+// Право администрировать профиль на ЭТОМ устройстве: master-приватник
+// (основное устройство) или seed фразы восстановления, recovery-сертификат
+// которого выдан текущим master. → {kind, sign(text), extra, issue(devPub)} | null
+export async function adminSigner() {
+  const p = await getPersonal();
+  if (!p) return null;
+  if (p.masterPriv) {
+    return {
+      kind: 'master',
+      sign: (text) => signWithKey(p.masterPriv, text),
+      extra: { masterPub: p.masterPub },
+      issue: async (devicePub) => ({
+        cert: await signDeviceCert(p.masterPriv, devicePub, LINKED_CERT_LABEL, Date.now() + CERT_TTL_MS),
+        chain: null,
+      }),
+    };
+  }
+  const st = await getRecoveryState();
+  if (!st?.seedEnc || !st?.cert?.sig || !st?.pub) return null;
+  const certOk = await verifyRaw(p.masterPub, st.cert.sig, deviceCertText(st.pub, st.cert.label, st.cert.exp));
+  if (!certOk || st.cert.label !== 'recovery') return null;
+  let pair;
+  try {
+    pair = await deriveRecoveryPair(b64u.dec(await decryptWithVault(st.seedEnc)));
+  } catch {
+    return null;
+  }
+  if (pair.pubB64 !== st.pub) return null;
+  const chain = { recoveryPub: pair.pubB64, recoveryCert: st.cert };
+  return {
+    kind: 'recovery',
+    sign: (text) => signWithKey(pair.privateKey, text),
+    extra: { masterPub: p.masterPub, recoveryPub: pair.pubB64, recoveryCert: st.cert },
+    issue: async (devicePub) => ({
+      cert: await signDeviceCert(pair.privateKey, devicePub, LINKED_CERT_LABEL, Date.now() + CERT_TTL_MS),
+      chain,
+    }),
+  };
+}
+
+// Новое подключаемое устройство: пары создаются ДО запроса привязки и
+// хранятся отдельно (devices/link-pending), пока основное не ответит.
+export async function newLinkKeys() {
+  const dev = await genP256KeyPair();
+  const ecdh = await genP256KeyPair(['deriveBits'], 'ECDH');
+  const eph = await genP256KeyPair(['deriveBits'], 'ECDH');
+  return {
+    devicePub: b64u.enc(await crypto.subtle.exportKey('raw', dev.publicKey)),
+    devicePriv: dev.privateKey,
+    ecdhPub: b64u.enc(await crypto.subtle.exportKey('raw', ecdh.publicKey)),
+    ecdhPriv: ecdh.privateKey,
+    eB: b64u.enc(await crypto.subtle.exportKey('raw', eph.publicKey)),
+    eBPriv: eph.privateKey,
+  };
+}
+
+// Установка личности, полученной от основного устройства (без masterPriv).
+export async function installLinkedIdentity({ masterPub, secret, devicePub, devicePriv, ecdhPub, ecdhPriv, cert, chain, label }) {
+  await kvPut('devices', 'self', {
+    devicePub,
+    devicePriv,
+    cert,
+    label: label || LINKED_CERT_LABEL,
+    ...(chain ? { chain } : {}),
+    linkedAt: Date.now(),
+  });
+  await kvPut('devices', 'self-ecdh', { ecdhPub, ecdhPriv });
+  await kvPut('identity', 'personal', {
+    masterPub,
+    masterPriv: null,
+    secretEnc: await encryptWithVault(secret),
+    linked: true,
+    createdAt: Date.now(),
+  });
+  cached = null;
+  return ensurePersonal();
+}
+
+// Номер сменён на другом устройстве профиля: новый master (его приватник —
+// там), новый секрет, новый сертификат этого устройства. Recovery-состояние
+// относилось к старому master — сбрасывается (как в rotatePersonal).
+export async function applyRotatedIdentity({ masterPub, secret, cert, chain }) {
+  const dev = await kvGet('devices', 'self');
+  if (!dev?.devicePriv) throw new Error('нет ключа устройства');
+  const next = { ...dev, cert };
+  if (chain) next.chain = chain;
+  else delete next.chain;
+  await kvPut('devices', 'self', next);
+  await kvPut('identity', 'personal', {
+    masterPub,
+    masterPriv: null,
+    secretEnc: await encryptWithVault(secret),
+    linked: true,
+    createdAt: Date.now(),
+    rotatedAt: Date.now(),
+  });
+  try {
+    await kvDel('identity', 'recovery');
+  } catch {}
+  cached = null;
+  return ensurePersonal();
+}
+
+// Перевыпуск сертификата ЭТОГО устройства (основным/recovery) — при смене
+// номера на основном и при восстановлении.
+export async function setOwnCert(cert, chain = null) {
+  const dev = await kvGet('devices', 'self');
+  if (!dev) return;
+  const next = { ...dev, cert };
+  if (chain) next.chain = chain;
+  else delete next.chain;
+  await kvPut('devices', 'self', next);
+  cached = null;
 }

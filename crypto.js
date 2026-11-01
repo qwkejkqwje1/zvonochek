@@ -827,6 +827,114 @@ export async function codeAddrForScheme(kind, code, scheme) {
 }
 
 // =======================================================================
+// v39: привязка нового устройства к профилю (как «Связанные устройства»
+// Signal). Новое устройство B показывает 12-значный код и QR; основное A
+// вводит код (или сканирует QR) и подтверждает. Код — 12 цифр (~40 бит);
+// из него медленным KDF (PBKDF2 300 000) выводятся ДВА адреса одноразовых
+// записей Pairing DO и два ключа AES-GCM: запрос B→A (req) и ответ A→B
+// (resp). Сервер видит только адреса и шифротекст.
+//
+// Защита от подмены сервером: (1) запрос запечатан ключом из кода — без
+// перебора кода сервер его не подделает; перебор 10^12 × 300k PBKDF2 за
+// минуты жизни запроса нереален; (2) QR несёт ещё и отпечаток (bind) ключей
+// нового устройства — сканирующее устройство сверяет его автоматически,
+// подмена исключена совсем; (3) ответ (секреты профиля) шифруется ECDH-
+// ключом из запроса (эфемерные eA/eB) с примесью материала кода; (4) оба
+// экрана показывают 4 контрольных слова — человек сверяет их глазами.
+// =======================================================================
+export const LINK_SALT = 'zv-link-v1';
+const LINK_PBKDF2_ITER = 300000;
+export const LINK_CODE_DIGITS = 12;
+
+export function newLinkCode() {
+  let out = '';
+  while (out.length < LINK_CODE_DIGITS) {
+    for (const x of crypto.getRandomValues(new Uint8Array(24))) {
+      // отбраковка 250..255 — равномерные цифры
+      if (x < 250 && out.length < LINK_CODE_DIGITS) out += String(x % 10);
+    }
+  }
+  return out;
+}
+
+export function normalizeLinkCode(s) {
+  return String(s || '').replace(/\D+/g, '');
+}
+
+export function formatLinkCode(code) {
+  return normalizeLinkCode(code).replace(/(\d{4})(?=\d)/g, '$1 ');
+}
+
+// Ссылка/QR вида #link=<12 цифр>.<bind>; bind необязателен (ручной ввод).
+export function parseLinkToken(s) {
+  const m = String(s || '').trim().match(/(?:#|&|^)link=([0-9 -]{12,20})(?:\.([A-Za-z0-9_-]{16,43}))?/);
+  const raw = m ? m[1] : String(s || '');
+  const code = normalizeLinkCode(raw);
+  if (code.length !== LINK_CODE_DIGITS) return null;
+  return { code, bind: m && m[2] ? m[2] : null };
+}
+
+/**
+ * Адреса и ключи записей привязки по коду.
+ * @returns {Promise<{req:{addr,key}, resp:{addr,key}, mix: Uint8Array}>}
+ */
+export async function linkAccess(code) {
+  const norm = normalizeLinkCode(code);
+  if (norm.length !== LINK_CODE_DIGITS) throw new Error('bad link code');
+  const base = await crypto.subtle.importKey('raw', te.encode(norm), 'PBKDF2', false, ['deriveBits']);
+  const t1 = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: te.encode(LINK_SALT), iterations: LINK_PBKDF2_ITER, hash: 'SHA-256' },
+    base,
+    256
+  );
+  const hk = await crypto.subtle.importKey('raw', t1, 'HKDF', false, ['deriveBits', 'deriveKey']);
+  const hkdf = (info) => ({ name: 'HKDF', hash: 'SHA-256', salt: te.encode(LINK_SALT), info: te.encode(info) });
+  const part = async (tag) => ({
+    addr: bytesHex(await crypto.subtle.deriveBits(hkdf('zv-link-addr-' + tag), hk, 256)),
+    key: await crypto.subtle.deriveKey(hkdf('zv-link-key-' + tag), hk, { name: 'AES-GCM', length: 256 }, false, [
+      'encrypt',
+      'decrypt',
+    ]),
+  });
+  const mix = new Uint8Array(await crypto.subtle.deriveBits(hkdf('zv-link-mix'), hk, 256));
+  return { req: await part('req'), resp: await part('resp'), mix };
+}
+
+// Канонический текст запроса (ключи нового устройства) — его хэш и есть
+// bind в QR и основа контрольных слов.
+export function linkReqText(req) {
+  return ['zv-link-req-v1', req.eB, req.devicePub, req.ecdhPub, req.label || '', req.ts || 0].join('|');
+}
+
+export async function linkBindOf(req) {
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(linkReqText(req))));
+  return b64u.enc(h.subarray(0, 16));
+}
+
+// 4 контрольных слова из словаря чата: SHA-256(код | bind). Совпадают на
+// обоих экранах, только если A получил ровно тот запрос, что создал B.
+export async function linkSasWords(code, bind) {
+  const h = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', te.encode('zv-link-sas-v1|' + normalizeLinkCode(code) + '|' + bind))
+  );
+  return [h[0], h[1], h[2], h[3]].map((x) => CHAT_WORDS[x]);
+}
+
+// Ключ ответа A→B: HKDF(ECDH(eA, eB), соль = mix кода, info с bind).
+export async function linkRespKey(myEcdhPriv, peerPubB64, mix, bind) {
+  const peer = await crypto.subtle.importKey('raw', b64u.dec(peerPubB64), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: peer }, myEcdhPriv, 256);
+  const hk = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: mix, info: te.encode('zv-link-resp-v1|' + bind) },
+    hk,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+// =======================================================================
 // v27: мессенджерные управляющие сообщения (реакции, правки, удаление,
 // закреп) — ЧИСТЫЕ функции состояния. Живут здесь, потому что chat.js при
 // импорте трогает DOM и в Node-тестах не поднимается; вся логика применения
