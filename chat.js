@@ -62,7 +62,7 @@
 //     цепочки — транзитом через 'drx'); при живой DR-сессии контент не
 //     в режиме d1 от собеседника не принимается (анти-downgrade);
 //   · сообщения ≤v30 расшифровываются статичными ключами, как раньше.
-import { CONFIG, getWorkerBase } from './config.js?v=39';
+import { CONFIG, getWorkerBase } from './config.js?v=40';
 import {
   b64u,
   newSecret,
@@ -121,7 +121,7 @@ import {
   genP256KeyPair,
   chainKeyAt,
   chainAdvanceSend,
-} from './crypto.js?v=39';
+} from './crypto.js?v=40';
 import {
   kvGet,
   kvPut,
@@ -131,10 +131,10 @@ import {
   kvDelPrefix,
   kvDelMany,
   normalizeRoomRecord,
-} from './store.js?v=39';
-import { coalesced } from './coalesce.js?v=39';
-import { plural } from './callstats.js?v=39';
-import { anonName, randomAnonName } from './anon-names.js?v=39';
+} from './store.js?v=40';
+import { coalesced } from './coalesce.js?v=40';
+import { plural } from './callstats.js?v=40';
+import { anonName, randomAnonName } from './anon-names.js?v=40';
 import {
   getChatDevice,
   getChatDeviceEcdh,
@@ -144,8 +144,8 @@ import {
   encryptWithVault,
   decryptWithVault,
   verifyDeviceCertClient,
-} from './identity.js?v=39';
-import { personKeyOf, groupPersons } from './sync-core.js?v=39';
+} from './identity.js?v=40';
+import { personKeyOf, groupPersons } from './sync-core.js?v=40';
 import {
   ChatTransportManager,
   FallbackTransport,
@@ -159,7 +159,7 @@ import {
   aggregateGcallState,
   gcallEventsFromEntries,
   shouldSweepRoom,
-} from './chat-transport.js?v=39';
+} from './chat-transport.js?v=40';
 
 const $ = (s, r = document) => r.querySelector(s);
 const te = new TextEncoder();

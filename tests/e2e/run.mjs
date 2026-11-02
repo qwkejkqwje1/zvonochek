@@ -4,7 +4,9 @@
 // журнал) и v38-сценарий «номер» (дозвон по личной ссылке, контакт из
 // журнала, смена номера, стирание данных) и v39-сценарий «профиль» (второе
 // устройство по коду: тот же номер, чаты, контакты, свои сообщения — «мои»,
-// отвязка). Скриншоты — в tests/e2e/shots при SHOTS=1.
+// отвязка), v40-сценарий «перезвон» (второй звонок без перезагрузки:
+// голос Анны доходит, эхоподавление включено). Скриншоты — в
+// tests/e2e/shots при SHOTS=1.
 //
 //   npm run worker:dev            # локальный Worker на :8787 (отдельный терминал)
 //   npm run e2e                   # CHROMIUM_PATH=… — свой Chromium, если нужно
@@ -12,7 +14,7 @@
 // Переменные: WORKER_URL (по умолчанию http://127.0.0.1:8787), PORT сайта
 // (8765 — этот Origin разрешён воркеру в «npm run worker:dev»),
 // VIEWPORTS (390x844,1440x900), CHROMIUM_PATH, SHOTS=1, ONLY=<сценарий>
-// (чат | звонок | номер | профиль), DEBUG=1 — консоль страниц в вывод.
+// (чат | звонок | номер | профиль | перезвон), DEBUG=1 — консоль страниц в вывод.
 import http from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -43,13 +45,14 @@ function serve() {
 }
 
 // ---------- помощники ----------
-async function profile(browser, base, [w, h], label, errors) {
+async function profile(browser, base, [w, h], label, errors, init = null) {
   const ctx = await browser.newContext({
     viewport: { width: w, height: h },
     deviceScaleFactor: SHOTS ? 2 : 1,
     bypassCSP: true, // CSP сайта разрешает только боевой Worker
     permissions: ['microphone', 'camera'],
   });
+  if (init) await ctx.addInitScript(init);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`${label}: ${e.message}`));
   if (process.env.DEBUG === '1') {
@@ -172,6 +175,88 @@ async function callScenario(browser, base, vp, errors) {
   // журнал звонков и статистика на вкладке «Звонки»
   assert.ok(await until(() => A.locator('.call-li').count().then((n) => n >= 1), 8000), 'звонок не попал в журнал');
   await shot(A, 'calls-tab', vp);
+  await A.context().close();
+  await B.context().close();
+}
+
+// v40: «перезвон» — Анна кладёт трубку и снова входит по ссылке без
+// перезагрузки. До v40 stopLocal() останавливал обработанный трек микрофона
+// (MediaStreamDestination), а attachMicToEngine() возвращал его же мёртвым:
+// во втором звонке Борис получал от Анны 0 байт звука.
+const pcHook = () => {
+  const O = window.RTCPeerConnection;
+  window.__pcs = [];
+  window.RTCPeerConnection = function (...a) {
+    const pc = new O(...a);
+    window.__pcs.push(pc);
+    return pc;
+  };
+  window.RTCPeerConnection.prototype = O.prototype;
+  const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  window.__aec = [];
+  navigator.mediaDevices.getUserMedia = async (c) => {
+    const st = await gum(c);
+    for (const t of st.getAudioTracks()) window.__aec.push(t.getSettings().echoCancellation);
+    return st;
+  };
+};
+// Сколько байт входящего звука пришло за ms на последнем соединённом PC.
+const audioInDelta = async (page, ms = 3000) => {
+  const bytes = () =>
+    page.evaluate(async () => {
+      const pc = (window.__pcs || []).filter((x) => x.connectionState === 'connected').pop();
+      if (!pc) return -1;
+      let n = 0;
+      (await pc.getStats()).forEach((r) => {
+        if (r.type === 'inbound-rtp' && r.kind === 'audio') n += r.bytesReceived || 0;
+      });
+      return n;
+    });
+  const a = await bytes();
+  await page.waitForTimeout(ms);
+  const b = await bytes();
+  return a < 0 || b < 0 ? -1 : b - a;
+};
+async function recallScenario(browser, base, vp, errors) {
+  const A = await profile(browser, base, vp, 'A', errors, pcHook);
+  await A.click('[data-home-tab="calls"]');
+  await A.click('#btnCreate');
+  await A.waitForSelector('#prejoin:not(.hidden)');
+  await A.fill('#name', 'Анна');
+  await A.click('#btnJoin');
+  await A.waitForSelector('#call:not(.hidden)');
+  const link = A.url();
+  const B = await profile(browser, base, vp, 'B', errors, pcHook);
+  await B.goto(link);
+  await B.waitForSelector('#prejoin:not(.hidden)');
+  await B.fill('#name', 'Борис');
+  await B.click('#btnJoin');
+  const both = async () => (await isShown(A, '#quality')) && (await isShown(B, '#quality'));
+  assert.ok(await until(both, 40000), 'звонок №1 не соединился');
+  await A.waitForTimeout(1000);
+  assert.ok((await audioInDelta(B)) > 1000, 'звонок №1: голос Анны не доходит до Бориса');
+  assert.ok(
+    (await A.evaluate(() => window.__aec)).every((v) => v !== false),
+    'эхоподавление выключено по умолчанию'
+  );
+  await A.click('#cHang');
+  await A.waitForSelector('#home:not(.hidden)');
+  await A.waitForTimeout(1500);
+  await A.click('[data-home-tab="calls"]').catch(() => {});
+  await A.fill('#homeLinkInput', link);
+  await A.click('#btnOpenLink');
+  await A.waitForSelector('#prejoin:not(.hidden)');
+  await A.waitForTimeout(800);
+  assert.equal(
+    await A.evaluate(() => window.ZVGroupAPI.local.getAudioTracks()[0]?.readyState),
+    'live',
+    'трек микрофона в лобби после перезахода мёртв'
+  );
+  await A.click('#btnJoin');
+  assert.ok(await until(both, 40000), 'звонок №2 не соединился');
+  await A.waitForTimeout(1000);
+  const rx2 = await audioInDelta(B);
+  assert.ok(rx2 > 1000, `звонок №2: голос Анны не доходит до Бориса (${rx2} байт за 3 с)`);
   await A.context().close();
   await B.context().close();
 }
@@ -454,7 +539,7 @@ const browser = await chromium.launch({
 let failed = 0;
 for (const vp of VIEWPORTS) {
   let list = [['чат', chatScenario], ['звонок', callScenario]];
-  if (vp === VIEWPORTS[0]) list.push(['номер', numberScenario], ['профиль', linkScenario]);
+  if (vp === VIEWPORTS[0]) list.push(['номер', numberScenario], ['профиль', linkScenario], ['перезвон', recallScenario]);
   if (process.env.ONLY) list = list.filter(([n]) => n === process.env.ONLY);
   for (const [name, fn] of list) {
     const errors = [];

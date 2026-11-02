@@ -1,12 +1,12 @@
-import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=39';
-import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=39';
-import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh, rotatePersonal, encryptWithVault, decryptWithVault, adminSigner, resetIdentityCache } from './identity.js?v=39';
-import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, inboxRetire, InboxListener } from './inbox.js?v=39';
-import { kvGet, kvPut, kvAll, kvDel, wipeDatabase } from './store.js?v=39';
-import { Signaling } from './signaling.js?v=39';
-import { ROUTE_SHORT, readCounters, deriveSample, bridgeSample, CallRecorder, journalDigest, plural } from './callstats.js?v=39';
-import { renderLiveStats, renderCallsDashboard, renderCallsList, renderContactsList } from './stats-ui.js?v=39';
-import { anonName, randomAnonName } from './anon-names.js?v=39';
+import { CONFIG, getWorkerBase, setWorkerBase, normalizeWorkerUrl, DEFAULT_WORKER_URL } from './config.js?v=40';
+import { newSecret, deriveRoom, safetyCode, safetyCodeBridge, b64u, seal, open as openSealed, genP256KeyPair, sha256hex } from './crypto.js?v=40';
+import { hasPersonal, getPersonal, ensurePersonal, signWithDevice, signWithKey, personalLinkOf, fpOfPubRaw, getChatDeviceEcdh, rotatePersonal, encryptWithVault, decryptWithVault, adminSigner, resetIdentityCache } from './identity.js?v=40';
+import { inboxRegister, inboxRing, inboxRingState, inboxAck, inboxAnswer, inboxCancel, inboxMissed, inboxMissedAck, inboxRetire, InboxListener } from './inbox.js?v=40';
+import { kvGet, kvPut, kvAll, kvDel, wipeDatabase } from './store.js?v=40';
+import { Signaling } from './signaling.js?v=40';
+import { ROUTE_SHORT, readCounters, deriveSample, bridgeSample, CallRecorder, journalDigest, plural } from './callstats.js?v=40';
+import { renderLiveStats, renderCallsDashboard, renderCallsList, renderContactsList } from './stats-ui.js?v=40';
+import { anonName, randomAnonName } from './anon-names.js?v=40';
 import {
   startDevices,
   hasOtherDevices,
@@ -16,10 +16,10 @@ import {
   rotateWithDevices,
   openAdminLink,
   SYNC_SETTINGS,
-} from './devices.js?v=39';
-import { VQ_CHOICES, deviceClass, captureTier, tierConstraints, rxCap, parseCap, videoEncoding, QLEVELS, audioCodecOrder, videoCodecOrder, CLASS_TEXT, sdpFirstCodec } from './media-policy.js?v=39';
+} from './devices.js?v=40';
+import { VQ_CHOICES, deviceClass, captureTier, tierConstraints, rxCap, parseCap, videoEncoding, QLEVELS, audioCodecOrder, videoCodecOrder, CLASS_TEXT, sdpFirstCodec } from './media-policy.js?v=40';
 
-export const APP_VERSION = 39;
+export const APP_VERSION = 40;
 export const APP_BUILD = '2026-11-01';
 // Версия разработки пишется из одного места: главная (бейдж и подпись),
 // экран подготовки, карточка подключения в начале звонка.
@@ -34,7 +34,7 @@ const setBtnIcon = (sel, name) => setUse((typeof sel === 'string' ? $(sel) : sel
 
 // Регистрация Service Worker для быстрого старта и работы PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js?v=39').catch(() => {});
+  navigator.serviceWorker.register('./sw.js?v=40').catch(() => {});
 }
 
 // Автообновление: если на сайте вышла новая версия, а браузер держит старую из кэша — перезагружаемся.
@@ -86,6 +86,16 @@ try {
     // остаётся одно, классическое; сохранённый выбор больше не нужен.
     localStorage.removeItem('zvSkin');
     localStorage.zvSettingsV = '39';
+  }
+  if (Number(localStorage.zvSettingsV || 0) < 40) {
+    // v40: эхоподавление (AEC) снова включено по умолчанию. Без него при
+    // громкой связи у собеседника его микрофон ловит ваш голос из динамика,
+    // и вы слышите себя с задержкой. Миграция v13 выключила AEC вместе с
+    // шумодавом и АРУ, когда тихий голос резала связка DSP + DTX + VAD-гейт;
+    // DTX и гейт по умолчанию давно выключены (v13/v14), а AEC голос не режет.
+    // Шумодав и АРУ остаются выключенными (выбор владельца), их можно включить.
+    localStorage.zvEcho = '1';
+    localStorage.zvSettingsV = '40';
   }
 } catch {}
 
@@ -154,7 +164,7 @@ const S = {
     // фраз, а после долгой паузы Opus с DTX мог «просыпаться» с задержкой.
     // Теперь чистый тракт: браузерный Opus — авто, DSP — только по явному выбору.
     noise: localStorage.zvNoise === '1',
-    echo: localStorage.zvEcho === '1',
+    echo: localStorage.zvEcho !== '0', // v40: AEC включён по умолчанию (см. миграцию v40)
     agc: localStorage.zvAgc === '1',
     comp: localStorage.zvComp === '1',
     opusTune: localStorage.zvOpusTune === '1',
@@ -479,7 +489,7 @@ function ensureAudioEngine() {
     S.remoteGainNode.connect(S.remoteAnalyser);
     S.remoteAnalyser.connect(S.remoteDest);
     // Также подключаем к системному выходу по умолчанию (если не выбран кастомный sinkId)
-    S.remoteAnalyser.connect(ctx.destination);
+    if (!VOLUME_LOCKED) S.remoteAnalyser.connect(ctx.destination);
   }
   startMeterLoop();
   return S.audioCtx;
@@ -490,12 +500,26 @@ function ensureAudioEngine() {
 // а если граф недоступен/уснул — напрямую через элемент <video id="remote">
 // (громкость до 100%). Раньше при уснувшем AudioContext звук пропадал
 // полностью и навсегда: элемент был заглушён, а граф молчал.
+// v40: на iOS volume медиаэлемента только для чтения (всегда 1), поэтому
+// «volume = 0» не глушил <video id="remote">: голос звучал дважды — из
+// элемента и из WebAudio-графа, с разной задержкой (эффект эха), а ползунок
+// громкости не работал. Глушим через muted, а на таких устройствах играем
+// только через элемент (граф остаётся для индикаторов, без выхода в динамик).
+const VOLUME_LOCKED = (() => {
+  try {
+    const a = document.createElement('audio');
+    a.volume = 0.5;
+    return a.volume !== 0.5;
+  } catch {
+    return false;
+  }
+})();
 function updateRemoteAudibility() {
   const vid = $('#remote');
   if (!vid) return;
-  const viaEngine = !!(S.audioCtx && S.audioCtx.state === 'running' && S.remoteSource);
-  vid.volume = viaEngine || S.deafened ? 0 : Math.min(1, S.audio.peerVol / 100);
-  if (S.deafened) vid.volume = 0;
+  const viaEngine = !VOLUME_LOCKED && !!(S.audioCtx && S.audioCtx.state === 'running' && S.remoteSource);
+  vid.muted = viaEngine || !!S.deafened;
+  if (!vid.muted) vid.volume = Math.min(1, S.audio.peerVol / 100);
 }
 
 // Видео собеседника. На вертикальном экране вертикальное видео близких
@@ -534,6 +558,28 @@ function recoverRemoteAudio(reason) {
   $('#remote')?.play().catch(() => {});
 }
 
+// v40: обработанный трек микрофона — единственный трек MediaStreamDestination
+// на всё время жизни страницы, его получают и звонок, и мост. До v40 его
+// останавливали stopLocal() (выход в лобби, «Назад», «Положить трубку») и
+// switchDevice() (смена микрофона), а attachMicToEngine() потом возвращал
+// ТОТ ЖЕ остановленный трек (readyState 'ended'): со второго звонка без
+// перезагрузки или после смены микрофона собеседнику уходило 0 байт звука.
+// Теперь трек не останавливаем (микрофон освобождает stop() сырого трека),
+// а если он всё-таки умер — пересоздаём destination.
+const isProcTrack = (t) => !!t && !!S.procDest && S.procDest.stream.getAudioTracks().includes(t);
+function liveProcTrack() {
+  if (!S.audioCtx || !S.gateGainNode || !S.procDest) return null;
+  let t = S.procDest.stream.getAudioTracks()[0];
+  if (!t || t.readyState === 'ended') {
+    try { S.gateGainNode.disconnect(S.procDest); } catch {}
+    S.procDest = S.audioCtx.createMediaStreamDestination();
+    S.gateGainNode.connect(S.procDest);
+    t = S.procDest.stream.getAudioTracks()[0];
+    log('Трек микрофона был остановлен — пересоздан');
+  }
+  return t || null;
+}
+
 function attachMicToEngine(rawTrack) {
   S.rawAudioTrack = rawTrack;
   const ctx = ensureAudioEngine();
@@ -544,7 +590,7 @@ function attachMicToEngine(rawTrack) {
     }
     S.micSource = ctx.createMediaStreamSource(new MediaStream([rawTrack]));
     S.micSource.connect(S.hpFilter);
-    const procTrack = S.procDest.stream.getAudioTracks()[0];
+    const procTrack = liveProcTrack();
     return procTrack || rawTrack;
   } catch {
     return rawTrack;
@@ -569,7 +615,7 @@ function attachRemoteToEngine() {
       outEl.srcObject = S.remoteDest.stream;
       outEl.setSinkId(S.dev.spk).catch(() => {});
       outEl.play().catch(() => {});
-    } else {
+    } else if (!VOLUME_LOCKED) {
       try { S.remoteAnalyser.connect(ctx.destination); } catch {}
     }
     // Приглушаем прямой звук из <video id="remote">, пока граф жив,
@@ -814,7 +860,7 @@ function stopLocal() {
     S.rawAudioTrack = null;
   }
   S.local.getTracks().forEach((t) => {
-    t.stop();
+    if (!isProcTrack(t)) t.stop(); // v40: обработанный трек живёт всю сессию
     S.local.removeTrack(t);
   });
 }
@@ -921,7 +967,7 @@ async function switchDevice(kind, id) {
     try { S.rawAudioTrack.stop(); } catch {}
   }
   if (old) {
-    old.stop();
+    if (!isProcTrack(old)) old.stop(); // v40: см. liveProcTrack()
     S.local.removeTrack(old);
   }
   const finalTrack = k === 'audio' ? attachMicToEngine(raw) : raw;
@@ -1355,6 +1401,7 @@ async function fetchTurnServers() {
 // Звук в этот момент уже держит мост, поэтому медленный подъём TURN
 // не создаёт тишины. Повторные вызовы безопасны.
 async function ensureTurnLoaded(reason = '') {
+  if (S.audio.netMode === 'bridge') return false; // v40: «только мост» — без TURN по определению
   if (S.turnLoaded || S.turnLoading) return S.hasTurn;
   S.turnLoading = true;
   try {
@@ -1373,7 +1420,7 @@ async function ensureTurnLoaded(reason = '') {
     S.ice = next;
     if (S.pc) {
       try {
-        S.pc.setConfiguration(pcConfig());
+        S.pc.setConfiguration(mainPcConfig());
         S.pc.restartIce();
       } catch {}
     }
@@ -1392,6 +1439,16 @@ const pcConfig = () => ({
   // после эскалации на TURN каждый лишний набор — лишние relay-аллокации.
   iceCandidatePoolSize: 1,
 });
+// v40: «Только мост» обещает скрыть IP (README), но основной PC собирался с
+// policy 'all' и рассылал host/srflx-кандидаты — собеседник видел ваш IP, а
+// при живом P2P голос шёл дважды (P2P + мост, мост с задержкой = эхо).
+// В режиме моста основной 1:1 PC живёт без ICE-серверов и с policy 'relay':
+// кандидатов нет, IP не уходит, голос — только мостом. В групповом звонке
+// моста нет, поэтому там (и в mesh из group.js) — обычный pcConfig().
+const mainPcConfig = () =>
+  S.audio.netMode === 'bridge' && rosterCount() <= 1
+    ? { ...pcConfig(), iceServers: [], iceTransportPolicy: 'relay' }
+    : pcConfig();
 
 // Ручная настройка Opus в SDP — ТОЛЬКО если пользователь сам включил её в
 // настройках (opusTune). По умолчанию SDP не трогаем: браузерный Opus и так
@@ -1479,7 +1536,7 @@ async function join() {
     if (!turn || !turn.length || !S.joined) return;
     S.ice = [...(S.stunOnlyIce || [{ urls: CONFIG.STUN }]), ...turn];
     if (S.pc) {
-      try { S.pc.setConfiguration(pcConfig()); } catch {}
+      try { S.pc.setConfiguration(mainPcConfig()); } catch {}
       log('TURN-креды обновлены (профилактика истечения TTL)');
     }
   }, 60 * 60 * 1000);
@@ -1528,10 +1585,15 @@ const webCodecsBridgeSupported = () =>
   typeof AudioEncoder !== 'undefined' &&
   typeof AudioDecoder !== 'undefined' &&
   typeof MediaStreamTrackProcessor !== 'undefined';
+// v40: «у меня только мост» — собеседник не тратит попытки P2P и TURN на
+// соединение, которое мы сами не поднимем (наш PC без кандидатов, см.
+// mainPcConfig). Старые версии поле просто игнорируют.
+const bridgeOnlyFlag = () => (S.audio.netMode === 'bridge' ? 1 : undefined);
+
 function hello() {
   // bc: умеем ли мы в мост 2.0 (WebCodecs) — собеседник выберет формат под нас
   // vc: 'h264' — нам выгоден аппаратный H.264 (собеседник поставит его первым)
-  S.sig?.send({ type: 'hello', name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0, vc: S.hwPref || undefined });
+  S.sig?.send({ type: 'hello', name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0, vc: S.hwPref || undefined, br: bridgeOnlyFlag() });
 }
 
 // ---------- Аварийный Аудио-Мост через Сигналинг (работает вообще без TURN и без UDP!) ----------
@@ -1618,7 +1680,7 @@ function startBridgeRecorder() {
 
 function startBridge2() {
   stopBridge2();
-  const track = S.procDest?.stream?.getAudioTracks?.()[0];
+  const track = liveProcTrack();
   if (!track) return false;
   const sampleRate = track.getSettings?.().sampleRate || 48000;
   const st = { running: true, sampleRate, frames: [], flushTimer: null, enc: null, reader: null };
@@ -1784,7 +1846,7 @@ function startBridgeRecorderV1() {
     }
     if (!S.micOn || S.deafened || !S.isSpeaking) return;
 
-    const stream = S.procDest?.stream || S.local;
+    const stream = (liveProcTrack() && S.procDest?.stream) || S.local;
     if (!stream || !stream.getAudioTracks().length) return;
     try {
       const rec = new MediaRecorder(stream, {
@@ -1921,6 +1983,15 @@ async function onSignal(m) {
     if (S.bridgeActive && rosterCount() > 1) {
       log('В комнате больше двух участников — мост отключён (групповой режим)');
       stopBridge();
+      if (S.audio.netMode === 'bridge' && S.pc) {
+        // v40: в режиме моста основной PC жил без кандидатов, а в группе
+        // моста нет — возвращаем обычный ICE, иначе основной собеседник онемеет.
+        try {
+          S.pc.setConfiguration(mainPcConfig());
+          restartIce();
+        } catch {}
+        toast('Групповой звонок: моста нет — соединение напрямую, ваш IP виден участникам', 6000);
+      }
     }
   }
   // Групповой трафик: сообщения не от основного собеседника уходят в group.js.
@@ -1955,7 +2026,7 @@ async function onSignal(m) {
       if (S.peer && typeof m.bc === 'number') S.peer.bridgeCodecs = !!m.bc;
       if (S.peer) S.peer.vc = m.vc === 'h264' ? 'h264' : '';
       if (m.type === 'hello') {
-        S.sig?.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0, vc: S.hwPref || undefined });
+        S.sig?.send({ type: 'hi', to: m.from, toInst: m.inst, name: myName(), ver: APP_VERSION, bc: webCodecsBridgeSupported() ? 1 : 0, vc: S.hwPref || undefined, br: bridgeOnlyFlag() });
       }
       if ((m.ver || 0) !== APP_VERSION && !S.verWarned && (m.type === 'hello' || m.ver)) {
         S.verWarned = true;
@@ -2056,6 +2127,7 @@ function acceptPeer(m) {
 function setPeer(m) {
   S.peer = { id: m.from, inst: m.inst, name: m.name || 'Собеседник', seen: Date.now(), vc: m.vc === 'h264' ? 'h264' : '' };
   S.polite = selfId < m.from;
+  S.peerBridgeOnly = m.br === 1;
   S.peerDialect = 'plain';
   S.gen = 0;
   S.countedOk = false;
@@ -2076,11 +2148,7 @@ function setPeer(m) {
   if (S.audio.netMode === 'relay') {
     ensureTurnLoaded('режим «только TURN» выбран заранее');
   } else if (S.audio.netMode !== 'bridge') {
-    S.turnTimer = setTimeout(() => {
-      if (S.joined && S.peer && S.pc?.connectionState !== 'connected') {
-        ensureTurnLoaded('direct не встал за 6 секунд');
-      }
-    }, 6000);
+    armTurnTimer('direct не встал за 6 секунд');
   }
   clearTimeout(S.bridgeAutoTimer);
   if (S.audio.netMode === 'bridge') {
@@ -2095,6 +2163,55 @@ function setPeer(m) {
       }
     }, 10000);
   }
+}
+
+// v40: лестница TURN смотрит на прогресс ICE, а не только на часы. До v40
+// через 6 с после «собеседник найден» TURN добавлялся, если connectionState
+// ещё не 'connected', — даже когда ICE уже нашёл прямую пару и шёл DTLS
+// или SDP собеседника ещё не доехал по медленному сигналингу. ICE restart
+// с TURN в этот момент рвал почти готовый direct, давал встречные offer'ы
+// и маршрут «TURN» там, где прямой путь работал. Теперь ждём, пока есть
+// прогресс, но не дольше deadline — потом TURN, как раньше.
+function armTurnTimer(reason, ms = 6000, deadline = Date.now() + ms + 8000, lastWhy = '') {
+  clearTimeout(S.turnTimer);
+  S.turnTimer = setTimeout(async () => {
+    const pc = S.pc;
+    if (!S.joined || !S.peer || !pc || pc.connectionState === 'connected') return;
+    if (S.peerBridgeOnly) {
+      log('TURN не включён: у собеседника режим «только мост»');
+      return;
+    }
+    const why = Date.now() < deadline ? await directInProgress(pc) : '';
+    if (S.pc !== pc || pc.connectionState === 'connected') return;
+    if (why) {
+      if (why !== lastWhy) log('TURN подождёт: ' + why);
+      armTurnTimer(reason, 2000, deadline, why);
+      return;
+    }
+    if (!remoteCandCount()) {
+      // Ни одного адреса собеседника (у него «только мост» или кандидаты
+      // потерялись): ICE не с кем проверять, и наш TURN ничего не даст.
+      log('TURN не включён: собеседник не прислал ни одного маршрута');
+      return;
+    }
+    ensureTurnLoaded(reason);
+  }, ms);
+}
+const remoteCandCount = () => Object.values(S.cands?.remote || {}).reduce((a, b) => a + b, 0);
+
+// Причина подождать с TURN (строка) или '' — прямой путь действительно не идёт.
+async function directInProgress(pc) {
+  if (!pc.remoteDescription) return 'SDP собеседника ещё не пришёл — TURN тут не поможет';
+  if (!remoteCandCount()) return 'от собеседника ещё нет ни одного маршрута';
+  const ice = pc.iceConnectionState;
+  if (ice === 'connected' || ice === 'completed') return 'ICE уже соединён, идёт DTLS';
+  try {
+    const st = await pc.getStats();
+    for (const r of st.values()) {
+      if (r.type === 'candidate-pair' && r.state === 'succeeded') return 'прямая пара уже прошла проверку';
+    }
+  } catch {}
+  return '';
 }
 
 function setPeerName(n) {
@@ -2112,7 +2229,7 @@ function newAttempt(gen) {
 }
 
 function createPC() {
-  const pc = (S.pc = new RTCPeerConnection(pcConfig()));
+  const pc = (S.pc = new RTCPeerConnection(mainPcConfig()));
   S.makingOffer = false;
   S.ignoreOffer = false;
   S.pendingCands = [];
@@ -2226,7 +2343,8 @@ function armWatchdog(pc, ms) {
       return;
     }
     // Если уже активно общаемся через Мост в режиме 'bridge', не перезапускаем PC впустую
-    if (S.bridgeActive && S.audio.netMode === 'bridge') return;
+    // (v40: и когда «только мост» у собеседника — его PC без кандидатов)
+    if (S.bridgeActive && (S.audio.netMode === 'bridge' || S.peerBridgeOnly)) return;
     const g = S.gen + 1;
     log(`WebRTC P2P не соединился за ${Math.round(ms / 1000)} с — фоновая попытка №${g + 1}`);
     hintIfNeeded();
@@ -2315,11 +2433,44 @@ function scheduleResend(pc, desc, n) {
   }, 2300);
 }
 
+// v40: копии SDP. scheduleResend повторяет описание каждые 2,3 с до ack, а
+// sendDesc досылает «полный» SDP после досбора кандидатов; плюс каждое
+// сообщение идёт сразу по нескольким каналам. Копия приходила, когда
+// оригинал уже применён: answer в stable давал InvalidStateError → «Ошибка
+// SDP» → watchdog 1,5 с → лишняя попытка, а копия offer'а запускала новое
+// пересогласование и ещё один answer. Копию узнаём по строке o= (версия
+// сессии растёт при каждом новом описании, а при досборе кандидатов — нет).
+const sdpOrigin = (sdp) => /^o=.*$/m.exec(sdp || '')?.[0] || '';
+function sdpCandInits(sdp) {
+  const out = [];
+  let idx = -1;
+  for (const line of String(sdp || '').split(/\r?\n/)) {
+    if (line.startsWith('m=')) idx++;
+    else if (idx >= 0 && line.startsWith('a=candidate:')) out.push({ candidate: line.slice(2), sdpMLineIndex: idx });
+  }
+  return out;
+}
+
 async function onDesc(desc, via) {
   const pc = S.pc;
   if (!pc) return;
   // Мгновенно подтверждаем получение SDP, чтобы собеседник знал, что канал жив
   S.sig?.send({ type: 'ack', ...to(), ackType: desc.type });
+
+  const rd = pc.remoteDescription;
+  if (rd && rd.type === desc.type && sdpOrigin(desc.sdp) && sdpOrigin(rd.sdp) === sdpOrigin(desc.sdp)) {
+    // Копия уже применённого описания: только добираем кандидатов из «полного» SDP.
+    for (const c of sdpCandInits(desc.sdp)) await pc.addIceCandidate(c).catch(() => {});
+    if (desc.type === 'offer' && pc.signalingState === 'stable' && pc.localDescription?.type === 'answer') {
+      // Собеседник повторяет offer — значит, наш answer мог потеряться: шлём его ещё раз.
+      S.sig?.send({ type: descMsgType(), ...to(), desc: { type: 'answer', sdp: tuneOpusSdp(pc.localDescription.sdp) } });
+    }
+    return;
+  }
+  if (desc.type === 'answer' && pc.signalingState !== 'have-local-offer') {
+    log('Устаревший answer пропущен (состояние ' + pc.signalingState + ')');
+    return;
+  }
 
   const collision = desc.type === 'offer' && (S.makingOffer || pc.signalingState !== 'stable');
   S.ignoreOffer = !S.polite && collision;
@@ -2439,22 +2590,25 @@ function deescalateToDirect() {
     S.turnDyn = false;
     S.ice = S.stunOnlyIce || [{ urls: CONFIG.STUN }];
     S.hasTurn = false;
-    try { S.pc.setConfiguration(pcConfig()); } catch {}
+    try { S.pc.setConfiguration(mainPcConfig()); } catch {}
     log('Смена сети: сначала снова пробуем напрямую, TURN — только если direct не встанет');
-    clearTimeout(S.turnTimer);
-    S.turnTimer = setTimeout(() => {
-      if (S.joined && S.pc?.connectionState !== 'connected') {
-        ensureTurnLoaded('после смены сети direct не встал');
-      }
-    }, 6000);
+    armTurnTimer('после смены сети direct не встал');
   }
   restartIce();
 }
 window.addEventListener('online', () => S.pc && S.callStart && deescalateToDirect());
 if (navigator.connection) {
+  // v40: 'change' приходит и на любое колебание rtt/downlink/effectiveType
+  // (в мобильной сети — постоянно), а каждый вызов делал ICE restart и
+  // сбрасывал TURN посреди рабочего звонка. Реагируем только на смену типа
+  // сети (Wi-Fi ↔ сотовая); где type не отдаётся (ПК), разрыв ловит сам ICE.
+  let netType = navigator.connection.type;
   navigator.connection.addEventListener?.('change', () => {
+    const t = navigator.connection.type;
+    if (t === netType) return;
+    netType = t;
     if (S.pc && S.callStart) {
-      log('Смена типа сети — обновляем ICE маршруты');
+      log('Смена типа сети (' + (t || '?') + ') — обновляем ICE маршруты');
       deescalateToDirect();
     }
   });
@@ -3504,11 +3658,22 @@ async function openSettingsModal() {
     S.audio.agc = sAgc.checked;
     syncAudioParams();
     if (S.rawAudioTrack) {
+      // v40: Chrome молча принимает applyConstraints для echoCancellation/
+      // noiseSuppression/autoGainControl, но обработку на живом треке не
+      // меняет (getSettings остаётся прежним) — переключатель не работал до
+      // следующего входа. Проверяем результат и при расхождении переоткрываем
+      // микрофон (с v40 это безопасно: обработанный трек не умирает).
+      let applied = false;
       try {
         await S.rawAudioTrack.applyConstraints(audioC());
-      } catch {
-        await switchDevice('mic', S.dev.mic);
-      }
+        const st = S.rawAudioTrack.getSettings?.() || {};
+        const same = (v, want) => v === undefined || (v !== false) === want;
+        applied =
+          same(st.echoCancellation, S.audio.echo) &&
+          same(st.noiseSuppression, S.audio.noise) &&
+          same(st.autoGainControl, S.audio.agc);
+      } catch {}
+      if (!applied) await switchDevice('mic', S.dev.mic);
     }
   };
   sNoise.onchange = rebuildMicConstraints;
@@ -3567,13 +3732,20 @@ async function openSettingsModal() {
     syncAudioParams();
     if (S.audio.netMode === 'bridge') {
       if (S.peer) activateBridge('Включён режим моста без TURN');
+      if (S.pc && rosterCount() <= 1) {
+        // v40: гасим прямой путь — иначе голос идёт и по P2P, и мостом
+        try {
+          S.pc.setConfiguration(mainPcConfig());
+          restartIce();
+        } catch {}
+      }
     } else if (S.audio.netMode === 'relay') {
       // «Только TURN» — единственный случай, когда TURN грузится немедленно.
       const ok = await ensureTurnLoaded('режим «только TURN» включён вручную');
       if (!ok) toast('TURN недоступен: нет серверов в config.js и в Worker. Работаем через direct + мост');
       else if (S.pc) {
         try {
-          S.pc.setConfiguration(pcConfig());
+          S.pc.setConfiguration(mainPcConfig());
           restartIce();
         } catch {}
       }
@@ -3581,7 +3753,7 @@ async function openSettingsModal() {
       if (S.pc?.connectionState === 'connected') stopBridge();
       if (S.pc) {
         try {
-          S.pc.setConfiguration(pcConfig());
+          S.pc.setConfiguration(mainPcConfig());
           restartIce();
         } catch {}
       }
