@@ -1,0 +1,54 @@
+# v41: автоматические тесты на каждый push и pull request (GitHub Actions —
+# бесплатно для публичных репозиториев, карта не нужна). Сайт (GitHub Pages)
+# и Worker этот файл не затрагивает: он только проверяет код.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Модульные и статические тесты
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  e2e:
+    name: Сквозные тесты (Chromium + локальный Worker)
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Локальный Worker (wrangler dev, Durable Objects в памяти)
+        run: |
+          npx --yes wrangler@4 dev --port 8787 --ip 127.0.0.1 --var ALLOWED_ORIGINS:http://127.0.0.1:8765 > wrangler.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8787/health > /dev/null && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8787/health
+      - name: Сквозные сценарии
+        run: CHROMIUM_PATH="$(command -v google-chrome || command -v chromium || command -v chromium-browser)" npm run e2e
+      - name: Журнал Worker
+        if: failure()
+        run: tail -n 200 wrangler.log

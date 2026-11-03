@@ -97,7 +97,7 @@ export default {
         (env.METERED_DOMAIN && (env.METERED_API_KEY || env.METERED_API_TOKEN)) ||
         (env.TURN_URLS && env.TURN_USERNAME && env.TURN_CREDENTIAL)
       );
-      return json({ ok: true, app: 'ZVONochek', v: 39, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: vapidAvailable(env), pushRepeat: true, retention: 'v38', devices: true, revoke: !!env.INBOX, linkNx: !!env.PAIRING, ts: Date.now() }, 200, cors);
+      return json({ ok: true, app: 'ZVONochek', v: 41, turn: hasTurn, inbox: !!env.INBOX, chat: !!env.CHAT_ROOMS, pair: !!env.PAIRING, alias: !!env.PAIRING, backup: !!env.PAIRING, word: !!env.PAIRING, ratchet: !!env.CHAT_ROOMS, push: vapidAvailable(env), pushRepeat: true, retention: 'v38', devices: true, revoke: !!env.INBOX, linkNx: !!env.PAIRING, owner: !!env.INBOX, pushCrypto: 'v41', ts: Date.now() }, 200, cors);
     }
 
     if (!originOk) {

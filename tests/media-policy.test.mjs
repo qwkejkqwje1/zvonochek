@@ -158,3 +158,55 @@ test('SDP: первый кодек секции — RED виден из answer, 
   assert.equal(sdpFirstCodec('v=0\r\nm=audio 9 X 111\r\na=rtpmap:111 opus/48000/2', 'audio'), 'opus');
   assert.equal(sdpFirstCodec('', 'audio'), '');
 });
+
+// v41: эхоподавление «Авто» — наушники/гарнитура → выкл, динамик и всё
+// неизвестное → вкл. Ошибка в сторону «вкл» безопасна (собеседник не
+// слышит эхо), в сторону «выкл» — нет, поэтому сомнительное = динамик.
+test('AEC «Авто»: тип выхода по названиям устройств', async () => {
+  const { audioRoute, routeOfLabel, echoWanted } = await import('../media-policy.js');
+  const dev = (kind, label, deviceId = label) => ({ kind, label, deviceId });
+  // Windows / macOS, англ. и рус.
+  assert.equal(routeOfLabel('Default - Headphones (Realtek(R) Audio)'), 'headset');
+  assert.equal(routeOfLabel('По умолчанию - Наушники (Realtek(R) Audio)'), 'headset');
+  assert.equal(routeOfLabel('Головной телефон (WH-1000XM4 Hands-Free AG Audio)'), 'headset');
+  assert.equal(routeOfLabel('Galaxy Buds2 Pro'), 'headset');
+  assert.equal(routeOfLabel('AirPods Pro — Иван'), 'headset');
+  assert.equal(routeOfLabel('Headset Earphone (HyperX Cloud II)'), 'headset');
+  assert.equal(routeOfLabel('Default - Speakers (Realtek(R) Audio)'), 'speaker');
+  assert.equal(routeOfLabel('Динамики MacBook Pro'), 'speaker');
+  assert.equal(routeOfLabel('Speakers/Headphones (Realtek(R) Audio)'), 'speaker'); // общий разъём — осторожно
+  assert.equal(routeOfLabel('Echo Cancelling Speakerphone (Jabra SPEAK 510)'), 'speaker');
+  assert.equal(routeOfLabel('LG TV (NVIDIA High Definition Audio)'), 'unknown');
+  assert.equal(routeOfLabel(''), 'unknown');
+
+  // Компьютер: решает выход по умолчанию, затем выбранный динамик.
+  const pc = [
+    dev('audioinput', 'Default - Microphone (Realtek(R) Audio)', 'default'),
+    dev('audiooutput', 'Default - Headphones (Realtek(R) Audio)', 'default'),
+    dev('audiooutput', 'Speakers (USB Audio)', 'spk2'),
+  ];
+  assert.equal(audioRoute(pc), 'headset');
+  assert.equal(audioRoute(pc, { spkId: 'spk2' }), 'speaker');
+  // Выход не узнан (HDMI, Linux «Built-in Audio») — по микрофону гарнитуры.
+  const hdmi = [dev('audioinput', 'Headset Microphone (Jabra Evolve 65)', 'default'), dev('audiooutput', 'Built-in Audio Analog Stereo', 'default')];
+  assert.equal(audioRoute(hdmi), 'headset');
+  assert.equal(audioRoute([dev('audioinput', 'Built-in Audio Analog Stereo', 'default')]), 'unknown');
+  // Метки ещё скрыты (до разрешения на микрофон) — неизвестно.
+  assert.equal(audioRoute([dev('audioinput', '', 'default'), dev('audiooutput', '', 'default')]), 'unknown');
+
+  // Android Chrome: «Headset earpiece» — разговорный динамик, а не гарнитура.
+  const phone = [dev('audioinput', 'Default', 'default'), dev('audioinput', 'Speakerphone'), dev('audioinput', 'Headset earpiece')];
+  assert.equal(audioRoute(phone), 'speaker');
+  assert.equal(audioRoute([...phone, dev('audioinput', 'Wired headset')]), 'headset');
+  assert.equal(audioRoute([...phone, dev('audioinput', 'Bluetooth headset')]), 'headset');
+  assert.equal(audioRoute([...phone, dev('audioinput', 'Bluetooth headset')], { micId: 'Speakerphone' }), 'speaker');
+  // iPhone: только микрофоны, решает название трека.
+  assert.equal(audioRoute([dev('audioinput', 'iPhone Microphone')], { micLabel: 'AirPods Pro' }), 'headset');
+  assert.equal(audioRoute([dev('audioinput', 'iPhone Microphone')]), 'unknown');
+
+  assert.equal(echoWanted('auto', 'headset'), false);
+  assert.equal(echoWanted('auto', 'speaker'), true);
+  assert.equal(echoWanted('auto', 'unknown'), true);
+  assert.equal(echoWanted('on', 'headset'), true);
+  assert.equal(echoWanted('off', 'speaker'), false);
+});

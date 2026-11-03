@@ -143,3 +143,36 @@ test('devices.js: rekey, реестр и история принимаются �
   // История переписки — только от подключившего устройства и один раз.
   assert.match(fn('processMsg'), /env\.dev === st\.addedBy && st\.histExpected && !st\.histDone/);
 });
+
+// v41: «Стереть всё» удаляет только ключи с префиксом 'zv' — origin
+// github.io общий с другими проектами аккаунта (их localStorage трогать
+// нельзя). Ключ без префикса пережил бы стирание и утёк бы в следующий
+// профиль на этом устройстве.
+test('ключи localStorage/sessionStorage начинаются с zv, общего clear() нет', () => {
+  const METHODS = new Set(['getItem', 'setItem', 'removeItem', 'clear', 'key', 'length']);
+  const bad = [];
+  for (const f of uiJs.concat('sw.js')) {
+    // комментарии не код (URL вида https:// не задеваем: перед // нет пробела)
+    const src = read(f)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|\s)\/\/.*$/gm, '$1');
+    const consts = new Map(all(/const\s+([A-Z_]+)\s*=\s*'([^']*)'/g, src).map((n) => [n, src.match(new RegExp(`const\\s+${n}\\s*=\\s*'([^']*)'`))[1]]));
+    for (const m of src.matchAll(/(?:local|session)Storage\.([A-Za-z_$][\w$]*)/g)) {
+      if (!METHODS.has(m[1]) && !m[1].startsWith('zv')) bad.push(`${f}: .${m[1]}`);
+    }
+    for (const m of src.matchAll(/(?:local|session)Storage\[([^\]]+)\]/g)) bad.push(`${f}: [${m[1]}]`);
+    for (const m of src.matchAll(/(?:local|session)Storage\.(?:getItem|setItem|removeItem)\(\s*([^,)]+)/g)) {
+      const arg = m[1].trim();
+      const lit = arg.match(/^(['"`])(.*)\1$/);
+      const key = lit ? lit[2] : consts.get(arg);
+      if (key === undefined) {
+        if (!(f === 'devices.js' && arg === 'name')) bad.push(`${f}: ключ ${arg}`);
+      } else if (!key.startsWith('zv')) bad.push(`${f}: '${key}'`);
+    }
+    if (/(?:local|session)Storage\.clear\s*\(/.test(src)) bad.push(`${f}: Storage.clear()`);
+  }
+  // devices.js: ключи синхронизируемых настроек (applySetting(name, …))
+  const sync = read('devices.js').match(/SYNC_SETTINGS\s*=\s*\[([^\]]*)\]/)[1];
+  for (const k of all(/'([^']*)'/g, sync)) if (!k.startsWith('zv')) bad.push(`devices.js: SYNC_SETTINGS '${k}'`);
+  assert.deepEqual(bad, []);
+});

@@ -5,7 +5,9 @@
 // журнала, смена номера, стирание данных) и v39-сценарий «профиль» (второе
 // устройство по коду: тот же номер, чаты, контакты, свои сообщения — «мои»,
 // отвязка), v40-сценарий «перезвон» (второй звонок без перезагрузки:
-// голос Анны доходит, эхоподавление включено). Скриншоты — в
+// голос Анны доходит, эхоподавление включено; v41 — перезвон соединяется
+// сразу, у Бориса «наушники», и в режиме «Авто» эхоподавление у него
+// выключено). Скриншоты — в
 // tests/e2e/shots при SHOTS=1.
 //
 //   npm run worker:dev            # локальный Worker на :8787 (отдельный терминал)
@@ -200,6 +202,29 @@ const pcHook = () => {
     return st;
   };
 };
+// v41: у Бориса «наушники» — названия устройств как у USB-гарнитуры на
+// Windows. В режиме «Авто» эхоподавление в наушниках выключается.
+const headphonesHook = () => {
+  const md = navigator.mediaDevices;
+  const en = md.enumerateDevices.bind(md);
+  md.enumerateDevices = async () => {
+    const list = (await en()).map((d) => ({
+      deviceId: d.deviceId,
+      groupId: d.groupId,
+      kind: d.kind,
+      label:
+        d.kind === 'audiooutput'
+          ? (d.deviceId === 'default' ? 'Default - ' : '') + 'Headphones (USB Audio)'
+          : d.kind === 'audioinput'
+            ? (d.deviceId === 'default' ? 'Default - ' : '') + 'Headset Microphone (USB Audio)'
+            : d.label,
+    }));
+    if (!list.some((d) => d.kind === 'audiooutput')) {
+      list.push({ deviceId: 'default', groupId: 'hp', kind: 'audiooutput', label: 'Default - Headphones (USB Audio)' });
+    }
+    return list;
+  };
+};
 // Сколько байт входящего звука пришло за ms на последнем соединённом PC.
 const audioInDelta = async (page, ms = 3000) => {
   const bytes = () =>
@@ -226,7 +251,7 @@ async function recallScenario(browser, base, vp, errors) {
   await A.click('#btnJoin');
   await A.waitForSelector('#call:not(.hidden)');
   const link = A.url();
-  const B = await profile(browser, base, vp, 'B', errors, pcHook);
+  const B = await profile(browser, base, vp, 'B', errors, `(${pcHook})();(${headphonesHook})();`);
   await B.goto(link);
   await B.waitForSelector('#prejoin:not(.hidden)');
   await B.fill('#name', 'Борис');
@@ -235,10 +260,11 @@ async function recallScenario(browser, base, vp, errors) {
   assert.ok(await until(both, 40000), 'звонок №1 не соединился');
   await A.waitForTimeout(1000);
   assert.ok((await audioInDelta(B)) > 1000, 'звонок №1: голос Анны не доходит до Бориса');
-  assert.ok(
-    (await A.evaluate(() => window.__aec)).every((v) => v !== false),
-    'эхоподавление выключено по умолчанию'
-  );
+  assert.ok((await audioInDelta(A)) > 1000, 'звонок №1: голос Бориса (наушники, без AEC) не доходит до Анны');
+  const aecA = await A.evaluate(() => window.__aec);
+  assert.ok(aecA.length && aecA.every((v) => v !== false), `Анна (динамик): эхоподавление должно быть включено, getSettings: ${aecA}`);
+  const aecB = await B.evaluate(() => window.__aec);
+  assert.ok(aecB.length && aecB.every((v) => v === false), `Борис (наушники, «Авто»): эхоподавление должно быть выключено, getSettings: ${aecB}`);
   await A.click('#cHang');
   await A.waitForSelector('#home:not(.hidden)');
   await A.waitForTimeout(1500);
@@ -253,7 +279,10 @@ async function recallScenario(browser, base, vp, errors) {
     'трек микрофона в лобби после перезахода мёртв'
   );
   await A.click('#btnJoin');
-  assert.ok(await until(both, 40000), 'звонок №2 не соединился');
+  // v41: перезвон соединяется сразу. До v41 собеседник принимал вернувшуюся
+  // Анну за «того же» участника и держал соединение прошлого звонка до
+  // сторожевого таймера (~20 с), а иногда Анна входила в звонок без микрофона.
+  assert.ok(await until(both, 12000), 'звонок №2 не соединился за 12 с');
   await A.waitForTimeout(1000);
   const rx2 = await audioInDelta(B);
   assert.ok(rx2 > 1000, `звонок №2: голос Анны не доходит до Бориса (${rx2} байт за 3 с)`);
@@ -319,7 +348,13 @@ async function numberScenario(browser, base, vp, errors) {
   await A.waitForSelector('#incomingCall:not(.hidden)', { timeout: 15000 });
   await A.click('#btnDecline');
   await A.waitForTimeout(800);
-  // «Стереть всё»: после перезагрузки — ни номера, ни контактов
+  // «Стереть всё»: после перезагрузки — ни номера, ни контактов.
+  // Чужие данные на общем адресе (другое приложение в соседней папке) — не трогаем.
+  await A.evaluate(async () => {
+    localStorage.setItem('tc_turn', 'keep');
+    const c = await caches.open('torrclient-keep');
+    await c.put('/__keep', new Response('keep'));
+  });
   await A.click('[data-home-tab="personal"]');
   await A.click('#btnWipeAll');
   await A.click('#dangerGo');
@@ -329,6 +364,12 @@ async function numberScenario(browser, base, vp, errors) {
     20000
   );
   assert.ok(wiped, 'localStorage не очищен: ' + (await A.textContent('#dangerNote').catch(() => '')));
+  const foreign = await A.evaluate(async () => ({
+    ls: localStorage.getItem('tc_turn'),
+    cache: (await caches.keys()).includes('torrclient-keep'),
+  }));
+  assert.equal(foreign.ls, 'keep', '«Стереть всё» удалило чужой ключ localStorage');
+  assert.ok(foreign.cache, '«Стереть всё» удалило чужой кэш');
   await A.evaluate((u) => localStorage.setItem('zvWorkerUrl', u), WORKER);
   await A.reload();
   await A.waitForFunction(() => window.__zvAppBooted);

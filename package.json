@@ -1,6 +1,6 @@
 {
   "name": "zvonochek",
-  "version": "40.0.0",
+  "version": "41.0.0",
   "private": true,
   "description": "ZVONochek — личный мессенджер и звонки со сквозным шифрованием прямо в браузере",
   "type": "module",

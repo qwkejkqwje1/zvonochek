@@ -12,9 +12,14 @@
 //   cancel:  `cancel|<topic>|<ringId>|<ts>`          (ключ звонящего)
 //   listen:  `listen|<topic>|<devicePub>|<ts>`       (ключ устройства)
 //   missed:  `missed|<topic>|<ts>`                   (ключ устройства)
-//   retire:  `retire|<topic>|<devicePub>|<ts>`       (ключ устройства, v38)
+//   retire:  `retire|<topic>|<devicePub>|<ts>`       (v38: ключ устройства;
+//            v41: только основного/восстановленного, либо master/recovery)
 //   revoke:  `revoke|<topic>|<targetDevicePub>|<ts>` (v39: master, recovery
 //            по цепочке master → recovery или сам отзываемый ключ устройства)
+//
+// v41: номер принадлежит master-ключу первой регистрации (masterFp, TOFU).
+// Регистрация под другим master отклоняется, отпечаток владельца и записи
+// об отозванных устройствах переживают стирание (/retire, автоочистка).
 import { sendPush, b64u } from './push.js';
 
 const te = new TextEncoder();
@@ -33,6 +38,17 @@ const SIG_SKEW_MS = 5 * 60_000;
 // отдельно и переживает очистку (это настройка, а не мусор).
 const IDLE_WIPE_MS = 30 * 24 * 3600_000;
 const IDLE_WIPE_PUSH_MS = 90 * 24 * 3600_000;
+// v41: метка сертификата подключённого устройства (identity.js
+// LINKED_CERT_LABEL). Метка входит в подписанный текст сертификата, подделать
+// её без master/recovery-ключа нельзя.
+const LINKED_CERT_LABEL = 'Устройство';
+const isLinkedCert = (certJson) => {
+  try {
+    return JSON.parse(certJson || '{}').label === LINKED_CERT_LABEL;
+  } catch {
+    return false;
+  }
+};
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), {
@@ -47,6 +63,10 @@ async function sha256hex(str) {
 async function fpOfPub(pubB64) {
   const h = await crypto.subtle.digest('SHA-256', b64u.dec(pubB64));
   return [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+async function sha256hexBytes(bytes) {
+  const h = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
 async function verifySig(pubB64, sigB64, text) {
   try {
@@ -131,7 +151,11 @@ export class Inbox {
     return seen + (hasSubs ? IDLE_WIPE_PUSH_MS : IDLE_WIPE_MS);
   }
   wipeIdle() {
-    for (const q of [`DELETE FROM subs`, `DELETE FROM devices`, `DELETE FROM rings`, `DELETE FROM missed`, `DELETE FROM meta`]) {
+    // v41: отпечаток владельца переживает стирание — иначе номер доставался
+    // тому, кто первым зарегистрируется после /retire или автоочистки. Записи
+    // об отозванных устройствах тоже остаются: их сертификаты от master живы
+    // (10 лет), и без записи отвязанное устройство вернулось бы на номер.
+    for (const q of [`DELETE FROM subs`, `DELETE FROM devices WHERE revoked=0`, `DELETE FROM rings`, `DELETE FROM missed`, `DELETE FROM meta WHERE k <> 'masterFp'`]) {
       try {
         this.sql.exec(q);
       } catch {}
@@ -161,6 +185,25 @@ export class Inbox {
   async isDevice(devicePub) {
     const d = this.one(`SELECT device_pub FROM devices WHERE device_pub=? AND revoked=0`, devicePub);
     return !!d;
+  }
+
+  // Подпись владельца номера над text: by:'master' — master-ключом, чей
+  // отпечаток совпадает с сохранённым masterFp; by:'recovery' — recovery-ключом
+  // из фразы восстановления, удостоверенным этим master (label 'recovery').
+  async adminSigOk({ by, sig, masterPub, recoveryPub, recoveryCert }, text) {
+    const metaFp = this.one(`SELECT v FROM meta WHERE k='masterFp'`)?.v || '';
+    if (!metaFp || !sig || typeof masterPub !== 'string') return false;
+    if ((await fpOfPub(masterPub)) !== metaFp) return false;
+    if (by === 'master') return verifySig(masterPub, sig, text);
+    if (
+      by === 'recovery' &&
+      typeof recoveryPub === 'string' &&
+      recoveryCert?.label === 'recovery' &&
+      (await verifyDeviceCert(masterPub, recoveryPub, recoveryCert))
+    ) {
+      return verifySig(recoveryPub, sig, text);
+    }
+    return false;
   }
 
   broadcast(obj, exceptDevice = null) {
@@ -230,6 +273,18 @@ export class Inbox {
         return json({ error: 'bad register' }, 400);
       }
       if ((await fpOfPub(masterPub)) !== fp) return json({ error: 'fp mismatch' }, 403);
+      // v41: номер принадлежит master-ключу первой регистрации (TOFU). До v41
+      // здесь проверялась только самосогласованность присланного: любой, кто
+      // знает личную ссылку, регистрировал своё устройство под своим master и
+      // получал чужие звонки, push и пропущенные (подробно — AUDIT-v41.md).
+      const ownerFp = this.one(`SELECT v FROM meta WHERE k='masterFp'`)?.v || '';
+      if (ownerFp && ownerFp !== fp) return json({ error: 'not owner' }, 403);
+      // chatdial-топик самоудостоверяющий: 'chatdial-' + sha256(masterPub) —
+      // его нельзя занять даже первым.
+      if (topic.startsWith('chatdial-') && topic !== 'chatdial-' + (await sha256hexBytes(b64u.dec(masterPub)))) {
+        return json({ error: 'topic mismatch' }, 403);
+      }
+      if (Number(cert.exp || 0) && Number(cert.exp) < Date.now()) return json({ error: 'cert expired' }, 403);
       // v27: два пути доверия. Обычный — cert подписан master напрямую.
       // Восстановленная личность — цепочка master → recovery → device:
       // cert устройства подписан recovery-ключом, а сам recovery удостоверен
@@ -256,6 +311,24 @@ export class Inbox {
       // даже с валидным сертификатом от master: отзыв окончательный.
       if (this.one(`SELECT device_pub FROM devices WHERE device_pub=? AND revoked=1`, devicePub)) {
         return json({ error: 'revoked' }, 403);
+      }
+      // v41, миграция: устройства, попавшие сюда до исправления под чужим
+      // master, удаляются при первой же регистрации владельца.
+      if (ownerFp) {
+        for (const d of this.all(`SELECT device_pub, cert FROM devices WHERE revoked=0`)) {
+          if (d.device_pub === devicePub) continue;
+          let c = {};
+          try {
+            c = JSON.parse(d.cert || '{}');
+          } catch {}
+          const ok = c.recovery?.pub
+            ? await verifyDeviceChain(masterPub, c.recovery.pub, c.recovery.cert, d.device_pub, c)
+            : await verifyDeviceCert(masterPub, d.device_pub, c);
+          if (!ok) {
+            this.sql.exec(`DELETE FROM subs WHERE device_pub=?`, d.device_pub);
+            this.sql.exec(`DELETE FROM devices WHERE device_pub=?`, d.device_pub);
+          }
+        }
       }
       this.sql.exec(
         `INSERT INTO devices (device_pub, cert, label, exp, revoked) VALUES (?,?,?,?,0)
@@ -297,17 +370,30 @@ export class Inbox {
     }
 
     // ---------- v38: владелец отзывает номер («Сменить номер» / «Стереть всё») ----------
-    // Подпись зарегистрированного устройства над retire|topic|devicePub|ts.
-    // Стирается всё: устройства, push-подписки, звонки, пропущенные,
-    // блок-лист и meta; WebSocket-слушатели закрываются. Дальше звонок по
-    // старой ссылке получает 404 «no owner» (см. /ring).
+    // Стираются push-подписки, действующие устройства, звонки, пропущенные и
+    // блок-лист; WebSocket-слушатели закрываются. Дальше звонок по старой
+    // ссылке получает 404 «no owner» (см. /ring).
+    // v41: погасить номер может только владелец:
+    //   • подпись зарегистрированного устройства, сертификат которого выдан
+    //     НЕ как подключённому (основное, восстановленное по фразе — так шлют
+    //     клиенты v38–v40);
+    //   • by:'master' / by:'recovery' — подпись master-ключа номера или
+    //     recovery-ключа, удостоверенного master (как в /revoke).
+    // Подключённое устройство номер не гасит, а отвязывается (/revoke by:'self').
+    // Отпечаток владельца и отозванные устройства стирание не трогает.
     if (path === '/retire' && req.method === 'POST') {
-      const { devicePub, ts, sig } = body;
-      if (!devicePub || !freshTs(ts) || !(await this.isDevice(devicePub))) {
+      const { devicePub, ts, sig, by } = body;
+      if (typeof devicePub !== 'string' || !devicePub || !sig || !freshTs(ts)) {
         return json({ error: 'bad retire' }, 403);
       }
-      if (!(await verifySig(devicePub, sig, `retire|${topic}|${devicePub}|${ts}`))) {
-        return json({ error: 'bad sig' }, 403);
+      const text = `retire|${topic}|${devicePub}|${ts}`;
+      if (by === 'master' || by === 'recovery') {
+        if (!(await this.adminSigOk(body, text))) return json({ error: 'forbidden' }, 403);
+      } else {
+        const d = this.one(`SELECT cert FROM devices WHERE device_pub=? AND revoked=0`, devicePub);
+        if (!d) return json({ error: 'bad retire' }, 403);
+        if (isLinkedCert(d.cert)) return json({ error: 'linked device' }, 403);
+        if (!(await verifySig(devicePub, sig, text))) return json({ error: 'bad sig' }, 403);
       }
       this.wipeIdle();
       try {
@@ -334,22 +420,11 @@ export class Inbox {
         return json({ error: 'bad revoke' }, 400);
       }
       const text = `revoke|${topic}|${target}|${ts}`;
-      const metaFp = this.one(`SELECT v FROM meta WHERE k='masterFp'`)?.v || '';
       let ok = false;
       if (by === 'self') {
         ok = await verifySig(target, sig, text);
-      } else if ((by === 'master' || by === 'recovery') && typeof masterPub === 'string' && metaFp) {
-        if ((await fpOfPub(masterPub)) === metaFp) {
-          if (by === 'master') {
-            ok = await verifySig(masterPub, sig, text);
-          } else if (
-            typeof recoveryPub === 'string' &&
-            recoveryCert?.label === 'recovery' &&
-            (await verifyDeviceCert(masterPub, recoveryPub, recoveryCert))
-          ) {
-            ok = await verifySig(recoveryPub, sig, text);
-          }
-        }
+      } else if (by === 'master' || by === 'recovery') {
+        ok = await this.adminSigOk({ by, sig, masterPub, recoveryPub, recoveryCert }, text);
       }
       if (!ok) return json({ error: 'forbidden' }, 403);
       this.sql.exec(

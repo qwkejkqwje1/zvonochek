@@ -44,11 +44,14 @@ async function hkdf(ikm, salt, info, len) {
 export async function encryptPushPayload({ p256dh, auth, plaintext, asKeyPair = null, salt = null }) {
   const uaPublic = b64u.dec(p256dh);
   const authSecret = b64u.dec(auth);
+  // v41: generateKey. С v20 здесь стоял несуществующий в WebCrypto
+  // crypto.subtle.generateKeyPair — в Cloudflare Workers он undefined, каждый
+  // sendPush падал TypeError, а вызывающие глотали ошибку: push о звонках и
+  // сообщениях не уходил ни разу. Тест вектора RFC подставлял asKeyPair и
+  // эту ветку не проходил (теперь её проверяет tests/push-rfc8291.test.mjs).
   const pair =
     asKeyPair ||
-    (await crypto.subtle.generateKeyPair({ name: 'ECDH', namedCurve: 'P-256' }, true, [
-      'deriveBits',
-    ]));
+    (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']));
   const asPublic = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
   const uaKey = await crypto.subtle.importKey(
     'raw',

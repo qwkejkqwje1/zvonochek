@@ -1,0 +1,5 @@
+# зависимости и локальные артефакты (в репозиторий и на сайт не нужны)
+node_modules/
+.wrangler/
+.dev.vars
+tests/e2e/shots/

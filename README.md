@@ -5,8 +5,8 @@
 открыли ссылку — и вы на связи. Всё содержимое шифруется на устройствах;
 серверы и ретрансляторы видят только шифротекст.
 
-**Сайт:** https://qwkejkqwje1.github.io/zvonochek/ · версия **v39** ·
-[что нового](CHANGELOG.md) · [выпуск и деплой](RELEASE.md) · [аудит v40](AUDIT-v40.md)
+**Сайт:** https://qwkejkqwje1.github.io/zvonochek/ · версия **v41** ·
+[что нового](CHANGELOG.md) · [выпуск и деплой](RELEASE.md) · [аудит v41](AUDIT-v41.md)
 
 ## Возможности
 
@@ -205,6 +205,9 @@ npm run e2e              # несколько браузеров: чат, зво
 - Статические тесты следят за целостностью: все `#id` из JS есть в HTML,
   иконки существуют, версии совпадают во всех файлах, Service Worker
   кэширует все модули, синтаксис укладывается в ES2020.
+- CI: `.github/workflows/ci.yml` (GitHub Actions, бесплатно для публичного
+  репозитория) на каждый push и pull request запускает `npm test`, а затем
+  e2e с локальным Worker (`wrangler dev`) и Chrome.
 - Новая версия: поднять `APP_VERSION`/`APP_BUILD` в `app.js`, `?v=` во всех
   импортах и `index.html`, `CACHE_NAME` в `sw.js`, `version.json`,
   `package.json`; `npm test` подскажет, если что-то забыто.

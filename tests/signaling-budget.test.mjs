@@ -102,3 +102,22 @@ test('MQTT: новый сокет не поднялся за 12 с — брос�
   assert.deepEqual(sig.clients, [c1]);
   sig.close();
 });
+
+// v41: закрытый сигналинг ничего не доставляет. После «Положить трубку»
+// опоздавшее сообщение (Nostr-реле досылают с задержкой, заменяемый сокет
+// живёт ещё 2 с) создавало соединение без микрофона, и в быстром
+// перезвоне собеседник нас не слышал.
+test('после close() сообщения не доставляются, в том числе уже расшифровываемые', async () => {
+  const { deriveRoom, seal } = await import('../crypto.js');
+  const room = await deriveRoom('k'.repeat(32));
+  const got = [];
+  const sig = new Signaling({ topic: room.topic, key: room.key, selfId: 'a', inst: 'i', brokers: [], relays: [], onMessage: (m) => got.push(m) });
+  const msg = (mid) => seal(room.key, { type: 'hello', from: 'b', inst: 'j', mid }, room.topic);
+  await sig._recv(await msg('m1'), 'nostr');
+  assert.equal(got.length, 1, 'открытый канал доставляет');
+  const inFlight = sig._recv(await msg('m2'), 'nostr'); // расшифровка идёт…
+  sig.close(); // …а трубку уже положили
+  await inFlight;
+  await sig._recv(await msg('m3'), 'nostr');
+  assert.deepEqual(got.map((m) => m.mid), ['m1']);
+});

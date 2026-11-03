@@ -5,9 +5,9 @@
 //   4) Публичные Nostr-реле поверх WSS (порт 443, подписанные эфемерные события)
 //   5) Публичный ntfy.sh (POST + WebSocket; «слепой» pub/sub без регистрации)
 // Каждое сообщение сжимается и шифруется AES-256-GCM; дубли отсекаются по mid.
-import { seal, open } from './crypto.js?v=40';
-import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=40';
-import { schnorr, utils } from './vendor/secp256k1.js?v=40';
+import { seal, open } from './crypto.js?v=41';
+import { ntfyTopic, ntfySubscribeUrl, parseNtfyFrame, fitsNtfy } from './ntfy.js?v=41';
+import { schnorr, utils } from './vendor/secp256k1.js?v=41';
 
 const hexs = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 const NOSTR_KIND = 29333; // эфемерные события: реле их не хранят, только пересылают
@@ -596,14 +596,16 @@ export class Signaling {
   }
 
   async _recv(raw, via) {
-    if (!raw || typeof raw !== 'string' || raw.length > 220000) return;
+    // v41: после close() ничего не доставляем — ни из сокетов, которые ещё
+    // досылают (Nostr-реле, заменяемые соединения), ни после расшифровки.
+    if (this.closed || !raw || typeof raw !== 'string' || raw.length > 220000) return;
     let m;
     try {
       m = await open(this.key, raw, this.topic);
     } catch {
       return;
     }
-    if (!m || m.from === this.selfId) return;
+    if (this.closed || !m || m.from === this.selfId) return;
     if (m.to && m.to !== this.selfId) return;
     if (m.toInst && m.toInst !== this.inst) return;
     // Раньше здесь отбрасывались пакеты старше 12 часов — при сбитых часах
