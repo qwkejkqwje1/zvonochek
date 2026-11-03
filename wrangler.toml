@@ -4,7 +4,7 @@ compatibility_date = "2025-06-01"
 workers_dev = true
 
 [vars]
-ALLOWED_ORIGINS = "https://qwkejkqwje1.github.io"
+ALLOWED_ORIGINS = "https://qwkejkqwje1.github.io,https://zvonochek.github.io"
 
 [[durable_objects.bindings]]
 name = "ROOMS"
